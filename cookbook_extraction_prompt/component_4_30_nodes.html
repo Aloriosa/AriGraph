@@ -1,0 +1,163 @@
+<html>
+    <head>
+        <meta charset="utf-8">
+        
+            <script src="lib/bindings/utils.js"></script>
+            <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/dist/vis-network.min.css" integrity="sha512-WgxfT5LWjfszlPHXRmBWHkV2eceiWTOBvrKCNbdgDYTHrT2AeLCGbF4sZlZw3UMN3WtL0tGUoIAKsu8mllg/XA==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/vis-network.min.js" integrity="sha512-LnvoEWDFrqGHlHmDD2101OrLcbsfkrzoSpvtSQtxK3RMnRV0eOkhhBN2dXHKRrUU8p2DGRTk35n4O8nWSVe1mQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+            
+        
+<center>
+<h1></h1>
+</center>
+
+<!-- <link rel="stylesheet" href="../node_modules/vis/dist/vis.min.css" type="text/css" />
+<script type="text/javascript" src="../node_modules/vis/dist/vis.js"> </script>-->
+        <link
+          href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta3/dist/css/bootstrap.min.css"
+          rel="stylesheet"
+          integrity="sha384-eOJMYsd53ii+scO/bJGFsiCZc+5NDVN2yr8+0RDqr0Ql0h+rP48ckxlpbzKgwra6"
+          crossorigin="anonymous"
+        />
+        <script
+          src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta3/dist/js/bootstrap.bundle.min.js"
+          integrity="sha384-JEW9xMcG8R+pH31jmWH6WWP0WintQrMb4s7ZOdauHnUtxwoG2vI5DkLtS3qm9Ekf"
+          crossorigin="anonymous"
+        ></script>
+
+
+        <center>
+          <h1></h1>
+        </center>
+        <style type="text/css">
+
+             #mynetwork {
+                 width: 100%;
+                 height: 600px;
+                 background-color: #ffffff;
+                 border: 1px solid lightgray;
+                 position: relative;
+                 float: left;
+             }
+
+             
+
+             
+
+             
+        </style>
+    </head>
+
+
+    <body>
+        <div class="card" style="width: 100%">
+            
+            
+            <div id="mynetwork" class="card-body"></div>
+        </div>
+
+        
+        
+
+        <script type="text/javascript">
+
+              // initialize global variables.
+              var edges;
+              var nodes;
+              var allNodes;
+              var allEdges;
+              var nodeColors;
+              var originalNodes;
+              var network;
+              var container;
+              var options, data;
+              var filter = {
+                  item : '',
+                  property : '',
+                  value : []
+              };
+
+              
+
+              
+
+              // This method is responsible for drawing the graph, returns the drawn network
+              function drawGraph() {
+                  var container = document.getElementById('mynetwork');
+
+                  
+
+                  // parsing and collecting nodes and edges from the python
+                  nodes = new vis.DataSet([{"color": "#7FFFD4", "font": {"color": "black"}, "id": "innovation cycles", "label": "innovation cycles", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "professional roles and responsibilities", "label": "professional roles and responsibilities", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "strive higher", "label": "strive higher", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "agility and flexibility", "label": "agility and flexibility", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "sustainable and inclusive development", "label": "sustainable and inclusive development", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "coherence and consistency", "label": "coherence and consistency", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "inclusive and equitable policies", "label": "inclusive and equitable policies", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "access to basic services and opportunities", "label": "access to basic services and opportunities", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "institutions and employers", "label": "institutions and employers", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "value-added solutions", "label": "value-added solutions", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "investment in human capital and knowledge", "label": "investment in human capital and knowledge", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "efficient problem solving", "label": "efficient problem solving", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "clearly for each course and program", "label": "clearly for each course and program", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "living standards and quality of life", "label": "living standards and quality of life", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "product evolution", "label": "product evolution", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "modern tools and techniques", "label": "modern tools and techniques", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "market dynamics", "label": "market dynamics", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "productivity and competitiveness", "label": "productivity and competitiveness", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "strong institutional frameworks and capacities", "label": "strong institutional frameworks and capacities", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "user feedback", "label": "user feedback", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "upskilling and reskilling", "label": "upskilling and reskilling", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "design choices", "label": "design choices", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "lifelong education and training opportunities", "label": "lifelong education and training opportunities", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "culture of innovation and excellence", "label": "culture of innovation and excellence", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "evolving needs of users", "label": "evolving needs of users", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "continuous learning and adaptation", "label": "continuous learning and adaptation", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "effective learning and assessment", "label": "effective learning and assessment", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "throughout development", "label": "throughout development", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "students to master content and skills", "label": "students to master content and skills", "shape": "point"}, {"color": "#7FFFD4", "font": {"color": "black"}, "id": "rapid change", "label": "rapid change", "shape": "point"}]);
+                  edges = new vis.DataSet([{"arrows": "to", "from": "innovation cycles", "label": "accelerates", "to": "efficient problem solving"}, {"arrows": "to", "from": "innovation cycles", "label": "generate", "to": "value-added solutions"}, {"arrows": "to", "from": "professional roles and responsibilities", "label": "prepare them for", "to": "students to master content and skills"}, {"arrows": "to", "from": "professional roles and responsibilities", "label": "require", "to": "continuous learning and adaptation"}, {"arrows": "to", "from": "strive higher", "label": "through", "to": "continuous learning and adaptation"}, {"arrows": "to", "from": "agility and flexibility", "label": "demands", "to": "rapid change"}, {"arrows": "to", "from": "agility and flexibility", "label": "enabled by", "to": "modern tools and techniques"}, {"arrows": "to", "from": "sustainable and inclusive development", "label": "supported by", "to": "strong institutional frameworks and capacities"}, {"arrows": "to", "from": "coherence and consistency", "label": "ensure", "to": "clearly for each course and program"}, {"arrows": "to", "from": "coherence and consistency", "label": "facilitate", "to": "effective learning and assessment"}, {"arrows": "to", "from": "inclusive and equitable policies", "label": "promoted by", "to": "access to basic services and opportunities"}, {"arrows": "to", "from": "access to basic services and opportunities", "label": "enhanced through", "to": "living standards and quality of life"}, {"arrows": "to", "from": "institutions and employers", "label": "provided by", "to": "lifelong education and training opportunities"}, {"arrows": "to", "from": "institutions and employers", "label": "recognize importance of", "to": "upskilling and reskilling"}, {"arrows": "to", "from": "value-added solutions", "label": "meet", "to": "evolving needs of users"}, {"arrows": "to", "from": "investment in human capital and knowledge", "label": "nurtured through", "to": "culture of innovation and excellence"}, {"arrows": "to", "from": "investment in human capital and knowledge", "label": "yields dividends in", "to": "productivity and competitiveness"}, {"arrows": "to", "from": "efficient problem solving", "label": "empower", "to": "modern tools and techniques"}, {"arrows": "to", "from": "living standards and quality of life", "label": "enhance", "to": "productivity and competitiveness"}, {"arrows": "to", "from": "product evolution", "label": "drive", "to": "evolving needs of users"}, {"arrows": "to", "from": "product evolution", "label": "reflects", "to": "market dynamics"}, {"arrows": "to", "from": "market dynamics", "label": "influence", "to": "design choices"}, {"arrows": "to", "from": "strong institutional frameworks and capacities", "label": "developed through", "to": "continuous learning and adaptation"}, {"arrows": "to", "from": "user feedback", "label": "informed by", "to": "design choices"}, {"arrows": "to", "from": "user feedback", "label": "collected iteratively", "to": "throughout development"}, {"arrows": "to", "from": "lifelong education and training opportunities", "label": "supported by", "to": "continuous learning and adaptation"}, {"arrows": "to", "from": "culture of innovation and excellence", "label": "fostered by", "to": "continuous learning and adaptation"}, {"arrows": "to", "from": "continuous learning and adaptation", "label": "keep pace with", "to": "rapid change"}, {"arrows": "to", "from": "effective learning and assessment", "label": "enable", "to": "students to master content and skills"}]);
+
+                  nodeColors = {};
+                  allNodes = nodes.get({ returnType: "Object" });
+                  for (nodeId in allNodes) {
+                    nodeColors[nodeId] = allNodes[nodeId].color;
+                  }
+                  allEdges = edges.get({ returnType: "Object" });
+                  // adding nodes and edges to the graph
+                  data = {nodes: nodes, edges: edges};
+
+                  var options = {
+    "configure": {
+        "enabled": false
+    },
+    "edges": {
+        "color": {
+            "inherit": true
+        },
+        "smooth": {
+            "enabled": true,
+            "type": "dynamic"
+        }
+    },
+    "interaction": {
+        "dragNodes": true,
+        "hideEdgesOnDrag": false,
+        "hideNodesOnDrag": false
+    },
+    "physics": {
+        "enabled": true,
+        "repulsion": {
+            "centralGravity": 0.2,
+            "damping": 0.09,
+            "nodeDistance": 200,
+            "springConstant": 0.05,
+            "springLength": 100
+        },
+        "solver": "repulsion",
+        "stabilization": {
+            "enabled": true,
+            "fit": true,
+            "iterations": 1000,
+            "onlyDynamicEdges": false,
+            "updateInterval": 50
+        }
+    }
+};
+
+                  
+
+
+                  
+
+                  network = new vis.Network(container, data, options);
+
+                  
+
+                  
+
+                  
+
+
+                  
+
+                  return network;
+
+              }
+              drawGraph();
+        </script>
+    </body>
+</html>

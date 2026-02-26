@@ -1,0 +1,163 @@
+<html>
+    <head>
+        <meta charset="utf-8">
+        
+            <script src="lib/bindings/utils.js"></script>
+            <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/dist/vis-network.min.css" integrity="sha512-WgxfT5LWjfszlPHXRmBWHkV2eceiWTOBvrKCNbdgDYTHrT2AeLCGbF4sZlZw3UMN3WtL0tGUoIAKsu8mllg/XA==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/vis-network.min.js" integrity="sha512-LnvoEWDFrqGHlHmDD2101OrLcbsfkrzoSpvtSQtxK3RMnRV0eOkhhBN2dXHKRrUU8p2DGRTk35n4O8nWSVe1mQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+            
+        
+<center>
+<h1></h1>
+</center>
+
+<!-- <link rel="stylesheet" href="../node_modules/vis/dist/vis.min.css" type="text/css" />
+<script type="text/javascript" src="../node_modules/vis/dist/vis.js"> </script>-->
+        <link
+          href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta3/dist/css/bootstrap.min.css"
+          rel="stylesheet"
+          integrity="sha384-eOJMYsd53ii+scO/bJGFsiCZc+5NDVN2yr8+0RDqr0Ql0h+rP48ckxlpbzKgwra6"
+          crossorigin="anonymous"
+        />
+        <script
+          src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta3/dist/js/bootstrap.bundle.min.js"
+          integrity="sha384-JEW9xMcG8R+pH31jmWH6WWP0WintQrMb4s7ZOdauHnUtxwoG2vI5DkLtS3qm9Ekf"
+          crossorigin="anonymous"
+        ></script>
+
+
+        <center>
+          <h1></h1>
+        </center>
+        <style type="text/css">
+
+             #mynetwork {
+                 width: 100%;
+                 height: 600px;
+                 background-color: #ffffff;
+                 border: 1px solid lightgray;
+                 position: relative;
+                 float: left;
+             }
+
+             
+
+             
+
+             
+        </style>
+    </head>
+
+
+    <body>
+        <div class="card" style="width: 100%">
+            
+            
+            <div id="mynetwork" class="card-body"></div>
+        </div>
+
+        
+        
+
+        <script type="text/javascript">
+
+              // initialize global variables.
+              var edges;
+              var nodes;
+              var allNodes;
+              var allEdges;
+              var nodeColors;
+              var originalNodes;
+              var network;
+              var container;
+              var options, data;
+              var filter = {
+                  item : '',
+                  property : '',
+                  value : []
+              };
+
+              
+
+              
+
+              // This method is responsible for drawing the graph, returns the drawn network
+              function drawGraph() {
+                  var container = document.getElementById('mynetwork');
+
+                  
+
+                  // parsing and collecting nodes and edges from the python
+                  nodes = new vis.DataSet([{"color": "#00FFFF", "font": {"color": "black"}, "id": "human rights and social justice", "label": "human rights and social justice", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "democratic values and institutions", "label": "democratic values and institutions", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "recognized by all sovereign states and governments", "label": "recognized by all sovereign states and governments", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "rule of law and human rights", "label": "rule of law and human rights", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "domestic and international funding sources", "label": "domestic and international funding sources", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "effective international institutions and mechanisms", "label": "effective international institutions and mechanisms", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "democratic participation and civic engagement", "label": "democratic participation and civic engagement", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "enhance decision-making and service delivery", "label": "enhance decision-making and service delivery", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "trust in governance and institutions", "label": "trust in governance and institutions", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "trust and legitimacy among citizens", "label": "trust and legitimacy among citizens", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "active citizenship and civic engagement", "label": "active citizenship and civic engagement", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "cooperation and coordination on global issues", "label": "cooperation and coordination on global issues", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "nations together in pursuit of global good", "label": "nations together in pursuit of global good", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "adequate financing and resource mobilization", "label": "adequate financing and resource mobilization", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "trust and collaboration among nations", "label": "trust and collaboration among nations", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "universal values and principles", "label": "universal values and principles", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "diplomatic engagement and dialogue", "label": "diplomatic engagement and dialogue", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "resilience of democratic institutions", "label": "resilience of democratic institutions", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "strong political will and adequate resources", "label": "strong political will and adequate resources", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "independent judiciary and civil society", "label": "independent judiciary and civil society", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "gender equality and women\u0027s empowerment", "label": "gender equality and women\u0027s empowerment", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "shared interests and common values", "label": "shared interests and common values", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "social cohesion and democratic values", "label": "social cohesion and democratic values", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "effective governance and democratic legitimacy", "label": "effective governance and democratic legitimacy", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "social and economic development", "label": "social and economic development", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "dialogue and deliberation among citizens", "label": "dialogue and deliberation among citizens", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "progress and achievements in human rights and development", "label": "progress and achievements in human rights and development", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "regular reporting and evaluation", "label": "regular reporting and evaluation", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "respect for human dignity and rights", "label": "respect for human dignity and rights", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "global community and civil society", "label": "global community and civil society", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "global community of shared destiny", "label": "global community of shared destiny", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "democratic governance and social order", "label": "democratic governance and social order", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "effective international organizations and regimes", "label": "effective international organizations and regimes", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "peaceful coexistence and mutual benefit", "label": "peaceful coexistence and mutual benefit", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "shared norms and rules", "label": "shared norms and rules", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "understanding and consensus-building", "label": "understanding and consensus-building", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "peaceful and prosperous societies", "label": "peaceful and prosperous societies", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "enhance quality of life and well-being", "label": "enhance quality of life and well-being", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "citizen satisfaction and trust", "label": "citizen satisfaction and trust", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "international cooperation and solidarity", "label": "international cooperation and solidarity", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "vulnerable groups and marginalized communities", "label": "vulnerable groups and marginalized communities", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "decent work and livelihoods for all", "label": "decent work and livelihoods for all", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "opportunities and resources", "label": "opportunities and resources", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "rule of law and respect for human rights", "label": "rule of law and respect for human rights", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "maintaining peace and stability in society", "label": "maintaining peace and stability in society", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "trust and cooperation among nations", "label": "trust and cooperation among nations", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "strong and independent judiciary", "label": "strong and independent judiciary", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "addressing global challenges and threats", "label": "addressing global challenges and threats", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "effective implementation of policies and programs", "label": "effective implementation of policies and programs", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "participatory platforms and mechanisms", "label": "participatory platforms and mechanisms", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "continued commitment to human dignity and social justice", "label": "continued commitment to human dignity and social justice", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "global governance and multilateralism", "label": "global governance and multilateralism", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "collective action and coordinated response", "label": "collective action and coordinated response", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "compliance with international standards", "label": "compliance with international standards", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "inclusive and equitable growth and opportunities", "label": "inclusive and equitable growth and opportunities", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "urgent and coordinated response", "label": "urgent and coordinated response", "shape": "point"}, {"color": "#00FFFF", "font": {"color": "black"}, "id": "fair and impartial administration of justice", "label": "fair and impartial administration of justice", "shape": "point"}]);
+                  edges = new vis.DataSet([{"arrows": "to", "from": "human rights and social justice", "label": "advance", "to": "gender equality and women\u0027s empowerment"}, {"arrows": "to", "from": "human rights and social justice", "label": "fundamental to", "to": "peaceful and prosperous societies"}, {"arrows": "to", "from": "democratic values and institutions", "label": "reinforce", "to": "trust and legitimacy among citizens"}, {"arrows": "to", "from": "democratic values and institutions", "label": "form bedrock of", "to": "peaceful and prosperous societies"}, {"arrows": "to", "from": "recognized by all sovereign states and governments", "label": "form basis for", "to": "international cooperation and solidarity"}, {"arrows": "to", "from": "rule of law and human rights", "label": "upholds", "to": "fair and impartial administration of justice"}, {"arrows": "to", "from": "rule of law and human rights", "label": "fundamental pillars of", "to": "democratic governance and social order"}, {"arrows": "to", "from": "domestic and international funding sources", "label": "facilitated by", "to": "adequate financing and resource mobilization"}, {"arrows": "to", "from": "effective international institutions and mechanisms", "label": "enabled by", "to": "collective action and coordinated response"}, {"arrows": "to", "from": "effective international institutions and mechanisms", "label": "built on", "to": "trust and cooperation among nations"}, {"arrows": "to", "from": "democratic participation and civic engagement", "label": "essential for", "to": "trust in governance and institutions"}, {"arrows": "to", "from": "democratic participation and civic engagement", "label": "strengthen", "to": "social cohesion and democratic values"}, {"arrows": "to", "from": "enhance decision-making and service delivery", "label": "improve", "to": "citizen satisfaction and trust"}, {"arrows": "to", "from": "trust and legitimacy among citizens", "label": "essential for", "to": "effective implementation of policies and programs"}, {"arrows": "to", "from": "active citizenship and civic engagement", "label": "sustained through", "to": "effective governance and democratic legitimacy"}, {"arrows": "to", "from": "active citizenship and civic engagement", "label": "encouraged by", "to": "participatory platforms and mechanisms"}, {"arrows": "to", "from": "cooperation and coordination on global issues", "label": "facilitate", "to": "effective international organizations and regimes"}, {"arrows": "to", "from": "nations together in pursuit of global good", "label": "bind", "to": "shared interests and common values"}, {"arrows": "to", "from": "nations together in pursuit of global good", "label": "form", "to": "global community of shared destiny"}, {"arrows": "to", "from": "adequate financing and resource mobilization", "label": "requires", "to": "effective implementation of policies and programs"}, {"arrows": "to", "from": "trust and collaboration among nations", "label": "strengthen", "to": "global governance and multilateralism"}, {"arrows": "to", "from": "universal values and principles", "label": "embodied in", "to": "continued commitment to human dignity and social justice"}, {"arrows": "to", "from": "universal values and principles", "label": "guide", "to": "international cooperation and solidarity"}, {"arrows": "to", "from": "universal values and principles", "label": "grounded in", "to": "respect for human dignity and rights"}, {"arrows": "to", "from": "diplomatic engagement and dialogue", "label": "nurtured through", "to": "trust and cooperation among nations"}, {"arrows": "to", "from": "diplomatic engagement and dialogue", "label": "promote", "to": "understanding and consensus-building"}, {"arrows": "to", "from": "resilience of democratic institutions", "label": "strengthen", "to": "social cohesion and democratic values"}, {"arrows": "to", "from": "resilience of democratic institutions", "label": "essential for", "to": "maintaining peace and stability in society"}, {"arrows": "to", "from": "strong political will and adequate resources", "label": "requires", "to": "urgent and coordinated response"}, {"arrows": "to", "from": "strong political will and adequate resources", "label": "mobilized through", "to": "international cooperation and solidarity"}, {"arrows": "to", "from": "independent judiciary and civil society", "label": "upheld by", "to": "rule of law and respect for human rights"}, {"arrows": "to", "from": "independent judiciary and civil society", "label": "protect", "to": "vulnerable groups and marginalized communities"}, {"arrows": "to", "from": "gender equality and women\u0027s empowerment", "label": "promote", "to": "decent work and livelihoods for all"}, {"arrows": "to", "from": "shared interests and common values", "label": "reinforced by", "to": "international cooperation and solidarity"}, {"arrows": "to", "from": "social cohesion and democratic values", "label": "contribute to", "to": "peaceful and prosperous societies"}, {"arrows": "to", "from": "social cohesion and democratic values", "label": "promote", "to": "dialogue and deliberation among citizens"}, {"arrows": "to", "from": "effective governance and democratic legitimacy", "label": "crucial for", "to": "citizen satisfaction and trust"}, {"arrows": "to", "from": "social and economic development", "label": "contribute to", "to": "enhance quality of life and well-being"}, {"arrows": "to", "from": "social and economic development", "label": "supported by", "to": "inclusive and equitable growth and opportunities"}, {"arrows": "to", "from": "dialogue and deliberation among citizens", "label": "facilitate", "to": "participatory platforms and mechanisms"}, {"arrows": "to", "from": "progress and achievements in human rights and development", "label": "showcase", "to": "regular reporting and evaluation"}, {"arrows": "to", "from": "progress and achievements in human rights and development", "label": "celebrated by", "to": "global community and civil society"}, {"arrows": "to", "from": "regular reporting and evaluation", "label": "demonstrated through", "to": "compliance with international standards"}, {"arrows": "to", "from": "respect for human dignity and rights", "label": "built on", "to": "peaceful and prosperous societies"}, {"arrows": "to", "from": "global community and civil society", "label": "advocate for", "to": "continued commitment to human dignity and social justice"}, {"arrows": "to", "from": "effective international organizations and regimes", "label": "supported by", "to": "global governance and multilateralism"}, {"arrows": "to", "from": "peaceful coexistence and mutual benefit", "label": "facilitate", "to": "shared norms and rules"}, {"arrows": "to", "from": "peaceful coexistence and mutual benefit", "label": "essential for", "to": "addressing global challenges and threats"}, {"arrows": "to", "from": "shared norms and rules", "label": "supported by", "to": "global governance and multilateralism"}, {"arrows": "to", "from": "peaceful and prosperous societies", "label": "founded on", "to": "rule of law and respect for human rights"}, {"arrows": "to", "from": "international cooperation and solidarity", "label": "strengthen", "to": "global governance and multilateralism"}, {"arrows": "to", "from": "vulnerable groups and marginalized communities", "label": "deserve equal access to", "to": "opportunities and resources"}, {"arrows": "to", "from": "decent work and livelihoods for all", "label": "ensure", "to": "inclusive and equitable growth and opportunities"}, {"arrows": "to", "from": "maintaining peace and stability in society", "label": "requires", "to": "strong and independent judiciary"}, {"arrows": "to", "from": "strong and independent judiciary", "label": "ensures", "to": "fair and impartial administration of justice"}, {"arrows": "to", "from": "addressing global challenges and threats", "label": "requires", "to": "collective action and coordinated response"}]);
+
+                  nodeColors = {};
+                  allNodes = nodes.get({ returnType: "Object" });
+                  for (nodeId in allNodes) {
+                    nodeColors[nodeId] = allNodes[nodeId].color;
+                  }
+                  allEdges = edges.get({ returnType: "Object" });
+                  // adding nodes and edges to the graph
+                  data = {nodes: nodes, edges: edges};
+
+                  var options = {
+    "configure": {
+        "enabled": false
+    },
+    "edges": {
+        "color": {
+            "inherit": true
+        },
+        "smooth": {
+            "enabled": true,
+            "type": "dynamic"
+        }
+    },
+    "interaction": {
+        "dragNodes": true,
+        "hideEdgesOnDrag": false,
+        "hideNodesOnDrag": false
+    },
+    "physics": {
+        "enabled": true,
+        "repulsion": {
+            "centralGravity": 0.2,
+            "damping": 0.09,
+            "nodeDistance": 200,
+            "springConstant": 0.05,
+            "springLength": 100
+        },
+        "solver": "repulsion",
+        "stabilization": {
+            "enabled": true,
+            "fit": true,
+            "iterations": 1000,
+            "onlyDynamicEdges": false,
+            "updateInterval": 50
+        }
+    }
+};
+
+                  
+
+
+                  
+
+                  network = new vis.Network(container, data, options);
+
+                  
+
+                  
+
+                  
+
+
+                  
+
+                  return network;
+
+              }
+              drawGraph();
+        </script>
+    </body>
+</html>

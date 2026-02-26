@@ -1,0 +1,1602 @@
+2026-01-29 17:30:20.731217 ======================================================================
+2026-01-29 17:30:20.731350 REPRODUCTION COOKBOOK KNOWLEDGE GRAPH BUILDER
+2026-01-29 17:30:20.731423 ======================================================================
+2026-01-29 17:30:20.731474 Paper: /home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/short-papers/test-time-model-adaptation/paper.md
+2026-01-29 17:30:20.731528 Repository: https://github.com/mr-eggplant/FOA
+2026-01-29 17:30:20.731563 Model: Qwen/Qwen3-Coder-30B-A3B-Instruct
+2026-01-29 17:30:20.731594 Device: cpu
+2026-01-29 17:30:20.731642 
+2026-01-29 17:30:20.731678 Initializing reproduction-focused knowledge graph...
+2026-01-29 17:30:23.802369 
+Prompt:
+Objective: The main goal is to meticulously gather implementation knowledge from research paper text and code to organize this data into a clear, structured knowledge graph that enables reproducing the research and avoiding common pitfalls.
+
+Guidelines for Building the Knowledge Graph:
+
+Creating Nodes and Triplets: Nodes should depict entities or concepts related to implementation. Use a structured triplet format to capture data, as follows: "subject, relation, object". For example, from "We use Adam optimizer with learning rate 0.001 and batch size 32, trained on ImageNet dataset," extract "optimizer, type, Adam; learning rate, value, 0.001; batch size, value, 32; model, trained on, ImageNet."
+Remember that you should break complex triplets like "Transformer, uses attention with 8 heads and 512 dimensions" into simple triplets like "Transformer, uses, attention", "attention, num heads, 8", "attention, dimension, 512".
+Length of your triplet should not be more than 7 words. You should extract only concrete knowledge, any assumptions must be described as hypothesis.
+For example, from phrase "This approach might improve convergence speed" you should extract "approach, might improve, convergence speed" and should not extract "approach, improves, convergence speed".
+Remember that object and subject must be atomic units while relation can be more complex and long.
+
+
+Do not miss important information. If observation describes an error and its solution, triplets should include both: 'error X, has symptom, Y', 'error X, solved by, Z'. If observation mentions a best practice, include what it prevents: 'practice X, prevents, problem Y'.
+There could be connections between distinct parts of observations. For example if there is information about a hyperparameter at the beginning and its effect on training at the end, you should extract triplets connecting them.
+Several triplets can be extracted that contain information about the same node. For example 'Adam, is type, optimizer', 'Adam, learning rate, 0.001', 'Adam, beta1, 0.9'. Do not miss this type of connections.
+
+Do not include triplets about general knowledge unrelated to implementation.
+Any experiments that are only introduced in the Appendix are not considered core contributions of the paper, and so are out of scope. This is the case even if the experiment is referenced in the main text. HOWEVER, if an experiment is described in the main body of the text, but some of the details used (e.g. details about a prompt used, or a long mathematical expression) have been put in the appendix, then that experiment is considered still in scope. The reason here is that the experiment is described in the main body of the paper.
+
+Do not use 'none' as one of the entities.
+ALWAYS include units when mentioned (%, seconds, tokens, dimensions, GB, etc.).
+
+Example of triplets you have extracted before: {example}
+
+Input to process: {observation}
+
+Remember that triplets must be extracted in format: "subject_1, relation_1, object_1; subject_2, relation_2, object_2; ..."
+
+Extracted triplets: 
+2026-01-29 17:30:23.802715 Graph initialized with reproduction-focused prompt
+2026-01-29 17:30:23.802786 
+2026-01-29 17:30:23.802846 Loading paper...
+2026-01-29 17:30:23.803555 Paper split into 14 sections
+2026-01-29 17:30:23.803639 
+2026-01-29 17:30:23.803711 ======================================================================
+2026-01-29 17:30:23.803795 2026-01-29 17:30:23.803704 SECTION 1/14: Title and Abstract
+2026-01-29 17:30:23.803853 ======================================================================
+2026-01-29 17:30:23.806178 Section split into 1 chunks
+2026-01-29 17:30:23.806280 
+2026-01-29 17:30:23.806267 Processing chunk 1/1...
+2026-01-29 17:30:23.806342 Chunk preview: Test-Time Model Adaptation with Only Forward Passes Shuaicheng Niu ^12 Chunyan Miao ^123 Guohao Chen ^4 Pengcheng Wu ^12 Peilin Zhao ^4 Test-time adaptation has proven effective in adapting a given tr...
+2026-01-29 17:30:27.515737 New 26 triplets from paper
+2026-01-29 17:30:30.407152 2026-01-29 17:30:30.407098 Extracted 26
+2026-01-29 17:30:30.407341 Sample triplets:
+2026-01-29 17:30:30.407400   - (test-time adaptation) --[proven effective]--> (adapting trained model to unseen test samples)
+2026-01-29 17:30:30.407584   - (test-time adaptation) --[handles]--> (distribution shifts)
+2026-01-29 17:30:30.407630   - (models) --[deployed on]--> (resource-limited devices)
+2026-01-29 17:30:30.407674 
+2026-01-29 17:30:30.407712 Section summary:
+2026-01-29 17:30:30.407748   - Triplets extracted: 26
+2026-01-29 17:30:30.407785   - Total triplets in graph: 26
+2026-01-29 17:30:30.407830   - Processing time: 6.60 seconds
+2026-01-29 17:30:30.407871   - API cost so far: $0.0188
+2026-01-29 17:30:30.407908 
+2026-01-29 17:30:30.407977 ======================================================================
+2026-01-29 17:30:30.408024 2026-01-29 17:30:30.407972 SECTION 2/14: 1. Introduction
+2026-01-29 17:30:30.408061 ======================================================================
+2026-01-29 17:30:30.409332 Section split into 3 chunks
+2026-01-29 17:30:30.409437 
+2026-01-29 17:30:30.409416 Processing chunk 1/3...
+2026-01-29 17:30:30.409494 Chunk preview: Deep neural networks often struggle to generalize when testing data encounter unseen corruptions or are drawn from ^1 College of Computing and Data Science, Nanyang Technological University, Singapore...
+2026-01-29 17:30:32.473223 New 15 triplets from paper
+2026-01-29 17:30:35.130287 2026-01-29 17:30:35.130222 Extracted 15
+2026-01-29 17:30:35.130603 Sample triplets:
+2026-01-29 17:30:35.130672   - (Test-Time Adaptation) --[addresses]--> (distribution shifts)
+2026-01-29 17:30:35.130727   - (gradient-free methods) --[adapt]--> (batch normalization statistics)
+2026-01-29 17:30:35.130792   - (gradient-free methods) --[correct]--> (output probabilities)
+2026-01-29 17:30:35.130854 
+2026-01-29 17:30:35.130844 Processing chunk 2/3...
+2026-01-29 17:30:35.130909 Chunk preview: These methods, which avoid backpropagation and do not alter the original model weights, inherently reduce the risk of forgetting on source domain. However, their limited learning capacity, primarily s...
+2026-01-29 17:30:40.041779 New 37 triplets from paper
+2026-01-29 17:30:46.710533 2026-01-29 17:30:46.710482 Extracted 37
+2026-01-29 17:30:46.710766 Sample triplets:
+2026-01-29 17:30:46.710823   - (methods) --[avoid]--> (backpropagation)
+2026-01-29 17:30:46.710864   - (methods) --[do not alter]--> (model weights)
+2026-01-29 17:30:46.710899   - (methods) --[reduce risk of]--> (forgetting)
+2026-01-29 17:30:46.710946 
+2026-01-29 17:30:46.710939 Processing chunk 3/3...
+2026-01-29 17:30:46.710985 Chunk preview: However, naively applying CMA in the TTA setting is infeasible, as it is hard for CMA to handle ultra-high dimensional optimization problems (e.g., deep model training) and it relies on supervised lea...
+2026-01-29 17:30:51.978519 New 35 triplets from paper
+2026-01-29 17:30:56.329412 2026-01-29 17:30:56.329312 Extracted 35
+2026-01-29 17:30:56.329811 Sample triplets:
+2026-01-29 17:30:56.329876   - (prompt) --[inserted at]--> (test time)
+2026-01-29 17:30:56.329929   - (CMA) --[infeasible in]--> (TTA setting)
+2026-01-29 17:30:56.329993   - (CMA) --[handles]--> (ultra-high dimensional optimization problems)
+2026-01-29 17:30:56.330063 
+2026-01-29 17:30:56.330104 Section summary:
+2026-01-29 17:30:56.330141   - Triplets extracted: 87
+2026-01-29 17:30:56.330198   - Total triplets in graph: 113
+2026-01-29 17:30:56.330261   - Processing time: 25.92 seconds
+2026-01-29 17:30:56.330307   - API cost so far: $0.0873
+2026-01-29 17:30:56.330350 
+2026-01-29 17:30:56.330521 ======================================================================
+2026-01-29 17:30:56.330567 2026-01-29 17:30:56.330512 SECTION 3/14: 2. Preliminary and Problem Statement
+2026-01-29 17:30:56.330602 ======================================================================
+2026-01-29 17:30:56.331607 Section split into 2 chunks
+2026-01-29 17:30:56.331715 
+2026-01-29 17:30:56.331693 Processing chunk 1/2...
+2026-01-29 17:30:56.331762 Chunk preview: We briefly revisit ViT and TTA in this section for the convenience of our method presentation and put detailed related work discussions into Appendix A due to page limits. Vision Transformer (ViT) (Do...
+2026-01-29 17:30:58.811341 New 21 triplets from paper
+2026-01-29 17:31:00.711014 2026-01-29 17:31:00.710955 Extracted 21
+2026-01-29 17:31:00.711292 Sample triplets:
+2026-01-29 17:31:00.711363   - (ViT) --[is type]--> (transformer-based vision model)
+2026-01-29 17:31:00.711420   - (ViT) --[has]--> (N layers)
+2026-01-29 17:31:00.711470   - (ViT) --[uses]--> (patch embeddings)
+2026-01-29 17:31:00.711536 
+2026-01-29 17:31:00.711520 Processing chunk 2/2...
+2026-01-29 17:31:00.711589 Chunk preview: In practical applications, deep models are frequently deployed on devices with limited resources, such as smartphones and embodied agents, and sometimes are even deployed after quantization or hard co...
+2026-01-29 17:31:01.931481 New 10 triplets from paper
+2026-01-29 17:31:02.842308 2026-01-29 17:31:02.842269 Extracted 10
+2026-01-29 17:31:02.842503 Sample triplets:
+2026-01-29 17:31:02.842555   - (TTA methods) --[require]--> (backward computation)
+2026-01-29 17:31:02.842597   - (SAR) --[type]--> (TTA method)
+2026-01-29 17:31:02.842634   - (MEMO) --[type]--> (TTA method)
+2026-01-29 17:31:02.842675 
+2026-01-29 17:31:02.842712 Section summary:
+2026-01-29 17:31:02.842746   - Triplets extracted: 31
+2026-01-29 17:31:02.842780   - Total triplets in graph: 144
+2026-01-29 17:31:02.842824   - Processing time: 6.51 seconds
+2026-01-29 17:31:02.842860   - API cost so far: $0.1171
+2026-01-29 17:31:02.842893 
+2026-01-29 17:31:02.842953 ======================================================================
+2026-01-29 17:31:02.842993 2026-01-29 17:31:02.842948 SECTION 4/14: 3. Approach
+2026-01-29 17:31:02.843026 ======================================================================
+2026-01-29 17:31:02.844670 Section split into 4 chunks
+2026-01-29 17:31:02.844762 
+2026-01-29 17:31:02.844755 Processing chunk 1/4...
+2026-01-29 17:31:02.844817 Chunk preview: In this paper, we propose a novel test-time ForwardOptimization Adaptation (FOA) method, which is also model updating-free, to boost the practicality of test-time adaptation in various real-world scen...
+2026-01-29 17:31:06.714046 New 31 triplets from paper
+2026-01-29 17:31:09.013001 2026-01-29 17:31:09.012969 Extracted 31
+2026-01-29 17:31:09.013185 Sample triplets:
+2026-01-29 17:31:09.013237   - (FOA) --[type]--> (test-time adaptation method)
+2026-01-29 17:31:09.013278   - (FOA) --[updates]--> (prompt)
+2026-01-29 17:31:09.013315   - (FOA) --[uses]--> (derivative-free optimizer)
+2026-01-29 17:31:09.013357 
+2026-01-29 17:31:09.013350 Processing chunk 2/4...
+2026-01-29 17:31:09.013395 Chunk preview: Calculate fitness value v_k per Eqn. (5). end for Update m^(t), ^(t), ^(t) according to \v_k\_k=1^K using the CMA-ES algorithm (Hansen, 2016). Select final Y_t from \Y_t^k\_k=1^K with best v_k. end fo...
+2026-01-29 17:31:12.809735 New 29 triplets from paper
+2026-01-29 17:31:15.622752 2026-01-29 17:31:15.622673 Extracted 29
+2026-01-29 17:31:15.623013 Sample triplets:
+2026-01-29 17:31:15.623084   - (fitness function) --[type]--> (unsupervised)
+2026-01-29 17:31:15.623146   - (CMA-ES) --[algorithm]--> (optimization)
+2026-01-29 17:31:15.623194   - (CMA-ES) --[uses]--> (fitness value)
+2026-01-29 17:31:15.623250 
+2026-01-29 17:31:15.623240 Processing chunk 3/4...
+2026-01-29 17:31:15.623333 Chunk preview: Before TTA, we first collect a small set of source in-distribution samples D_S=\x_q\_q=1^Q and feed them into the model to obtain the corresponding CLS tokens \e_i^0\_i=1^N. Then, we calculate the mea...
+2026-01-29 17:31:19.213850 New 24 triplets from paper
+2026-01-29 17:31:21.453349 2026-01-29 17:31:21.453309 Extracted 24
+2026-01-29 17:31:21.453586 Sample triplets:
+2026-01-29 17:31:21.453652   - (source in-distribution samples) --[set size]--> (32)
+2026-01-29 17:31:21.453705   - (ImageNet) --[dataset size]--> (32 samples)
+2026-01-29 17:31:21.453755   - (CLS tokens) --[obtained from]--> (model)
+2026-01-29 17:31:21.453811 
+2026-01-29 17:31:21.453802 Processing chunk 4/4...
+2026-01-29 17:31:21.453877 Chunk preview: Back-to-Source Activation Shifting In this section, we propose a "back-to-source activation shifting mechanism" to further boost the adaptation performance at the feature level, in cases of the above ...
+2026-01-29 17:31:23.734731 New 14 triplets from paper
+2026-01-29 17:31:25.421408 2026-01-29 17:31:25.421363 Extracted 14
+2026-01-29 17:31:25.421650 Sample triplets:
+2026-01-29 17:31:25.421716   - (back-to-source activation shifting) --[mechanism type]--> (feature level enhancement)
+2026-01-29 17:31:25.421770   - (back-to-source activation shifting) --[avoids]--> (backpropagation)
+2026-01-29 17:31:25.421820   - (CLS feature) --[layer]--> (N-th)
+2026-01-29 17:31:25.421875 
+2026-01-29 17:31:25.421925 Section summary:
+2026-01-29 17:31:25.422000   - Triplets extracted: 98
+2026-01-29 17:31:25.422052   - Total triplets in graph: 241
+2026-01-29 17:31:25.422113   - Processing time: 22.58 seconds
+2026-01-29 17:31:25.422167   - API cost so far: $0.1988
+2026-01-29 17:31:25.422214 
+2026-01-29 17:31:25.422334 ======================================================================
+2026-01-29 17:31:25.422392 2026-01-29 17:31:25.422328 SECTION 5/14: 4. Experiments
+2026-01-29 17:31:25.422439 ======================================================================
+2026-01-29 17:31:25.425112 Section split into 8 chunks
+2026-01-29 17:31:25.425201 
+2026-01-29 17:31:25.425193 Processing chunk 1/8...
+2026-01-29 17:31:25.425241 Chunk preview: Datasets and Models. We conduct experiments on four benchmarks for OOD generalization, i.e., ImageNetC (Hendrycks \& Dietterich, 2019) (contains corrupted images in 15 types of 4 main categories and e...
+2026-01-29 17:31:32.843054 New 47 triplets from paper
+2026-01-29 17:31:37.211968 2026-01-29 17:31:37.211930 Extracted 48
+2026-01-29 17:31:37.212187 Sample triplets:
+2026-01-29 17:31:37.212240   - (ImageNetC) --[contains]--> (15 types)
+2026-01-29 17:31:37.212281   - (ImageNetC) --[has]--> (4 main categories)
+2026-01-29 17:31:37.212316   - (ImageNetC) --[has]--> (5 severity levels per type)
+2026-01-29 17:31:37.212357 
+2026-01-29 17:31:37.212349 Processing chunk 2/8...
+2026-01-29 17:31:37.212393 Chunk preview: 2) Expected Calibration Error (ECE) (\%, ) measures the difference between predicted probabilities and actual outcomes in a probabilistic model (Naeini et al., 2015). ECE is important to evaluate the ...
+2026-01-29 18:01:38.786763 Error processing chunk: Request timed out.
+2026-01-29 23:09:57.042725 ======================================================================
+2026-01-29 23:09:57.042849 REPRODUCTION COOKBOOK KNOWLEDGE GRAPH BUILDER
+2026-01-29 23:09:57.042909 ======================================================================
+2026-01-29 23:09:57.042961 Paper: /home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/short-papers/test-time-model-adaptation/paper.md
+2026-01-29 23:09:57.043003 Repository: https://github.com/mr-eggplant/FOA
+2026-01-29 23:09:57.043039 Model: Qwen/Qwen3-Coder-30B-A3B-Instruct
+2026-01-29 23:09:57.043073 Device: cpu
+2026-01-29 23:09:57.043122 
+2026-01-29 23:09:57.043162 Initializing reproduction-focused knowledge graph...
+2026-01-29 23:09:58.923096 
+Prompt:
+Objective: The main goal is to meticulously gather implementation knowledge from research paper text and code to organize this data into a clear, structured knowledge graph that enables reproducing the research and avoiding common pitfalls.
+
+Guidelines for Building the Knowledge Graph:
+
+Creating Nodes and Triplets: Nodes should depict entities or concepts related to implementation. Use a structured triplet format to capture data, as follows: "subject, relation, object". For example, from "We use Adam optimizer with learning rate 0.001 and batch size 32, trained on ImageNet dataset," extract "optimizer, type, Adam; learning rate, value, 0.001; batch size, value, 32; model, trained on, ImageNet."
+Remember that you should break complex triplets like "Transformer, uses attention with 8 heads and 512 dimensions" into simple triplets like "Transformer, uses, attention", "attention, num heads, 8", "attention, dimension, 512".
+Length of your triplet should not be more than 7 words. You should extract only concrete knowledge, any assumptions must be described as hypothesis.
+For example, from phrase "This approach might improve convergence speed" you should extract "approach, might improve, convergence speed" and should not extract "approach, improves, convergence speed".
+Remember that object and subject must be atomic units while relation can be more complex and long.
+
+
+Do not miss important information. If observation describes an error and its solution, triplets should include both: 'error X, has symptom, Y', 'error X, solved by, Z'. If observation mentions a best practice, include what it prevents: 'practice X, prevents, problem Y'.
+There could be connections between distinct parts of observations. For example if there is information about a hyperparameter at the beginning and its effect on training at the end, you should extract triplets connecting them.
+Several triplets can be extracted that contain information about the same node. For example 'Adam, is type, optimizer', 'Adam, learning rate, 0.001', 'Adam, beta1, 0.9'. Do not miss this type of connections.
+
+Do not include triplets about general knowledge unrelated to implementation.
+Any experiments that are only introduced in the Appendix are not considered core contributions of the paper, and so are out of scope. This is the case even if the experiment is referenced in the main text. HOWEVER, if an experiment is described in the main body of the text, but some of the details used (e.g. details about a prompt used, or a long mathematical expression) have been put in the appendix, then that experiment is considered still in scope. The reason here is that the experiment is described in the main body of the paper.
+
+Do not use 'none' as one of the entities.
+ALWAYS include units when mentioned (%, seconds, tokens, dimensions, GB, etc.).
+
+Example of triplets you have extracted before: {example}
+
+Input to process: {observation}
+
+Remember that triplets must be extracted in format: "subject_1, relation_1, object_1; subject_2, relation_2, object_2; ..."
+
+Extracted triplets: 
+2026-01-29 23:09:58.923295 Graph initialized with reproduction-focused prompt
+2026-01-29 23:09:58.923342 
+2026-01-29 23:09:58.923379 ======================================================================
+2026-01-29 23:09:58.923412 PHASE 2: PROCESSING REPOSITORY CODE
+2026-01-29 23:09:58.923458 ======================================================================
+2026-01-29 23:09:58.923524 Cloning https://github.com/mr-eggplant/FOA...
+2026-01-29 23:09:59.998539 Repository cloned to cookbook_per_section_short_triplets_general_prompt_with_code/test-time-model-adaptation/repo
+2026-01-29 23:09:59.998691 
+Collecting code files...
+2026-01-29 23:09:59.999019 Found 0 important code files to process
+2026-01-29 23:09:59.999109 
+2026-01-29 23:09:59.999184 ======================================================================
+2026-01-29 23:09:59.999237 REPRODUCTION COOKBOOK ANALYSIS
+2026-01-29 23:09:59.999301 ======================================================================
+2026-01-29 23:09:59.999407 Total processing time: 2.96 seconds
+2026-01-29 23:09:59.999470 Total API cost: $0.0000
+2026-01-29 23:09:59.999506 Total triplets extracted: 0
+2026-01-29 23:09:59.999542 Unique components/concepts: 0
+2026-01-29 23:09:59.999584 
+2026-01-29 23:09:59.999634 Top 15 most connected components (key implementation elements):
+2026-01-29 23:09:59.999667 
+2026-01-29 23:09:59.999729 Top 15 relation types:
+2026-01-29 23:09:59.999761 
+2026-01-29 23:09:59.999935 Reproduction cookbook saved to graph_data.json
+2026-01-29 23:10:00.000463 ======================================================================
+2026-01-29 23:10:00.000559 REPRODUCTION COOKBOOK COMPLETE
+2026-01-29 23:10:00.000619 ======================================================================
+2026-01-29 23:10:00.000671 
+2026-01-29 23:10:00.000711 This knowledge graph can guide:
+2026-01-29 23:10:00.000747   1. Setting up the implementation environment
+2026-01-29 23:10:00.000797   2. Configuring hyperparameters correctly
+2026-01-29 23:10:00.000846   3. Understanding the training procedure
+2026-01-29 23:10:00.000910   4. Reproducing experimental results
+2026-01-29 23:10:00.000942   5. Navigating the codebase at: https://github.com/mr-eggplant/FOA
+2026-01-29 23:14:15.904534 ======================================================================
+2026-01-29 23:14:15.904677 REPRODUCTION COOKBOOK KNOWLEDGE GRAPH BUILDER
+2026-01-29 23:14:15.904739 ======================================================================
+2026-01-29 23:14:15.904791 Paper: /home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/short-papers/test-time-model-adaptation/paper.md
+2026-01-29 23:14:15.904832 Repository: https://github.com/mr-eggplant/FOA
+2026-01-29 23:14:15.904869 Model: Qwen/Qwen3-Coder-30B-A3B-Instruct
+2026-01-29 23:14:15.904902 Device: cpu
+2026-01-29 23:14:15.904941 
+2026-01-29 23:14:15.904995 Initializing reproduction-focused knowledge graph...
+2026-01-29 23:14:18.217561 
+Prompt:
+Objective: The main goal is to meticulously gather implementation knowledge from research paper text and code to organize this data into a clear, structured knowledge graph that enables reproducing the research and avoiding common pitfalls.
+
+Guidelines for Building the Knowledge Graph:
+
+Creating Nodes and Triplets: Nodes should depict entities or concepts related to implementation. Use a structured triplet format to capture data, as follows: "subject, relation, object". For example, from "We use Adam optimizer with learning rate 0.001 and batch size 32, trained on ImageNet dataset," extract "optimizer, type, Adam; learning rate, value, 0.001; batch size, value, 32; model, trained on, ImageNet."
+Remember that you should break complex triplets like "Transformer, uses attention with 8 heads and 512 dimensions" into simple triplets like "Transformer, uses, attention", "attention, num heads, 8", "attention, dimension, 512".
+Length of your triplet should not be more than 7 words. You should extract only concrete knowledge, any assumptions must be described as hypothesis.
+For example, from phrase "This approach might improve convergence speed" you should extract "approach, might improve, convergence speed" and should not extract "approach, improves, convergence speed".
+Remember that object and subject must be atomic units while relation can be more complex and long.
+
+
+Do not miss important information. If observation describes an error and its solution, triplets should include both: 'error X, has symptom, Y', 'error X, solved by, Z'. If observation mentions a best practice, include what it prevents: 'practice X, prevents, problem Y'.
+There could be connections between distinct parts of observations. For example if there is information about a hyperparameter at the beginning and its effect on training at the end, you should extract triplets connecting them.
+Several triplets can be extracted that contain information about the same node. For example 'Adam, is type, optimizer', 'Adam, learning rate, 0.001', 'Adam, beta1, 0.9'. Do not miss this type of connections.
+
+Do not include triplets about general knowledge unrelated to implementation.
+Any experiments that are only introduced in the Appendix are not considered core contributions of the paper, and so are out of scope. This is the case even if the experiment is referenced in the main text. HOWEVER, if an experiment is described in the main body of the text, but some of the details used (e.g. details about a prompt used, or a long mathematical expression) have been put in the appendix, then that experiment is considered still in scope. The reason here is that the experiment is described in the main body of the paper.
+
+Do not use 'none' as one of the entities.
+ALWAYS include units when mentioned (%, seconds, tokens, dimensions, GB, etc.).
+
+Example of triplets you have extracted before: {example}
+
+Input to process: {observation}
+
+Remember that triplets must be extracted in format: "subject_1, relation_1, object_1; subject_2, relation_2, object_2; ..."
+
+Extracted triplets: 
+2026-01-29 23:14:18.217769 Graph initialized with reproduction-focused prompt
+2026-01-29 23:14:18.217820 
+2026-01-29 23:14:18.217859 ======================================================================
+2026-01-29 23:14:18.217925 PHASE 2: PROCESSING REPOSITORY CODE
+2026-01-29 23:14:18.218007 ======================================================================
+2026-01-29 23:14:18.218098 Cloning https://github.com/mr-eggplant/FOA...
+2026-01-29 23:14:19.288609 Repository cloned to cookbook_per_section_short_triplets_general_prompt_with_code/test-time-model-adaptation/repo
+2026-01-29 23:14:19.288815 
+Collecting code files...
+2026-01-29 23:14:19.291829 Found 35 important code files to process
+2026-01-29 23:14:19.291915 
+2026-01-29 23:14:19.291986 
+2026-01-29 23:14:19.291979 Processing file 1/35: main.py
+2026-01-29 23:14:19.292617   3 code chunks extracted
+2026-01-29 23:14:21.541388 New 19 triplets from code
+2026-01-29 23:14:24.157667 New 6 triplets from code
+2026-01-29 23:14:25.310261 New 6 triplets from code
+2026-01-29 23:14:25.936019 
+2026-01-29 23:14:25.936253 File 0/35 processing complete: 31 triplets extracted
+2026-01-29 23:14:25.936316 Total cost so far: $0.0312
+2026-01-29 23:14:25.936361 
+2026-01-29 23:14:25.936414 
+2026-01-29 23:14:25.936407 Processing file 2/35: main.sh
+2026-01-29 23:14:25.936904   1 code chunks extracted
+2026-01-29 23:14:27.368359 New 10 triplets from code
+2026-01-29 23:14:28.531110 
+2026-01-29 23:14:28.531359 File 1/35 processing complete: 10 triplets extracted
+2026-01-29 23:14:28.531425 Total cost so far: $0.0439
+2026-01-29 23:14:28.531472 
+2026-01-29 23:14:28.531526 
+2026-01-29 23:14:28.531518 Processing file 3/35: models/vpt.py
+2026-01-29 23:14:28.531777   1 code chunks extracted
+2026-01-29 23:14:29.008579 New 5 triplets from code
+2026-01-29 23:14:29.526744 
+2026-01-29 23:14:29.526942 File 2/35 processing complete: 5 triplets extracted
+2026-01-29 23:14:29.527006 Total cost so far: $0.0528
+2026-01-29 23:14:29.527049 
+2026-01-29 23:14:29.527102 
+2026-01-29 23:14:29.527094 Processing file 4/35: quant_library/quant_utils/models.py
+2026-01-29 23:14:29.527314   3 code chunks extracted
+2026-01-29 23:14:30.034662 New 4 triplets from code
+2026-01-29 23:14:31.425003 New 9 triplets from code
+2026-01-29 23:14:32.398275 New 3 triplets from code
+2026-01-29 23:14:32.720762 
+2026-01-29 23:14:32.720958 File 3/35 processing complete: 16 triplets extracted
+2026-01-29 23:14:32.721022 Total cost so far: $0.0811
+2026-01-29 23:14:32.721064 
+2026-01-29 23:14:32.721118 
+2026-01-29 23:14:32.721111 Processing file 5/35: quant_library/configs/PTQ4ViT.py
+2026-01-29 23:14:32.721318   1 code chunks extracted
+2026-01-29 23:14:34.208888 New 12 triplets from code
+2026-01-29 23:14:35.510509 
+2026-01-29 23:14:35.510750 File 4/35 processing complete: 12 triplets extracted
+2026-01-29 23:14:35.510811 Total cost so far: $0.0975
+2026-01-29 23:14:35.510854 
+2026-01-29 23:14:35.510913 
+2026-01-29 23:14:35.510905 Processing file 6/35: quant_library/configs/BasePTQ.py
+2026-01-29 23:14:35.511080   1 code chunks extracted
+2026-01-29 23:14:36.827153 New 11 triplets from code
+2026-01-29 23:14:37.645376 
+2026-01-29 23:14:37.645637 File 5/35 processing complete: 11 triplets extracted
+2026-01-29 23:14:37.645699 Total cost so far: $0.1111
+2026-01-29 23:14:37.645744 
+2026-01-29 23:14:37.645795 
+2026-01-29 23:14:37.645788 Processing file 7/35: dataset/ImageNetMask.py
+2026-01-29 23:14:37.652566   0 code chunks extracted
+2026-01-29 23:14:37.652651 
+2026-01-29 23:14:37.652711 File 6/35 processing complete: 0 triplets extracted
+2026-01-29 23:14:37.652750 Total cost so far: $0.1111
+2026-01-29 23:14:37.652785 
+2026-01-29 23:14:37.652831 
+2026-01-29 23:14:37.652824 Processing file 8/35: quant_library/quant_layers/linear.py
+2026-01-29 23:14:37.653831   5 code chunks extracted
+2026-01-29 23:14:38.517766 New 7 triplets from code
+2026-01-29 23:14:41.816611 New 27 triplets from code
+2026-01-29 23:14:47.431933 New 30 triplets from code
+2026-01-29 23:14:51.947815 New 22 triplets from code
+2026-01-29 23:14:55.150346 New 10 triplets from code
+2026-01-29 23:14:55.820281 
+2026-01-29 23:14:55.820499 File 7/35 processing complete: 105 triplets extracted
+2026-01-29 23:14:55.820560 Total cost so far: $0.1979
+2026-01-29 23:14:55.820603 
+2026-01-29 23:14:55.820654 
+2026-01-29 23:14:55.820647 Processing file 9/35: quant_library/quant_layers/conv.py
+2026-01-29 23:14:55.821567   5 code chunks extracted
+2026-01-29 23:14:58.364816 New 25 triplets from code
+2026-01-29 23:15:01.610954 New 7 triplets from code
+2026-01-29 23:15:03.189143 New 6 triplets from code
+2026-01-29 23:17:34.748476 ======================================================================
+2026-01-29 23:17:34.748597 REPRODUCTION COOKBOOK KNOWLEDGE GRAPH BUILDER
+2026-01-29 23:17:34.748660 ======================================================================
+2026-01-29 23:17:34.748697 Paper: /home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/short-papers/test-time-model-adaptation/paper.md
+2026-01-29 23:17:34.748738 Repository: https://github.com/mr-eggplant/FOA
+2026-01-29 23:17:34.748774 Model: Qwen/Qwen3-Coder-30B-A3B-Instruct
+2026-01-29 23:17:34.748807 Device: cpu
+2026-01-29 23:17:34.748848 
+2026-01-29 23:17:34.748884 Initializing reproduction-focused knowledge graph...
+2026-01-29 23:17:37.167764 
+Prompt:
+Objective: The main goal is to meticulously gather implementation knowledge from research paper text and code to organize this data into a clear, structured knowledge graph that enables reproducing the research and avoiding common pitfalls.
+
+Guidelines for Building the Knowledge Graph:
+
+Creating Nodes and Triplets: Nodes should depict entities or concepts related to implementation. Use a structured triplet format to capture data, as follows: "subject, relation, object". For example, from "We use Adam optimizer with learning rate 0.001 and batch size 32, trained on ImageNet dataset," extract "optimizer, type, Adam; learning rate, value, 0.001; batch size, value, 32; model, trained on, ImageNet."
+Remember that you should break complex triplets like "Transformer, uses attention with 8 heads and 512 dimensions" into simple triplets like "Transformer, uses, attention", "attention, num heads, 8", "attention, dimension, 512".
+Length of your triplet should not be more than 7 words. You should extract only concrete knowledge, any assumptions must be described as hypothesis.
+For example, from phrase "This approach might improve convergence speed" you should extract "approach, might improve, convergence speed" and should not extract "approach, improves, convergence speed".
+Remember that object and subject must be atomic units while relation can be more complex and long.
+
+
+Do not miss important information. If observation describes an error and its solution, triplets should include both: 'error X, has symptom, Y', 'error X, solved by, Z'. If observation mentions a best practice, include what it prevents: 'practice X, prevents, problem Y'.
+There could be connections between distinct parts of observations. For example if there is information about a hyperparameter at the beginning and its effect on training at the end, you should extract triplets connecting them.
+Several triplets can be extracted that contain information about the same node. For example 'Adam, is type, optimizer', 'Adam, learning rate, 0.001', 'Adam, beta1, 0.9'. Do not miss this type of connections.
+
+Do not include triplets about general knowledge unrelated to implementation.
+Any experiments that are only introduced in the Appendix are not considered core contributions of the paper, and so are out of scope. This is the case even if the experiment is referenced in the main text. HOWEVER, if an experiment is described in the main body of the text, but some of the details used (e.g. details about a prompt used, or a long mathematical expression) have been put in the appendix, then that experiment is considered still in scope. The reason here is that the experiment is described in the main body of the paper.
+
+Do not use 'none' as one of the entities.
+ALWAYS include units when mentioned (%, seconds, tokens, dimensions, GB, etc.).
+
+Example of triplets you have extracted before: {example}
+
+Input to process: {observation}
+
+Remember that triplets must be extracted in format: "subject_1, relation_1, object_1; subject_2, relation_2, object_2; ..."
+
+Extracted triplets: 
+2026-01-29 23:17:37.167963 Graph initialized with reproduction-focused prompt
+2026-01-29 23:17:37.168030 
+2026-01-29 23:17:37.168087 ======================================================================
+2026-01-29 23:17:37.168124 PHASE 2: PROCESSING REPOSITORY CODE
+2026-01-29 23:17:37.168174 ======================================================================
+2026-01-29 23:17:37.168236 Repo is already downloaded, processing it...
+2026-01-29 23:17:37.168277 
+Collecting code files...
+2026-01-29 23:17:37.171101 Found 35 important code files to process
+2026-01-29 23:17:37.171199 
+2026-01-29 23:17:37.171287 
+2026-01-29 23:17:37.171279 Processing file 1/35: main.py
+2026-01-29 23:17:37.171949   3 code chunks extracted
+2026-01-29 23:17:38.482799 New 14 triplets from code
+2026-01-29 23:17:40.859292 New 6 triplets from code
+2026-01-29 23:17:42.000229 New 6 triplets from code
+2026-01-29 23:27:18.057548 ======================================================================
+2026-01-29 23:27:18.057677 REPRODUCTION COOKBOOK KNOWLEDGE GRAPH BUILDER
+2026-01-29 23:27:18.057747 ======================================================================
+2026-01-29 23:27:18.057780 Paper: /home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/short-papers/test-time-model-adaptation/paper.md
+2026-01-29 23:27:18.057817 Repository: https://github.com/mr-eggplant/FOA
+2026-01-29 23:27:18.057849 Model: Qwen/Qwen3-Coder-30B-A3B-Instruct
+2026-01-29 23:27:18.057892 Device: cpu
+2026-01-29 23:27:18.057923 
+2026-01-29 23:27:18.057982 Initializing reproduction-focused knowledge graph...
+2026-01-29 23:27:49.382516 
+Prompt:
+Objective: The main goal is to meticulously gather implementation knowledge from research paper text and code to organize this data into a clear, structured knowledge graph that enables reproducing the research and avoiding common pitfalls.
+
+Guidelines for Building the Knowledge Graph:
+
+Creating Nodes and Triplets: Nodes should depict entities or concepts related to implementation. Use a structured triplet format to capture data, as follows: "subject, relation, object". For example, from "We use Adam optimizer with learning rate 0.001 and batch size 32, trained on ImageNet dataset," extract "optimizer, type, Adam; learning rate, value, 0.001; batch size, value, 32; model, trained on, ImageNet."
+Remember that you should break complex triplets like "Transformer, uses attention with 8 heads and 512 dimensions" into simple triplets like "Transformer, uses, attention", "attention, num heads, 8", "attention, dimension, 512".
+Length of your triplet should not be more than 7 words. You should extract only concrete knowledge, any assumptions must be described as hypothesis.
+For example, from phrase "This approach might improve convergence speed" you should extract "approach, might improve, convergence speed" and should not extract "approach, improves, convergence speed".
+Remember that object and subject must be atomic units while relation can be more complex and long.
+
+
+Do not miss important information. If observation describes an error and its solution, triplets should include both: 'error X, has symptom, Y', 'error X, solved by, Z'. If observation mentions a best practice, include what it prevents: 'practice X, prevents, problem Y'.
+There could be connections between distinct parts of observations. For example if there is information about a hyperparameter at the beginning and its effect on training at the end, you should extract triplets connecting them.
+Several triplets can be extracted that contain information about the same node. For example 'Adam, is type, optimizer', 'Adam, learning rate, 0.001', 'Adam, beta1, 0.9'. Do not miss this type of connections.
+
+Do not include triplets about general knowledge unrelated to implementation.
+Any experiments that are only introduced in the Appendix are not considered core contributions of the paper, and so are out of scope. This is the case even if the experiment is referenced in the main text. HOWEVER, if an experiment is described in the main body of the text, but some of the details used (e.g. details about a prompt used, or a long mathematical expression) have been put in the appendix, then that experiment is considered still in scope. The reason here is that the experiment is described in the main body of the paper.
+
+Do not use 'none' as one of the entities.
+ALWAYS include units when mentioned (%, seconds, tokens, dimensions, GB, etc.).
+
+Example of triplets you have extracted before: {example}
+
+Input to process: {observation}
+
+Remember that triplets must be extracted in format: "subject_1, relation_1, object_1; subject_2, relation_2, object_2; ..."
+
+Extracted triplets: 
+2026-01-29 23:27:49.382777 Graph initialized with reproduction-focused prompt
+2026-01-29 23:27:49.382859 
+2026-01-29 23:27:49.382959 Loading paper...
+2026-01-29 23:27:49.383776 Paper split into 14 sections
+2026-01-29 23:27:49.383967 
+2026-01-29 23:27:49.384086 ======================================================================
+2026-01-29 23:27:49.384213 2026-01-29 23:27:49.384077 SECTION 1/14: Title and Abstract
+2026-01-29 23:27:49.384329 ======================================================================
+2026-01-29 23:27:49.386943 Section split into 1 chunks
+2026-01-29 23:27:49.387080 
+2026-01-29 23:27:49.387068 Processing chunk 1/1...
+2026-01-29 23:27:49.387188 Chunk preview: Test-Time Model Adaptation with Only Forward Passes Shuaicheng Niu ^12 Chunyan Miao ^123 Guohao Chen ^4 Pengcheng Wu ^12 Peilin Zhao ^4 Test-time adaptation has proven effective in adapting a given tr...
+2026-01-29 23:27:52.433127 New 22 triplets from paper
+2026-01-29 23:27:54.435417 2026-01-29 23:27:54.435362 Extracted 22
+2026-01-29 23:27:54.435644 Sample triplets:
+2026-01-29 23:27:54.435703   - (test-time adaptation) --[uses]--> (forward passes)
+2026-01-29 23:27:54.435751   - (FOA) --[method type]--> (test-time Forward-Optimization Adaptation)
+2026-01-29 23:27:54.435796   - (FOA) --[learns]--> (prompt)
+2026-01-29 23:27:54.435839 
+2026-01-29 23:27:54.435876 Section summary:
+2026-01-29 23:27:54.435922   - Triplets extracted: 22
+2026-01-29 23:27:54.435959   - Total triplets in graph: 22
+2026-01-29 23:27:54.436004   - Processing time: 5.05 seconds
+2026-01-29 23:27:54.436044   - API cost so far: $0.0168
+2026-01-29 23:27:54.436080 
+2026-01-29 23:27:54.436153 ======================================================================
+2026-01-29 23:27:54.436198 2026-01-29 23:27:54.436148 SECTION 2/14: 1. Introduction
+2026-01-29 23:27:54.436246 ======================================================================
+2026-01-29 23:27:54.437345 Section split into 3 chunks
+2026-01-29 23:27:54.437457 
+2026-01-29 23:27:54.437448 Processing chunk 1/3...
+2026-01-29 23:27:54.437527 Chunk preview: Deep neural networks often struggle to generalize when testing data encounter unseen corruptions or are drawn from ^1 College of Computing and Data Science, Nanyang Technological University, Singapore...
+2026-01-29 23:27:57.452203 New 17 triplets from paper
+2026-01-29 23:27:59.105618 2026-01-29 23:27:59.105567 Extracted 17
+2026-01-29 23:27:59.105832 Sample triplets:
+2026-01-29 23:27:59.105893   - (Test-Time Adaptation) --[addresses]--> (distribution shifts)
+2026-01-29 23:27:59.106000   - (gradient-free methods) --[adapt]--> (batch normalization statistics)
+2026-01-29 23:27:59.106060   - (gradient-free methods) --[correct]--> (output probabilities)
+2026-01-29 23:27:59.106112 
+2026-01-29 23:27:59.106102 Processing chunk 2/3...
+2026-01-29 23:27:59.106154 Chunk preview: These methods, which avoid backpropagation and do not alter the original model weights, inherently reduce the risk of forgetting on source domain. However, their limited learning capacity, primarily s...
+2026-01-29 23:28:03.989042 New 35 triplets from paper
+2026-01-29 23:28:07.316161 2026-01-29 23:28:07.316095 Extracted 35
+2026-01-29 23:28:07.316462 Sample triplets:
+2026-01-29 23:28:07.316542   - (methods) --[avoid]--> (backpropagation)
+2026-01-29 23:28:07.316601   - (methods) --[do not alter]--> (model weights)
+2026-01-29 23:28:07.316651   - (methods) --[reduce risk of]--> (forgetting)
+2026-01-29 23:28:07.316710 
+2026-01-29 23:28:07.316698 Processing chunk 3/3...
+2026-01-29 23:28:07.316764 Chunk preview: However, naively applying CMA in the TTA setting is infeasible, as it is hard for CMA to handle ultra-high dimensional optimization problems (e.g., deep model training) and it relies on supervised lea...
+2026-01-29 23:28:11.433940 New 29 triplets from paper
+2026-01-29 23:28:14.243843 2026-01-29 23:28:14.243798 Extracted 29
+2026-01-29 23:28:14.244038 Sample triplets:
+2026-01-29 23:28:14.244092   - (CMA) --[applied in]--> (TTA setting)
+2026-01-29 23:28:14.244136   - (CMA) --[infeasible due to]--> (high dimensionality)
+2026-01-29 23:28:14.244173   - (CMA) --[relies on]--> (supervised learning signals)
+2026-01-29 23:28:14.244216 
+2026-01-29 23:28:14.244257 Section summary:
+2026-01-29 23:28:14.244291   - Triplets extracted: 81
+2026-01-29 23:28:14.244338   - Total triplets in graph: 103
+2026-01-29 23:28:14.244383   - Processing time: 19.81 seconds
+2026-01-29 23:28:14.244420   - API cost so far: $0.0823
+2026-01-29 23:28:14.244458 
+2026-01-29 23:28:14.244548 ======================================================================
+2026-01-29 23:28:14.244593 2026-01-29 23:28:14.244544 SECTION 3/14: 2. Preliminary and Problem Statement
+2026-01-29 23:28:14.244626 ======================================================================
+2026-01-29 23:28:14.245331 Section split into 2 chunks
+2026-01-29 23:28:14.245406 
+2026-01-29 23:28:14.245397 Processing chunk 1/2...
+2026-01-29 23:28:14.245448 Chunk preview: We briefly revisit ViT and TTA in this section for the convenience of our method presentation and put detailed related work discussions into Appendix A due to page limits. Vision Transformer (ViT) (Do...
+2026-01-29 23:28:16.946316 New 22 triplets from paper
+2026-01-29 23:28:18.843172 2026-01-29 23:28:18.843120 Extracted 22
+2026-01-29 23:28:18.843427 Sample triplets:
+2026-01-29 23:28:18.843484   - (ViT) --[is type]--> (transformer-based vision model)
+2026-01-29 23:28:18.843528   - (ViT) --[has]--> (N layers)
+2026-01-29 23:28:18.843569   - (ViT) --[uses]--> (patch embeddings)
+2026-01-29 23:28:18.843617 
+2026-01-29 23:28:18.843609 Processing chunk 2/2...
+2026-01-29 23:28:18.843657 Chunk preview: In practical applications, deep models are frequently deployed on devices with limited resources, such as smartphones and embodied agents, and sometimes are even deployed after quantization or hard co...
+2026-01-29 23:28:20.579595 New 14 triplets from paper
+2026-01-29 23:28:21.735111 2026-01-29 23:28:21.735075 Extracted 14
+2026-01-29 23:28:21.735270 Sample triplets:
+2026-01-29 23:28:21.735322   - (TTA methods) --[require]--> (backward computation)
+2026-01-29 23:28:21.735364   - (SAR) --[type]--> (TTA method)
+2026-01-29 23:28:21.735401   - (MEMO) --[type]--> (TTA method)
+2026-01-29 23:28:21.735443 
+2026-01-29 23:28:21.735484 Section summary:
+2026-01-29 23:28:21.735520   - Triplets extracted: 36
+2026-01-29 23:28:21.735555   - Total triplets in graph: 139
+2026-01-29 23:28:21.735598   - Processing time: 7.49 seconds
+2026-01-29 23:28:21.735636   - API cost so far: $0.1135
+2026-01-29 23:28:21.735670 
+2026-01-29 23:28:21.735747 ======================================================================
+2026-01-29 23:28:21.735789 2026-01-29 23:28:21.735743 SECTION 4/14: 3. Approach
+2026-01-29 23:28:21.735822 ======================================================================
+2026-01-29 23:28:21.737507 Section split into 4 chunks
+2026-01-29 23:28:21.737618 
+2026-01-29 23:28:21.737595 Processing chunk 1/4...
+2026-01-29 23:28:21.737678 Chunk preview: In this paper, we propose a novel test-time ForwardOptimization Adaptation (FOA) method, which is also model updating-free, to boost the practicality of test-time adaptation in various real-world scen...
+2026-01-29 23:28:27.224446 New 32 triplets from paper
+2026-01-29 23:28:32.521728 2026-01-29 23:28:32.521664 Extracted 33
+2026-01-29 23:28:32.522188 Sample triplets:
+2026-01-29 23:28:32.522350   - (FOA) --[conducts adaptation on]--> (input level)
+2026-01-29 23:28:32.522487   - (FOA) --[conducts adaptation on]--> (output feature level)
+2026-01-29 23:28:32.522624   - (input level) --[inserts]--> (prompt)
+2026-01-29 23:28:32.522777 
+2026-01-29 23:28:32.522763 Processing chunk 2/4...
+2026-01-29 23:28:32.522951 Chunk preview: Calculate fitness value v_k per Eqn. (5). end for Update m^(t), ^(t), ^(t) according to \v_k\_k=1^K using the CMA-ES algorithm (Hansen, 2016). Select final Y_t from \Y_t^k\_k=1^K with best v_k. end fo...
+2026-01-29 23:28:35.978017 New 22 triplets from paper
+2026-01-29 23:28:43.417446 2026-01-29 23:28:43.417329 Extracted 22
+2026-01-29 23:28:43.418156 Sample triplets:
+2026-01-29 23:28:43.418263   - (fitness function) --[type]--> (unsupervised)
+2026-01-29 23:28:43.418422   - (CMA-ES) --[algorithm]--> (optimization)
+2026-01-29 23:28:43.418678   - (prompt adaptation) --[method]--> (CMA-based)
+2026-01-29 23:28:43.418946 
+2026-01-29 23:28:43.418932 Processing chunk 3/4...
+2026-01-29 23:28:43.419301 Chunk preview: Before TTA, we first collect a small set of source in-distribution samples D_S=\x_q\_q=1^Q and feed them into the model to obtain the corresponding CLS tokens \e_i^0\_i=1^N. Then, we calculate the mea...
+2026-01-29 23:28:49.204241 New 31 triplets from paper
+2026-01-29 23:28:58.425851 2026-01-29 23:28:58.425820 Extracted 31
+2026-01-29 23:28:58.426125 Sample triplets:
+2026-01-29 23:28:58.426183   - (source in-distribution samples) --[size]--> (32 samples)
+2026-01-29 23:28:58.426226   - (ImageNet) --[dataset]--> (32 samples)
+2026-01-29 23:28:58.426264   - (CLS tokens) --[obtained from]--> (model)
+2026-01-29 23:28:58.426312 
+2026-01-29 23:28:58.426305 Processing chunk 4/4...
+2026-01-29 23:28:58.426354 Chunk preview: Back-to-Source Activation Shifting In this section, we propose a "back-to-source activation shifting mechanism" to further boost the adaptation performance at the feature level, in cases of the above ...
+2026-01-29 23:29:00.707829 New 11 triplets from paper
+2026-01-29 23:29:02.023845 2026-01-29 23:29:02.023810 Extracted 11
+2026-01-29 23:29:02.024035 Sample triplets:
+2026-01-29 23:29:02.024106   - (back-to-source activation shifting) --[mechanism type]--> (feature level)
+2026-01-29 23:29:02.024173   - (back-to-source activation shifting) --[avoids]--> (backpropagation)
+2026-01-29 23:29:02.024233   - (CLS feature) --[layer]--> (N-th)
+2026-01-29 23:29:02.024301 
+2026-01-29 23:29:02.024371 Section summary:
+2026-01-29 23:29:02.024438   - Triplets extracted: 97
+2026-01-29 23:29:02.024513   - Total triplets in graph: 234
+2026-01-29 23:29:02.024590   - Processing time: 40.29 seconds
+2026-01-29 23:29:02.024658   - API cost so far: $0.1953
+2026-01-29 23:29:02.024726 
+2026-01-29 23:29:02.024860 ======================================================================
+2026-01-29 23:29:02.024938 2026-01-29 23:29:02.024854 SECTION 5/14: 4. Experiments
+2026-01-29 23:29:02.024999 ======================================================================
+2026-01-29 23:29:02.028124 Section split into 8 chunks
+2026-01-29 23:29:02.028283 
+2026-01-29 23:29:02.028271 Processing chunk 1/8...
+2026-01-29 23:29:02.028374 Chunk preview: Datasets and Models. We conduct experiments on four benchmarks for OOD generalization, i.e., ImageNetC (Hendrycks \& Dietterich, 2019) (contains corrupted images in 15 types of 4 main categories and e...
+2026-01-29 23:29:09.654309 New 39 triplets from paper
+2026-01-29 23:29:16.740706 2026-01-29 23:29:16.740651 Extracted 40
+2026-01-29 23:29:16.740951 Sample triplets:
+2026-01-29 23:29:16.741011   - (ViT-Base) --[used for]--> (experiments)
+2026-01-29 23:29:16.741062   - (ImageNet-1K) --[used for]--> (training ViT-Base)
+2026-01-29 23:29:16.741101   - (ViT-Base) --[trained on]--> (ImageNet-1K)
+2026-01-29 23:29:16.741147 
+2026-01-29 23:29:16.741138 Processing chunk 2/8...
+2026-01-29 23:29:16.741191 Chunk preview: 2) Expected Calibration Error (ECE) (\%, ) measures the difference between predicted probabilities and actual outcomes in a probabilistic model (Naeini et al., 2015). ECE is important to evaluate the ...
+2026-01-29 23:59:18.478417 Error processing chunk: Request timed out.
+2026-01-30 01:53:19.460832 ======================================================================
+2026-01-30 01:53:19.460957 REPRODUCTION COOKBOOK KNOWLEDGE GRAPH BUILDER
+2026-01-30 01:53:19.461004 ======================================================================
+2026-01-30 01:53:19.461059 Paper: /home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/short-papers/test-time-model-adaptation/paper.md
+2026-01-30 01:53:19.461100 Repository: https://github.com/mr-eggplant/FOA
+2026-01-30 01:53:19.461138 Model: Qwen/Qwen3-Coder-30B-A3B-Instruct
+2026-01-30 01:53:19.461173 Device: cpu
+2026-01-30 01:53:19.461210 
+2026-01-30 01:53:19.461251 Initializing reproduction-focused knowledge graph...
+2026-01-30 01:53:21.716826 
+Prompt:
+Objective: The main goal is to meticulously gather implementation knowledge from research paper text and code to organize this data into a clear, structured knowledge graph that enables reproducing the research and avoiding common pitfalls.
+
+Guidelines for Building the Knowledge Graph:
+
+Creating Nodes and Triplets: Nodes should depict entities or concepts related to implementation. Use a structured triplet format to capture data, as follows: "subject, relation, object". For example, from "We use Adam optimizer with learning rate 0.001 and batch size 32, trained on ImageNet dataset," extract "optimizer, type, Adam; learning rate, value, 0.001; batch size, value, 32; model, trained on, ImageNet."
+Remember that you should break complex triplets like "Transformer, uses attention with 8 heads and 512 dimensions" into simple triplets like "Transformer, uses, attention", "attention, num heads, 8", "attention, dimension, 512".
+Length of your triplet should not be more than 7 words. You should extract only concrete knowledge, any assumptions must be described as hypothesis.
+For example, from phrase "This approach might improve convergence speed" you should extract "approach, might improve, convergence speed" and should not extract "approach, improves, convergence speed".
+Remember that object and subject must be atomic units while relation can be more complex and long.
+
+
+Do not miss important information. If observation describes an error and its solution, triplets should include both: 'error X, has symptom, Y', 'error X, solved by, Z'. If observation mentions a best practice, include what it prevents: 'practice X, prevents, problem Y'.
+There could be connections between distinct parts of observations. For example if there is information about a hyperparameter at the beginning and its effect on training at the end, you should extract triplets connecting them.
+Several triplets can be extracted that contain information about the same node. For example 'Adam, is type, optimizer', 'Adam, learning rate, 0.001', 'Adam, beta1, 0.9'. Do not miss this type of connections.
+
+Do not include triplets about general knowledge unrelated to implementation.
+Any experiments that are only introduced in the Appendix are not considered core contributions of the paper, and so are out of scope. This is the case even if the experiment is referenced in the main text. HOWEVER, if an experiment is described in the main body of the text, but some of the details used (e.g. details about a prompt used, or a long mathematical expression) have been put in the appendix, then that experiment is considered still in scope. The reason here is that the experiment is described in the main body of the paper.
+
+Do not use 'none' as one of the entities.
+ALWAYS include units when mentioned (%, seconds, tokens, dimensions, GB, etc.).
+
+Example of triplets you have extracted before: {example}
+
+Input to process: {observation}
+
+Remember that triplets must be extracted in format: "subject_1, relation_1, object_1; subject_2, relation_2, object_2; ..."
+
+Extracted triplets: 
+2026-01-30 01:53:21.717011 Graph initialized with reproduction-focused prompt
+2026-01-30 01:53:21.717075 
+2026-01-30 01:53:21.717125 Loading paper...
+2026-01-30 01:53:21.717741 Paper split into 14 sections
+2026-01-30 01:53:21.717842 
+2026-01-30 01:53:21.717918 ======================================================================
+2026-01-30 01:53:21.717998 2026-01-30 01:53:21.717913 SECTION 1/14: Title and Abstract
+2026-01-30 01:53:21.718049 ======================================================================
+2026-01-30 01:53:21.719454 Section split into 1 chunks
+2026-01-30 01:53:21.719546 
+2026-01-30 01:53:21.719535 Processing chunk 1/1...
+2026-01-30 01:53:21.719634 Chunk preview: Test-Time Model Adaptation with Only Forward Passes Shuaicheng Niu ^12 Chunyan Miao ^123 Guohao Chen ^4 Pengcheng Wu ^12 Peilin Zhao ^4 Test-time adaptation has proven effective in adapting a given tr...
+2026-01-30 01:53:24.655328 New 24 triplets from paper
+2026-01-30 01:53:27.029572 2026-01-30 01:53:27.029522 Extracted 24
+2026-01-30 01:53:27.029807 Sample triplets:
+2026-01-30 01:53:27.029876   - (test-time adaptation) --[proven effective]--> (adapting trained model to unseen test samples)
+2026-01-30 01:53:27.029936   - (test-time adaptation) --[handles]--> (distribution shifts)
+2026-01-30 01:53:27.030030   - (models) --[deployed on]--> (resource-limited devices)
+2026-01-30 01:53:27.030089 
+2026-01-30 01:53:27.030137 Section summary:
+2026-01-30 01:53:27.030182   - Triplets extracted: 24
+2026-01-30 01:53:27.030232   - Total triplets in graph: 24
+2026-01-30 01:53:27.030286   - Processing time: 5.31 seconds
+2026-01-30 01:53:27.030352   - API cost so far: $0.0185
+2026-01-30 01:53:27.030397 
+2026-01-30 01:53:27.030490 ======================================================================
+2026-01-30 01:53:27.030542 2026-01-30 01:53:27.030486 SECTION 2/14: 1. Introduction
+2026-01-30 01:53:27.030585 ======================================================================
+2026-01-30 01:53:27.031709 Section split into 3 chunks
+2026-01-30 01:53:27.031792 
+2026-01-30 01:53:27.031782 Processing chunk 1/3...
+2026-01-30 01:53:27.031839 Chunk preview: Deep neural networks often struggle to generalize when testing data encounter unseen corruptions or are drawn from ^1 College of Computing and Data Science, Nanyang Technological University, Singapore...
+2026-01-30 01:53:29.164617 New 18 triplets from paper
+2026-01-30 01:53:31.027735 2026-01-30 01:53:31.027688 Extracted 18
+2026-01-30 01:53:31.027968 Sample triplets:
+2026-01-30 01:53:31.028050   - (Test-Time Adaptation) --[addresses]--> (distribution shifts)
+2026-01-30 01:53:31.028113   - (gradient-free methods) --[adapt]--> (batch normalization statistics)
+2026-01-30 01:53:31.028182   - (gradient-free methods) --[correct]--> (output probabilities)
+2026-01-30 01:53:31.028243 
+2026-01-30 01:53:31.028231 Processing chunk 2/3...
+2026-01-30 01:53:31.028296 Chunk preview: These methods, which avoid backpropagation and do not alter the original model weights, inherently reduce the risk of forgetting on source domain. However, their limited learning capacity, primarily s...
+2026-01-30 01:53:35.127974 New 41 triplets from paper
+2026-01-30 01:53:38.617316 2026-01-30 01:53:38.617248 Extracted 41
+2026-01-30 01:53:38.617614 Sample triplets:
+2026-01-30 01:53:38.617688   - (methods) --[avoid]--> (backpropagation)
+2026-01-30 01:53:38.617744   - (methods) --[do not alter]--> (model weights)
+2026-01-30 01:53:38.617815   - (methods) --[reduce risk of]--> (forgetting)
+2026-01-30 01:53:38.617878 
+2026-01-30 01:53:38.617868 Processing chunk 3/3...
+2026-01-30 01:53:38.617931 Chunk preview: However, naively applying CMA in the TTA setting is infeasible, as it is hard for CMA to handle ultra-high dimensional optimization problems (e.g., deep model training) and it relies on supervised lea...
+2026-01-30 01:53:42.444792 New 36 triplets from paper
+2026-01-30 01:53:45.638779 2026-01-30 01:53:45.638724 Extracted 36
+2026-01-30 01:53:45.639066 Sample triplets:
+2026-01-30 01:53:45.639128   - (CMA) --[applied in]--> (TTA setting)
+2026-01-30 01:53:45.639173   - (CMA) --[infeasible due to]--> (high dimensionality)
+2026-01-30 01:53:45.639210   - (CMA) --[relies on]--> (supervised learning signals)
+2026-01-30 01:53:45.639256 
+2026-01-30 01:53:45.639295 Section summary:
+2026-01-30 01:53:45.639333   - Triplets extracted: 95
+2026-01-30 01:53:45.639378   - Total triplets in graph: 119
+2026-01-30 01:53:45.639424   - Processing time: 18.61 seconds
+2026-01-30 01:53:45.639466   - API cost so far: $0.0868
+2026-01-30 01:53:45.639503 
+2026-01-30 01:53:45.639605 ======================================================================
+2026-01-30 01:53:45.639662 2026-01-30 01:53:45.639601 SECTION 3/14: 2. Preliminary and Problem Statement
+2026-01-30 01:53:45.639698 ======================================================================
+2026-01-30 01:53:45.640467 Section split into 2 chunks
+2026-01-30 01:53:45.640614 
+2026-01-30 01:53:45.640590 Processing chunk 1/2...
+2026-01-30 01:53:45.640670 Chunk preview: We briefly revisit ViT and TTA in this section for the convenience of our method presentation and put detailed related work discussions into Appendix A due to page limits. Vision Transformer (ViT) (Do...
+2026-01-30 01:53:47.588579 New 21 triplets from paper
+2026-01-30 01:53:49.345423 2026-01-30 01:53:49.345382 Extracted 21
+2026-01-30 01:53:49.345608 Sample triplets:
+2026-01-30 01:53:49.345665   - (ViT) --[is type]--> (transformer-based vision model)
+2026-01-30 01:53:49.345709   - (ViT) --[has]--> (N layers)
+2026-01-30 01:53:49.345749   - (ViT) --[uses]--> (patch embeddings)
+2026-01-30 01:53:49.345795 
+2026-01-30 01:53:49.345788 Processing chunk 2/2...
+2026-01-30 01:53:49.345837 Chunk preview: In practical applications, deep models are frequently deployed on devices with limited resources, such as smartphones and embodied agents, and sometimes are even deployed after quantization or hard co...
+2026-01-30 01:53:50.639543 New 14 triplets from paper
+2026-01-30 01:53:51.720732 2026-01-30 01:53:51.720699 Extracted 14
+2026-01-30 01:53:51.720908 Sample triplets:
+2026-01-30 01:53:51.720964   - (TTA methods) --[require]--> (backward computation)
+2026-01-30 01:53:51.721009   - (SAR) --[type]--> (TTA method)
+2026-01-30 01:53:51.721049   - (MEMO) --[type]--> (TTA method)
+2026-01-30 01:53:51.721093 
+2026-01-30 01:53:51.721133 Section summary:
+2026-01-30 01:53:51.721169   - Triplets extracted: 35
+2026-01-30 01:53:51.721206   - Total triplets in graph: 154
+2026-01-30 01:53:51.721249   - Processing time: 6.08 seconds
+2026-01-30 01:53:51.721287   - API cost so far: $0.1177
+2026-01-30 01:53:51.721322 
+2026-01-30 01:53:51.721381 ======================================================================
+2026-01-30 01:53:51.721435 2026-01-30 01:53:51.721378 SECTION 4/14: 3. Approach
+2026-01-30 01:53:51.721487 ======================================================================
+2026-01-30 01:53:51.723076 Section split into 4 chunks
+2026-01-30 01:53:51.723171 
+2026-01-30 01:53:51.723164 Processing chunk 1/4...
+2026-01-30 01:53:51.723226 Chunk preview: In this paper, we propose a novel test-time ForwardOptimization Adaptation (FOA) method, which is also model updating-free, to boost the practicality of test-time adaptation in various real-world scen...
+2026-01-30 01:59:35.222909 New 3817 triplets from paper
+2026-01-30 02:00:29.812804 2026-01-30 02:00:29.812749 Extracted 3819
+2026-01-30 02:00:29.813017 Sample triplets:
+2026-01-30 02:00:29.813075   - (FOA) --[conducts adaptation on]--> (input level)
+2026-01-30 02:00:29.813147   - (FOA) --[conducts adaptation on]--> (output feature level)
+2026-01-30 02:00:29.813189   - (input level) --[inserts]--> (prompt)
+2026-01-30 02:00:29.813240 
+2026-01-30 02:00:29.813232 Processing chunk 2/4...
+2026-01-30 02:00:29.813280 Chunk preview: Calculate fitness value v_k per Eqn. (5). end for Update m^(t), ^(t), ^(t) according to \v_k\_k=1^K using the CMA-ES algorithm (Hansen, 2016). Select final Y_t from \Y_t^k\_k=1^K with best v_k. end fo...
+2026-01-30 02:00:32.986404 New 31 triplets from paper
+2026-01-30 02:00:35.528349 2026-01-30 02:00:35.528296 Extracted 31
+2026-01-30 02:00:35.528554 Sample triplets:
+2026-01-30 02:00:35.528613   - (fitness function) --[type]--> (unsupervised)
+2026-01-30 02:00:35.528659   - (CMA-ES) --[algorithm]--> (optimization)
+2026-01-30 02:00:35.528697   - (CMA-ES) --[uses]--> (fitness value)
+2026-01-30 02:00:35.528746 
+2026-01-30 02:00:35.528738 Processing chunk 3/4...
+2026-01-30 02:00:35.528787 Chunk preview: Before TTA, we first collect a small set of source in-distribution samples D_S=\x_q\_q=1^Q and feed them into the model to obtain the corresponding CLS tokens \e_i^0\_i=1^N. Then, we calculate the mea...
+2026-01-30 02:00:38.135541 New 22 triplets from paper
+2026-01-30 02:00:39.805274 2026-01-30 02:00:39.805244 Extracted 22
+2026-01-30 02:00:39.805471 Sample triplets:
+2026-01-30 02:00:39.805528   - (source in-distribution samples) --[set size]--> (32)
+2026-01-30 02:00:39.805571   - (ImageNet) --[dataset size]--> (32 samples)
+2026-01-30 02:00:39.805611   - (CLS tokens) --[obtained from]--> (model)
+2026-01-30 02:00:39.805661 
+2026-01-30 02:00:39.805654 Processing chunk 4/4...
+2026-01-30 02:00:39.805704 Chunk preview: Back-to-Source Activation Shifting In this section, we propose a "back-to-source activation shifting mechanism" to further boost the adaptation performance at the feature level, in cases of the above ...
+2026-01-30 02:00:41.106117 New 11 triplets from paper
+2026-01-30 02:00:42.315411 2026-01-30 02:00:42.315377 Extracted 11
+2026-01-30 02:00:42.315597 Sample triplets:
+2026-01-30 02:00:42.315651   - (back-to-source activation shifting) --[mechanism type]--> (feature level)
+2026-01-30 02:00:42.315693   - (back-to-source activation shifting) --[avoids]--> (backpropagation)
+2026-01-30 02:00:42.315731   - (CLS feature) --[layer]--> (N-th)
+2026-01-30 02:00:42.315779 
+2026-01-30 02:00:42.315819 Section summary:
+2026-01-30 02:00:42.315858   - Triplets extracted: 3883
+2026-01-30 02:00:42.315895   - Total triplets in graph: 918
+2026-01-30 02:00:42.315942   - Processing time: 410.59 seconds
+2026-01-30 02:00:42.315984   - API cost so far: $1.1320
+2026-01-30 02:00:42.316021 
+2026-01-30 02:00:42.317060 ======================================================================
+2026-01-30 02:00:42.317125 2026-01-30 02:00:42.317053 SECTION 5/14: 4. Experiments
+2026-01-30 02:00:42.317166 ======================================================================
+2026-01-30 02:00:42.319551 Section split into 8 chunks
+2026-01-30 02:00:42.319746 
+2026-01-30 02:00:42.319738 Processing chunk 1/8...
+2026-01-30 02:00:42.319790 Chunk preview: Datasets and Models. We conduct experiments on four benchmarks for OOD generalization, i.e., ImageNetC (Hendrycks \& Dietterich, 2019) (contains corrupted images in 15 types of 4 main categories and e...
+2026-01-30 02:00:47.691521 New 44 triplets from paper
+2026-01-30 02:00:51.226305 2026-01-30 02:00:51.226263 Extracted 45
+2026-01-30 02:00:51.226506 Sample triplets:
+2026-01-30 02:00:51.226558   - (ImageNetC) --[contains]--> (15 types)
+2026-01-30 02:00:51.226601   - (ImageNetC) --[has]--> (4 main categories)
+2026-01-30 02:00:51.226640   - (ImageNetC) --[has]--> (5 severity levels per type)
+2026-01-30 02:00:51.226685 
+2026-01-30 02:00:51.226678 Processing chunk 2/8...
+2026-01-30 02:00:51.226724 Chunk preview: 2) Expected Calibration Error (ECE) (\%, ) measures the difference between predicted probabilities and actual outcomes in a probabilistic model (Naeini et al., 2015). ECE is important to evaluate the ...
+2026-01-30 02:06:36.683651 New 4048 triplets from paper
+2026-01-30 02:07:18.118458 2026-01-30 02:07:18.118397 Extracted 4049
+2026-01-30 02:07:18.118666 Sample triplets:
+2026-01-30 02:07:18.118724   - (Expected Calibration Error) --[measures]--> (difference between predicted probabilities and actual outcomes)
+2026-01-30 02:07:18.118774   - (Expected Calibration Error) --[unit]--> (%)
+2026-01-30 02:07:18.118816   - (model) --[evaluates]--> (trustworthiness of predictions)
+2026-01-30 02:07:18.118868 
+2026-01-30 02:07:18.118860 Processing chunk 3/8...
+2026-01-30 02:07:18.118910 Chunk preview: At last, from the results on ImageNet-R/V2/Sketch in Table 3, our FOA achieves the best or comparable performance w.r.t. both accuracy and ECE, further suggesting our effectiveness. *4.2. Results on Q...
+2026-01-30 02:07:21.776476 New 37 triplets from paper
+2026-01-30 02:07:24.023314 2026-01-30 02:07:24.023273 Extracted 37
+2026-01-30 02:07:24.023490 Sample triplets:
+2026-01-30 02:07:24.023544   - (FOA) --[achieves]--> (best or comparable performance)
+2026-01-30 02:07:24.023588   - (FOA) --[evaluated on]--> (ImageNet-R)
+2026-01-30 02:07:24.023634   - (FOA) --[evaluated on]--> (ImageNet-V2)
+2026-01-30 02:07:24.023681 
+2026-01-30 02:07:24.023674 Processing chunk 4/8...
+2026-01-30 02:07:24.023723 Chunk preview: Notably, at K=2, FOA outperforms both NoAdapt and gradient-free T3A, e.g., 57.9 \% (FOA) vs. 56.4 \% (T3A) regarding accuracy. And with K=6, FOA surpasses the gradient-based TENT, i.e., 60.8 \% accura...
+2026-01-30 02:07:29.132163 New 47 triplets from paper
+2026-01-30 02:07:32.336549 2026-01-30 02:07:32.336513 Extracted 49
+2026-01-30 02:07:32.336762 Sample triplets:
+2026-01-30 02:07:32.336817   - (FOA) --[outperforms]--> (NoAdapt)
+2026-01-30 02:07:32.336862   - (FOA) --[outperforms]--> (T3A)
+2026-01-30 02:07:32.336901   - (T3A) --[has accuracy]--> (56.4%)
+2026-01-30 02:07:32.336951 
+2026-01-30 02:07:32.336943 Processing chunk 5/8...
+2026-01-30 02:07:32.336994 Chunk preview: More Discussions Results on Single Sample Adaptation (Batch Size = 1). In our FOA, the prompt is learned over a batch of test samples each time. This process suffers from a challenge when the batch si...
+2026-01-30 02:13:16.420756 New 2989 triplets from paper
+2026-01-30 02:13:18.512859 2026-01-30 02:13:18.512814 Extracted 2989
+2026-01-30 02:13:18.513036 Sample triplets:
+2026-01-30 02:13:18.513094   - (FOA) --[uses]--> (interval update strategy)
+2026-01-30 02:13:18.513137   - (FOA-I) --[interval]--> (4)
+2026-01-30 02:13:18.513175   - (FOA-I) --[outperforms]--> (TENT)
+2026-01-30 02:13:18.513226 
+2026-01-30 02:13:18.513217 Processing chunk 6/8...
+2026-01-30 02:13:18.513267 Chunk preview: Moreover, our FOA-I V1/V2, which are variants (introduced in the last subsection) designed for single sample adaptation ( B S=1 ), with different update intervals I further decrease the memory footpri...
+2026-01-30 02:13:24.548852 New 53 triplets from paper
+2026-01-30 02:13:28.103309 2026-01-30 02:13:28.103250 Extracted 56
+2026-01-30 02:13:28.103579 Sample triplets:
+2026-01-30 02:13:28.103662   - (FOA-I V1) --[variant of]--> (FOA)
+2026-01-30 02:13:28.103729   - (FOA-I V2) --[variant of]--> (FOA)
+2026-01-30 02:13:28.103792   - (FOA-I) --[designed for]--> (single sample adaptation)
+2026-01-30 02:13:28.103869 
+2026-01-30 02:13:28.103857 Processing chunk 7/8...
+2026-01-30 02:13:28.103940 Chunk preview: The reasons are that 1) CMA fails to handle ultra-high-dimensional optimization and 2) the entropy can not provide stable learning signals and thus tends to result in collapsed trivial solutions. Howe...
+2026-01-30 02:13:33.272351 New 48 triplets from paper
+2026-01-30 02:13:37.011756 2026-01-30 02:13:37.011722 Extracted 50
+2026-01-30 02:13:37.011945 Sample triplets:
+2026-01-30 02:13:37.012001   - (CMA) --[fails to handle]--> (ultra-high-dimensional optimization)
+2026-01-30 02:13:37.012044   - (entropy) --[cannot provide]--> (stable learning signals)
+2026-01-30 02:13:37.012083   - (CMA) --[performs effectively with]--> (fitness function)
+2026-01-30 02:13:37.012130 
+2026-01-30 02:13:37.012122 Processing chunk 8/8...
+2026-01-30 02:13:37.012198 Chunk preview: However, FOA still achieves the best performance compared with TENT and SAR, further demonstrating the superiority of the proposed back-tosource feature alignment fitness and feature shifting scheme. ...
+2026-01-30 02:13:40.077171 New 30 triplets from paper
+2026-01-30 02:13:42.428097 2026-01-30 02:13:42.428062 Extracted 31
+2026-01-30 02:13:42.428274 Sample triplets:
+2026-01-30 02:13:42.428327   - (FOA) --[achieves]--> (best performance)
+2026-01-30 02:13:42.428370   - (TENT) --[compared with]--> (FOA)
+2026-01-30 02:13:42.428408   - (SAR) --[compared with]--> (FOA)
+2026-01-30 02:13:42.428447 
+2026-01-30 02:13:42.428485 Section summary:
+2026-01-30 02:13:42.428528   - Triplets extracted: 7306
+2026-01-30 02:13:42.428566   - Total triplets in graph: 1776
+2026-01-30 02:13:42.428615   - Processing time: 780.11 seconds
+2026-01-30 02:13:42.428656   - API cost so far: $3.2102
+2026-01-30 02:13:42.428693 
+2026-01-30 02:13:42.431697 ======================================================================
+2026-01-30 02:13:42.431838 2026-01-30 02:13:42.431690 SECTION 6/14: 5. Conclusion
+2026-01-30 02:13:42.431878 ======================================================================
+2026-01-30 02:13:42.432139 Section split into 1 chunks
+2026-01-30 02:13:42.432532 
+2026-01-30 02:13:42.432524 Processing chunk 1/1...
+2026-01-30 02:13:42.432654 Chunk preview: In this paper, we aim to implement online test-time adaptation without the need for backpropagation and altering the model parameters. This advancement highly broadens the scope of TTA's real-world ap...
+2026-01-30 02:13:44.783921 New 20 triplets from paper
+2026-01-30 02:13:46.014533 2026-01-30 02:13:46.014500 Extracted 21
+2026-01-30 02:13:46.014706 Sample triplets:
+2026-01-30 02:13:46.014765   - (online test-time adaptation) --[aims to avoid]--> (backpropagation)
+2026-01-30 02:13:46.014810   - (online test-time adaptation) --[enables]--> (real-world applications)
+2026-01-30 02:13:46.014855   - (test-time adaptation) --[applied in]--> (resource-limited scenarios)
+2026-01-30 02:13:46.014898 
+2026-01-30 02:13:46.014937 Section summary:
+2026-01-30 02:13:46.014974   - Triplets extracted: 21
+2026-01-30 02:13:46.015011   - Total triplets in graph: 1796
+2026-01-30 02:13:46.015054   - Processing time: 3.58 seconds
+2026-01-30 02:13:46.015093   - API cost so far: $3.2262
+2026-01-30 02:13:46.015128 
+2026-01-30 02:13:46.015179 ======================================================================
+2026-01-30 02:13:46.015219 2026-01-30 02:13:46.015176 SECTION 7/14: Acknowledgment
+2026-01-30 02:13:46.015255 ======================================================================
+2026-01-30 02:13:46.015431 Section split into 1 chunks
+2026-01-30 02:13:46.015490 
+2026-01-30 02:13:46.015482 Processing chunk 1/1...
+2026-01-30 02:13:46.015534 Chunk preview: This research was supported, in part, by the Joint NTUWeBank Research Centre on Fintech, Nanyang Technological University, Singapore, and the National Research Foundation, Singapore under its Industry...
+2026-01-30 02:13:47.238788 New 0 triplets from paper
+2026-01-30 02:13:47.280567 2026-01-30 02:13:47.280532 Extracted 0
+2026-01-30 02:13:47.280741 
+2026-01-30 02:13:47.280796 Section summary:
+2026-01-30 02:13:47.280840   - Triplets extracted: 0
+2026-01-30 02:13:47.280880   - Total triplets in graph: 1796
+2026-01-30 02:13:47.280925   - Processing time: 1.27 seconds
+2026-01-30 02:13:47.280965   - API cost so far: $3.2378
+2026-01-30 02:13:47.281002 
+2026-01-30 02:13:47.281046 ======================================================================
+2026-01-30 02:13:47.281095 2026-01-30 02:13:47.281043 SECTION 8/14: Impact Statement
+2026-01-30 02:13:47.281135 ======================================================================
+2026-01-30 02:13:47.281383 Section split into 1 chunks
+2026-01-30 02:13:47.281447 
+2026-01-30 02:13:47.281439 Processing chunk 1/1...
+2026-01-30 02:13:47.281494 Chunk preview: This paper presents work whose goal is to advance the field of test-time adaptation for out-of-distribution generalization. The societal impact of our work lies primarily in its potential to broaden t...
+2026-01-30 02:13:48.217246 New 0 triplets from paper
+2026-01-30 02:13:48.265683 2026-01-30 02:13:48.265648 Extracted 0
+2026-01-30 02:13:48.265839 
+2026-01-30 02:13:48.265892 Section summary:
+2026-01-30 02:13:48.265934   - Triplets extracted: 0
+2026-01-30 02:13:48.265990   - Total triplets in graph: 1796
+2026-01-30 02:13:48.266037   - Processing time: 0.98 seconds
+2026-01-30 02:13:48.266076   - API cost so far: $3.2490
+2026-01-30 02:13:48.266113 
+2026-01-30 02:13:48.266157 ======================================================================
+2026-01-30 02:13:48.266200 2026-01-30 02:13:48.266155 SECTION 9/14: References
+2026-01-30 02:13:48.266236 ======================================================================
+2026-01-30 02:13:48.268572 Section split into 7 chunks
+2026-01-30 02:13:48.268683 
+2026-01-30 02:13:48.268661 Processing chunk 1/7...
+2026-01-30 02:13:48.268725 Chunk preview: Abuduweili, A., Li, X., Shi, H., Xu, C.-Z., and Dou, D. Adaptive consistency regularization for semi-supervised transfer learning. In IEEE Conference on Computer Vision and Pattern Recognition, pp. 69...
+2026-01-30 02:13:49.647419 New 0 triplets from paper
+2026-01-30 02:13:49.729196 2026-01-30 02:13:49.729163 Extracted 0
+2026-01-30 02:13:49.729392 
+2026-01-30 02:13:49.729383 Processing chunk 2/7...
+2026-01-30 02:13:49.729444 Chunk preview: C., Jordan, M. I., Wainwright, M. J., and Wibisono, A. Optimal rates for zero-order convex optimization: The power of two function evaluations. IEEE Transactions on Information Theory, 61(5):2788-2806...
+2026-01-30 02:13:50.802624 New 0 triplets from paper
+2026-01-30 02:13:51.006588 2026-01-30 02:13:51.006549 Extracted 0
+2026-01-30 02:13:51.006785 
+2026-01-30 02:13:51.006775 Processing chunk 3/7...
+2026-01-30 02:13:51.006842 Chunk preview: Hendrycks, D., Mu, N., Cubuk, E. D., Zoph, B., Gilmer, J., and Lakshminarayanan, B. Augmix: A simple data processing method to improve robustness and uncertainty. In International Conference on Learni...
+2026-01-30 02:13:53.070390 New 0 triplets from paper
+2026-01-30 02:13:53.225438 2026-01-30 02:13:53.225407 Extracted 0
+2026-01-30 02:13:53.225624 
+2026-01-30 02:13:53.225614 Processing chunk 4/7...
+2026-01-30 02:13:53.225680 Chunk preview: In International Conference on Learning Representations, 2023. Lin, W., Mirza, M. J., Kozinski, M., Possegger, H., Kuehne, H., and Bischof, H. Video test-time adaptation for action recognition. In IEE...
+2026-01-30 02:13:54.775878 New 0 triplets from paper
+2026-01-30 02:13:54.933049 2026-01-30 02:13:54.933016 Extracted 0
+2026-01-30 02:13:54.933256 
+2026-01-30 02:13:54.933248 Processing chunk 5/7...
+2026-01-30 02:13:54.933309 Chunk preview: Niu, S., Wu, J., Zhang, Y., Wen, Z., Chen, Y., Zhao, P., and Tan, M. Towards stable test-time adaptation in dynamic wild world. In International Conference on Learning Representations, 2023. Oh, Y., L...
+2026-01-30 02:13:56.397626 New 0 triplets from paper
+2026-01-30 02:13:56.609864 2026-01-30 02:13:56.609828 Extracted 0
+2026-01-30 02:13:56.610092 
+2026-01-30 02:13:56.610081 Processing chunk 6/7...
+2026-01-30 02:13:56.610147 Chunk preview: Uncertainty-calibrated test-time model adaptation without forgetting. arXiv preprint arXiv:2403.11491, 2024. Turner, A., Thiergart, L., Udell, D., Leech, G., Mini, U., and MacDiarmid, M. Activation ad...
+2026-01-30 02:13:59.553826 New 29 triplets from paper
+2026-01-30 02:14:02.108649 2026-01-30 02:14:02.108619 Extracted 29
+2026-01-30 02:14:02.108829 Sample triplets:
+2026-01-30 02:14:02.108883   - (Turner et al.) --[uses]--> (activation addition)
+2026-01-30 02:14:02.108926   - (activation addition) --[steers]--> (language models)
+2026-01-30 02:14:02.108965   - (activation addition) --[avoids]--> (optimization)
+2026-01-30 02:14:02.109008 
+2026-01-30 02:14:02.109002 Processing chunk 7/7...
+2026-01-30 02:14:02.109057 Chunk preview: IEEE Transactions on Image Processing, 29:7834-7844, 2020. Zhao, B., Chen, C., and Xia, S.-T. DELTA: Degradation-free fully test-time adaptation. In International Conference on Learning Representation...
+2026-01-30 02:14:02.923169 New 0 triplets from paper
+2026-01-30 02:14:02.969887 2026-01-30 02:14:02.969853 Extracted 0
+2026-01-30 02:14:02.970077 
+2026-01-30 02:14:02.970132 Section summary:
+2026-01-30 02:14:02.970176   - Triplets extracted: 29
+2026-01-30 02:14:02.970216   - Total triplets in graph: 1825
+2026-01-30 02:14:02.970271   - Processing time: 14.70 seconds
+2026-01-30 02:14:02.970315   - API cost so far: $3.3782
+2026-01-30 02:14:02.970353 
+2026-01-30 02:14:02.970427 ======================================================================
+2026-01-30 02:14:02.970474 2026-01-30 02:14:02.970420 SECTION 10/14: A. Related Work
+2026-01-30 02:14:02.970511 ======================================================================
+2026-01-30 02:14:02.971704 Section split into 4 chunks
+2026-01-30 02:14:02.971794 
+2026-01-30 02:14:02.971786 Processing chunk 1/4...
+2026-01-30 02:14:02.971834 Chunk preview: Test-Time Adaptation (TTA) is designed to enhance the performance of a model on unseen test data, which may exhibit distribution shifts, by directly learning from the test data itself. We categorize t...
+2026-01-30 02:14:05.830317 New 23 triplets from paper
+2026-01-30 02:14:07.939171 2026-01-30 02:14:07.939138 Extracted 23
+2026-01-30 02:14:07.939374 Sample triplets:
+2026-01-30 02:14:07.939426   - (TTA) --[designed to]--> (enhance model performance on unseen test data)
+2026-01-30 02:14:07.939470   - (TTA) --[addresses]--> (distribution shifts)
+2026-01-30 02:14:07.939509   - (BP-free TTA) --[categorized by]--> (dependence on backward propagation)
+2026-01-30 02:14:07.939554 
+2026-01-30 02:14:07.939547 Processing chunk 2/4...
+2026-01-30 02:14:07.939593 Chunk preview: To avoid directly altering the model training process and access to source data, Fully TTA methods update any given model via unsupervised learning objectives, such as entropy minimization (Wang et al...
+2026-01-30 02:14:10.393389 New 22 triplets from paper
+2026-01-30 02:14:12.206328 2026-01-30 02:14:12.206296 Extracted 23
+2026-01-30 02:14:12.206523 Sample triplets:
+2026-01-30 02:14:12.206576   - (Fully TTA methods) --[use]--> (entropy minimization)
+2026-01-30 02:14:12.206618   - (Fully TTA methods) --[use]--> (prediction consistency maximization)
+2026-01-30 02:14:12.206657   - (Fully TTA methods) --[use]--> (feature distribution alignment)
+2026-01-30 02:14:12.206701 
+2026-01-30 02:14:12.206695 Processing chunk 3/4...
+2026-01-30 02:14:12.206744 Chunk preview: Based on CMA-ES, several recent works (Beyer \& Sendhoff, 2017; He et al., 2020; Loshchilov et al., 2018) have been proposed to improve CMA-ES's time and memory complexity. Nevertheless, CMA-ES still ...
+2026-01-30 02:14:15.490587 New 31 triplets from paper
+2026-01-30 02:14:18.032606 2026-01-30 02:14:18.032563 Extracted 31
+2026-01-30 02:14:18.032816 Sample triplets:
+2026-01-30 02:14:18.032870   - (CMA-ES) --[based on]--> (evolution strategy)
+2026-01-30 02:14:18.032912   - (CMA-ES) --[handles]--> (high-dimensional optimization)
+2026-01-30 02:14:18.032950   - (CMA-ES) --[faces challenge]--> (extremely high-dimensional problems)
+2026-01-30 02:14:18.032996 
+2026-01-30 02:14:18.032989 Processing chunk 4/4...
+2026-01-30 02:14:18.033035 Chunk preview: Connection to Conventional Alignment-based Domain Adaptation Methods. Conventional DA methods often seek to learn domain-invariant features by minimizing the Maximum Mean Discrepancy (MMD) between the...
+2026-01-30 02:14:20.224993 New 23 triplets from paper
+2026-01-30 02:14:22.011147 2026-01-30 02:14:22.011113 Extracted 23
+2026-01-30 02:14:22.011315 Sample triplets:
+2026-01-30 02:14:22.011371   - (DA methods) --[minimize]--> (MMD)
+2026-01-30 02:14:22.011415   - (MMD) --[between]--> (source and target distributions)
+2026-01-30 02:14:22.011456   - (DA methods) --[use]--> (KL divergence)
+2026-01-30 02:14:22.011495 
+2026-01-30 02:14:22.011534 Section summary:
+2026-01-30 02:14:22.011571   - Triplets extracted: 100
+2026-01-30 02:14:22.011610   - Total triplets in graph: 1924
+2026-01-30 02:14:22.011653   - Processing time: 19.04 seconds
+2026-01-30 02:14:22.011710   - API cost so far: $3.4578
+2026-01-30 02:14:22.011750 
+2026-01-30 02:14:22.011830 ======================================================================
+2026-01-30 02:14:22.011883 2026-01-30 02:14:22.011827 SECTION 11/14: B.1. More Details on Dataset
+2026-01-30 02:14:22.011921 ======================================================================
+2026-01-30 02:14:22.012245 Section split into 1 chunks
+2026-01-30 02:14:22.012318 
+2026-01-30 02:14:22.012310 Processing chunk 1/1...
+2026-01-30 02:14:22.012363 Chunk preview: In this paper, we conduct experiments on four ImageNet (Deng et al., 2009) variants to evaluate the out-of-distribution generalization ability, i.e., ImageNetC (Hendrycks \& Dietterich, 2019), ImageNe...
+2026-01-30 02:14:26.016981 New 37 triplets from paper
+2026-01-30 02:14:28.945162 2026-01-30 02:14:28.945130 Extracted 38
+2026-01-30 02:14:28.945352 Sample triplets:
+2026-01-30 02:14:28.945408   - (ImageNet) --[variant]--> (ImageNetC)
+2026-01-30 02:14:28.945450   - (ImageNet) --[variant]--> (ImageNet-R)
+2026-01-30 02:14:28.945489   - (ImageNet) --[variant]--> (ImageNet-V2)
+2026-01-30 02:14:28.945527 
+2026-01-30 02:14:28.945564 Section summary:
+2026-01-30 02:14:28.945601   - Triplets extracted: 38
+2026-01-30 02:14:28.945638   - Total triplets in graph: 1961
+2026-01-30 02:14:28.945681   - Processing time: 6.93 seconds
+2026-01-30 02:14:28.945722   - API cost so far: $3.4812
+2026-01-30 02:14:28.945758 
+2026-01-30 02:14:28.945813 ======================================================================
+2026-01-30 02:14:28.945856 2026-01-30 02:14:28.945810 SECTION 12/14: B.2. More Evaluation Protocols
+2026-01-30 02:14:28.945891 ======================================================================
+2026-01-30 02:14:28.946719 Section split into 2 chunks
+2026-01-30 02:14:28.946802 
+2026-01-30 02:14:28.946795 Processing chunk 1/2...
+2026-01-30 02:14:28.946845 Chunk preview: We use ViT-Base (Dosovitskiy et al., 2021) as the source model backbone for all experiments. The model is trained on [Figure] Figure 3. Visualizations of images in ImageNet and ImageNet-C/V2/R/Sketch,...
+2026-01-30 02:14:31.558935 New 18 triplets from paper
+2026-01-30 02:14:33.046122 2026-01-30 02:14:33.046087 Extracted 21
+2026-01-30 02:14:33.046317 Sample triplets:
+2026-01-30 02:14:33.046373   - (ViT-Base) --[used as]--> (model backbone)
+2026-01-30 02:14:33.046416   - (ImageNet-1K) --[training set]--> (source)
+2026-01-30 02:14:33.046456   - (timm repository) --[provides]--> (model weights)
+2026-01-30 02:14:33.046501 
+2026-01-30 02:14:33.046494 Processing chunk 2/2...
+2026-01-30 02:14:33.046542 Chunk preview: Specifically, the batch size is set to 64 . The number of supports to restore M is chosen from \1,5,20,50,100\, and for all experiments, we consistently set it to 20 based on the optimal accuracy obse...
+2026-01-30 02:14:38.688678 New 33 triplets from paper
+2026-01-30 02:14:40.639478 2026-01-30 02:14:40.639443 Extracted 35
+2026-01-30 02:14:40.639689 Sample triplets:
+2026-01-30 02:14:40.639744   - (batch size) --[value]--> (64)
+2026-01-30 02:14:40.639788   - (number of supports to restore M) --[set to]--> (20)
+2026-01-30 02:14:40.639826   - (TENT) --[follows]--> (hyperparameters from Tent)
+2026-01-30 02:14:40.639864 
+2026-01-30 02:14:40.639901 Section summary:
+2026-01-30 02:14:40.639938   - Triplets extracted: 56
+2026-01-30 02:14:40.639975   - Total triplets in graph: 2000
+2026-01-30 02:14:40.640018   - Processing time: 11.69 seconds
+2026-01-30 02:14:40.640068   - API cost so far: $3.5329
+2026-01-30 02:14:40.640102 
+2026-01-30 02:14:40.640162 ======================================================================
+2026-01-30 02:14:40.640203 2026-01-30 02:14:40.640160 SECTION 13/14: C. More Ablation Studies
+2026-01-30 02:14:40.640237 ======================================================================
+2026-01-30 02:14:40.640786 Section split into 2 chunks
+2026-01-30 02:14:40.640855 
+2026-01-30 02:14:40.640848 Processing chunk 1/2...
+2026-01-30 02:14:40.640910 Chunk preview: Effects of Trade-off Parameter in Eqn. (5). In the main paper, we simply set the trade-off parameter in our fitness function (see Eqn. (5)) to 0.4, to balance the magnitude of two terms. Here, we furt...
+2026-01-30 02:14:43.635254 New 28 triplets from paper
+2026-01-30 02:14:45.908135 2026-01-30 02:14:45.908100 Extracted 28
+2026-01-30 02:14:45.908328 Sample triplets:
+2026-01-30 02:14:45.908384   - (trade-off parameter) --[value]--> (0.4)
+2026-01-30 02:14:45.908427   - (trade-off parameter) --[range]--> (0.1 to 1.0)
+2026-01-30 02:14:45.908466   - (FOA) --[maintains]--> (comparable accuracy)
+2026-01-30 02:14:45.908511 
+2026-01-30 02:14:45.908504 Processing chunk 2/2...
+2026-01-30 02:14:45.908553 Chunk preview: From Figure 4, our FOA outperforms MEMO and NoAdapt at the beginning of the test data stream, i.e., less than 200 samples, [Figure] Figure 4. Online accuracy comparison with MEMO (Zhang et al., 2022) ...
+2026-01-30 02:14:47.068241 New 8 triplets from paper
+2026-01-30 02:14:47.614022 2026-01-30 02:14:47.613988 Extracted 11
+2026-01-30 02:14:47.614199 Sample triplets:
+2026-01-30 02:14:47.614254   - (FOA) --[outperforms]--> (MEMO)
+2026-01-30 02:14:47.614297   - (FOA) --[outperforms]--> (NoAdapt)
+2026-01-30 02:14:47.614336   - (FOA) --[tested on]--> (ViT)
+2026-01-30 02:14:47.614380 
+2026-01-30 02:14:47.614418 Section summary:
+2026-01-30 02:14:47.614455   - Triplets extracted: 39
+2026-01-30 02:14:47.614504   - Total triplets in graph: 2036
+2026-01-30 02:14:47.614549   - Processing time: 6.97 seconds
+2026-01-30 02:14:47.614588   - API cost so far: $3.5664
+2026-01-30 02:14:47.614626 
+2026-01-30 02:14:47.614685 ======================================================================
+2026-01-30 02:14:47.614728 2026-01-30 02:14:47.614682 SECTION 14/14: D. More Experimental Results
+2026-01-30 02:14:47.614764 ======================================================================
+2026-01-30 02:14:47.615455 Section split into 1 chunks
+2026-01-30 02:14:47.615544 
+2026-01-30 02:14:47.615536 Processing chunk 1/1...
+2026-01-30 02:14:47.615589 Chunk preview: More Results w.r.t. ECE. In Tables 2 and 3 of the main paper, we only report the average ECE due to page limits. In this subsection, we provide detailed ECEs for both full-precision and quantized mode...
+2026-01-30 02:14:51.486154 New 33 triplets from paper
+2026-01-30 02:14:53.728803 2026-01-30 02:14:53.728771 Extracted 37
+2026-01-30 02:14:53.729042 Sample triplets:
+2026-01-30 02:14:53.729089   - (FOA) --[outperforms]--> (state-of-the-art methods)
+2026-01-30 02:14:53.729126   - (FOA) --[reduces]--> (ECE)
+2026-01-30 02:14:53.729162   - (ECE) --[measured on]--> (ImageNet-C)
+2026-01-30 02:14:53.729196 
+2026-01-30 02:14:53.729244 Section summary:
+2026-01-30 02:14:53.729276   - Triplets extracted: 37
+2026-01-30 02:14:53.729307   - Total triplets in graph: 2069
+2026-01-30 02:14:53.729345   - Processing time: 6.11 seconds
+2026-01-30 02:14:53.729378   - API cost so far: $3.5914
+2026-01-30 02:14:53.729410 
+2026-01-30 02:14:53.729465 ======================================================================
+2026-01-30 02:14:53.729500 PHASE 2: PROCESSING REPOSITORY CODE
+2026-01-30 02:14:53.729531 ======================================================================
+2026-01-30 02:14:53.729588 Repo is already downloaded, processing it...
+2026-01-30 02:14:53.729622 
+Collecting code files...
+2026-01-30 02:14:53.732303 Found 35 important code files to process
+2026-01-30 02:14:53.732376 
+2026-01-30 02:14:53.732441 
+2026-01-30 02:14:53.732434 Processing file 1/35: main.py
+2026-01-30 02:14:53.733015   3 code chunks extracted
+2026-01-30 02:14:54.889722 New 14 triplets from code
+2026-01-30 02:14:56.858325 New 6 triplets from code
+2026-01-30 02:14:57.927155 New 6 triplets from code
+2026-01-30 02:14:58.512636 
+2026-01-30 02:14:58.512836 File 0/35 processing complete: 26 triplets extracted
+2026-01-30 02:14:58.512913 Total cost so far: $3.6216
+2026-01-30 02:14:58.512958 
+2026-01-30 02:14:58.513004 
+2026-01-30 02:14:58.512997 Processing file 2/35: main.sh
+2026-01-30 02:14:58.513350   1 code chunks extracted
+2026-01-30 02:14:59.948158 New 9 triplets from code
+2026-01-30 02:15:01.005578 
+2026-01-30 02:15:01.005762 File 1/35 processing complete: 10 triplets extracted
+2026-01-30 02:15:01.005822 Total cost so far: $3.6343
+2026-01-30 02:15:01.005865 
+2026-01-30 02:15:01.005912 
+2026-01-30 02:15:01.005905 Processing file 3/35: models/vpt.py
+2026-01-30 02:15:01.006135   1 code chunks extracted
+2026-01-30 02:15:01.486095 New 5 triplets from code
+2026-01-30 02:15:01.910927 
+2026-01-30 02:15:01.911120 File 2/35 processing complete: 5 triplets extracted
+2026-01-30 02:15:01.911178 Total cost so far: $3.6432
+2026-01-30 02:15:01.911222 
+2026-01-30 02:15:01.911267 
+2026-01-30 02:15:01.911260 Processing file 4/35: quant_library/quant_utils/models.py
+2026-01-30 02:15:01.911472   3 code chunks extracted
+2026-01-30 02:15:02.418947 New 4 triplets from code
+2026-01-30 02:15:03.827270 New 9 triplets from code
+2026-01-30 02:15:04.884129 New 3 triplets from code
+2026-01-30 02:15:05.228331 
+2026-01-30 02:15:05.228510 File 3/35 processing complete: 16 triplets extracted
+2026-01-30 02:15:05.228569 Total cost so far: $3.6715
+2026-01-30 02:15:05.228611 
+2026-01-30 02:15:05.228669 
+2026-01-30 02:15:05.228662 Processing file 5/35: quant_library/configs/PTQ4ViT.py
+2026-01-30 02:15:05.228845   1 code chunks extracted
+2026-01-30 02:15:06.725707 New 12 triplets from code
+2026-01-30 02:15:08.023838 
+2026-01-30 02:15:08.024074 File 4/35 processing complete: 12 triplets extracted
+2026-01-30 02:15:08.024133 Total cost so far: $3.6879
+2026-01-30 02:15:08.024176 
+2026-01-30 02:15:08.024224 
+2026-01-30 02:15:08.024216 Processing file 6/35: quant_library/configs/BasePTQ.py
+2026-01-30 02:15:08.024384   1 code chunks extracted
+2026-01-30 02:15:09.340109 New 11 triplets from code
+2026-01-30 02:15:10.144555 
+2026-01-30 02:15:10.144761 File 5/35 processing complete: 11 triplets extracted
+2026-01-30 02:15:10.144821 Total cost so far: $3.7015
+2026-01-30 02:15:10.144863 
+2026-01-30 02:15:10.144909 
+2026-01-30 02:15:10.144902 Processing file 7/35: dataset/ImageNetMask.py
+2026-01-30 02:15:10.145419   0 code chunks extracted
+2026-01-30 02:15:10.145471 
+2026-01-30 02:15:10.145511 File 6/35 processing complete: 0 triplets extracted
+2026-01-30 02:15:10.145550 Total cost so far: $3.7015
+2026-01-30 02:15:10.145586 
+2026-01-30 02:15:10.145626 
+2026-01-30 02:15:10.145620 Processing file 8/35: quant_library/quant_layers/linear.py
+2026-01-30 02:15:10.151754   5 code chunks extracted
+2026-01-30 02:15:11.017134 New 7 triplets from code
+2026-01-30 02:15:14.311215 New 27 triplets from code
+2026-01-30 02:15:20.160550 New 30 triplets from code
+2026-01-30 02:15:24.764598 New 22 triplets from code
+2026-01-30 02:15:27.960507 New 10 triplets from code
+2026-01-30 02:15:28.639257 
+2026-01-30 02:15:28.639469 File 7/35 processing complete: 105 triplets extracted
+2026-01-30 02:15:28.639529 Total cost so far: $3.7886
+2026-01-30 02:15:28.639571 
+2026-01-30 02:15:28.639617 
+2026-01-30 02:15:28.639610 Processing file 9/35: quant_library/quant_layers/conv.py
+2026-01-30 02:15:28.640540   5 code chunks extracted
+2026-01-30 02:15:31.201542 New 25 triplets from code
+2026-01-30 02:15:34.510817 New 7 triplets from code
+2026-01-30 02:15:36.160649 New 6 triplets from code
+2026-01-30 02:15:39.220696 New 11 triplets from code
+2026-01-30 02:15:40.530846 New 3 triplets from code
+2026-01-30 02:15:40.739522 
+2026-01-30 02:15:40.739709 File 8/35 processing complete: 71 triplets extracted
+2026-01-30 02:15:40.739767 Total cost so far: $3.8588
+2026-01-30 02:15:40.739813 
+2026-01-30 02:15:40.739859 
+2026-01-30 02:15:40.739852 Processing file 10/35: quant_library/quant_layers/matmul.py
+2026-01-30 02:15:40.740975   5 code chunks extracted
+2026-01-30 02:15:43.484570 New 24 triplets from code
+2026-01-30 02:15:46.118114 New 8 triplets from code
+2026-01-30 02:15:47.919154 New 8 triplets from code
+2026-01-30 02:15:51.374761 New 17 triplets from code
+2026-01-30 02:21:38.194957 New 1696 triplets from code
+2026-01-30 02:23:09.016185 
+2026-01-30 02:23:09.016481 File 9/35 processing complete: 1768 triplets extracted
+2026-01-30 02:23:09.016565 Total cost so far: $4.8792
+2026-01-30 02:23:09.016642 
+2026-01-30 02:23:09.016709 
+2026-01-30 02:23:09.016701 Processing file 11/35: quant_library/quant_utils/datasets.py
+2026-01-30 02:23:09.017137   11 code chunks extracted
+2026-01-30 02:23:09.324453 New 3 triplets from code
+2026-01-30 02:23:10.092236 New 4 triplets from code
+2026-01-30 02:23:12.907701 New 29 triplets from code
+2026-01-30 02:23:18.512437 New 29 triplets from code
+2026-01-30 02:23:22.119280 New 13 triplets from code
+2026-01-30 02:23:24.249471 New 12 triplets from code
+2026-01-30 02:23:26.446104 New 7 triplets from code
+2026-01-30 02:23:27.574914 New 6 triplets from code
+2026-01-30 02:23:31.744614 New 32 triplets from code
+2026-01-30 02:23:35.340336 New 19 triplets from code
+2026-01-30 02:23:37.427633 New 6 triplets from code
+2026-01-30 02:23:37.829265 
+2026-01-30 02:23:37.829454 File 10/35 processing complete: 160 triplets extracted
+2026-01-30 02:23:37.829516 Total cost so far: $5.0246
+2026-01-30 02:23:37.829561 
+2026-01-30 02:23:37.829613 
+2026-01-30 02:23:37.829605 Processing file 12/35: quant_library/quant_utils/quant_calib.py
+2026-01-30 02:23:37.830278   4 code chunks extracted
+2026-01-30 02:23:38.502955 New 8 triplets from code
+2026-01-30 02:23:39.796436 New 7 triplets from code
+2026-01-30 02:23:41.036760 New 4 triplets from code
+2026-01-30 02:23:42.208166 New 9 triplets from code
+2026-01-30 02:23:42.702415 
+2026-01-30 02:23:42.702616 File 11/35 processing complete: 34 triplets extracted
+2026-01-30 02:23:42.702676 Total cost so far: $5.0634
+2026-01-30 02:23:42.702723 
+2026-01-30 02:23:42.702772 
+2026-01-30 02:23:42.702765 Processing file 13/35: tta_library/cotta.py
+2026-01-30 02:23:42.703082   7 code chunks extracted
+2026-01-30 02:23:43.287176 New 4 triplets from code
+2026-01-30 02:23:44.850106 New 4 triplets from code
+2026-01-30 02:23:45.783127 New 6 triplets from code
+2026-01-30 02:23:46.814271 New 7 triplets from code
+2026-01-30 02:23:47.748451 New 4 triplets from code
+2026-01-30 02:23:48.790130 New 8 triplets from code
+2026-01-30 02:23:49.733083 New 5 triplets from code
+2026-01-30 02:23:50.131284 
+2026-01-30 02:23:50.131472 File 12/35 processing complete: 39 triplets extracted
+2026-01-30 02:23:50.131535 Total cost so far: $5.1306
+2026-01-30 02:23:50.131580 
+2026-01-30 02:23:50.131638 
+2026-01-30 02:23:50.131631 Processing file 14/35: dataset/selectedRotateImageFolder.py
+2026-01-30 02:23:50.131935   9 code chunks extracted
+2026-01-30 02:23:50.542956 New 4 triplets from code
+2026-01-30 02:23:51.519245 New 6 triplets from code
+2026-01-30 02:23:52.704356 New 6 triplets from code
+2026-01-30 02:23:54.140163 New 10 triplets from code
+2026-01-30 02:23:55.729299 New 11 triplets from code
+2026-01-30 02:23:57.250508 New 6 triplets from code
+2026-01-30 02:23:58.618672 New 7 triplets from code
+2026-01-30 02:23:59.623719 New 5 triplets from code
+2026-01-30 02:24:03.078847 New 29 triplets from code
+2026-01-30 02:24:05.736721 
+2026-01-30 02:24:05.737055 File 13/35 processing complete: 85 triplets extracted
+2026-01-30 02:24:05.737139 Total cost so far: $5.2289
+2026-01-30 02:24:05.737202 
+2026-01-30 02:24:05.737293 
+2026-01-30 02:24:05.737270 Processing file 15/35: tta_library/sar.py
+2026-01-30 02:24:05.737676   9 code chunks extracted
+2026-01-30 02:24:06.277389 New 5 triplets from code
+2026-01-30 02:24:07.793639 New 12 triplets from code
+2026-01-30 02:24:09.420718 New 5 triplets from code
+2026-01-30 02:24:10.809329 New 10 triplets from code
+2026-01-30 02:24:12.679191 New 11 triplets from code
+2026-01-30 02:24:13.779896 New 3 triplets from code
+2026-01-30 02:24:14.545236 New 2 triplets from code
+2026-01-30 02:24:15.383298 New 2 triplets from code
+2026-01-30 02:24:16.191793 New 5 triplets from code
+2026-01-30 02:24:16.607762 
+2026-01-30 02:24:16.607966 File 14/35 processing complete: 68 triplets extracted
+2026-01-30 02:24:16.608028 Total cost so far: $5.3194
+2026-01-30 02:24:16.608080 
+2026-01-30 02:24:16.608151 
+2026-01-30 02:24:16.608143 Processing file 16/35: tta_library/foa.py
+2026-01-30 02:24:16.608488   3 code chunks extracted
+2026-01-30 02:24:17.233152 New 6 triplets from code
+2026-01-30 02:24:18.303473 New 6 triplets from code
+2026-01-30 02:24:19.241356 New 6 triplets from code
+2026-01-30 02:24:19.617054 
+2026-01-30 02:24:19.617248 File 15/35 processing complete: 20 triplets extracted
+2026-01-30 02:24:19.617306 Total cost so far: $5.3473
+2026-01-30 02:24:19.617347 
+2026-01-30 02:24:19.617391 
+2026-01-30 02:24:19.617384 Processing file 17/35: tta_library/foa_bp.py
+2026-01-30 02:24:19.617625   8 code chunks extracted
+2026-01-30 02:24:20.354004 New 6 triplets from code
+2026-01-30 02:24:21.408806 New 7 triplets from code
+2026-01-30 02:24:22.097152 New 3 triplets from code
+2026-01-30 02:24:23.492957 New 11 triplets from code
+2026-01-30 02:24:24.827405 New 0 triplets from code
+2026-01-30 02:24:25.407419 New 0 triplets from code
+2026-01-30 02:24:26.196914 New 1 triplets from code
+2026-01-30 02:24:27.270217 New 12 triplets from code
+2026-01-30 02:24:28.121812 
+2026-01-30 02:24:28.122085 File 16/35 processing complete: 58 triplets extracted
+2026-01-30 02:24:28.122149 Total cost so far: $5.4255
+2026-01-30 02:24:28.122193 
+2026-01-30 02:24:28.122248 
+2026-01-30 02:24:28.122240 Processing file 18/35: calibration_library/metrics.py
+2026-01-30 02:24:28.122560   2 code chunks extracted
+2026-01-30 02:24:28.897052 New 7 triplets from code
+2026-01-30 02:24:30.414306 New 10 triplets from code
+2026-01-30 02:24:31.319547 
+2026-01-30 02:24:31.319807 File 17/35 processing complete: 18 triplets extracted
+2026-01-30 02:24:31.319886 Total cost so far: $5.4455
+2026-01-30 02:24:31.319948 
+2026-01-30 02:24:31.320017 
+2026-01-30 02:24:31.320006 Processing file 19/35: tta_library/tent.py
+2026-01-30 02:24:31.320306   10 code chunks extracted
+2026-01-30 02:24:31.874952 New 6 triplets from code
+2026-01-30 02:24:33.018371 New 3 triplets from code
+2026-01-30 02:24:33.899039 New 6 triplets from code
+2026-01-30 02:24:34.770831 New 3 triplets from code
+2026-01-30 02:24:36.340808 New 16 triplets from code
+2026-01-30 02:24:37.791909 New 3 triplets from code
+2026-01-30 02:24:38.376751 New 2 triplets from code
+2026-01-30 02:24:38.913497 New 0 triplets from code
+2026-01-30 02:24:39.711964 New 0 triplets from code
+2026-01-30 02:24:40.289361 New 0 triplets from code
+2026-01-30 02:24:40.349525 
+2026-01-30 02:24:40.349781 File 18/35 processing complete: 72 triplets extracted
+2026-01-30 02:24:40.349851 Total cost so far: $5.5422
+2026-01-30 02:24:40.349905 
+2026-01-30 02:24:40.349989 
+2026-01-30 02:24:40.349977 Processing file 20/35: calibration_library/visualization.py
+2026-01-30 02:24:40.350262   1 code chunks extracted
+2026-01-30 02:24:41.159834 New 10 triplets from code
+2026-01-30 02:24:42.003616 
+2026-01-30 02:24:42.003817 File 19/35 processing complete: 10 triplets extracted
+2026-01-30 02:24:42.003889 Total cost so far: $5.5521
+2026-01-30 02:24:42.003952 
+2026-01-30 02:24:42.004015 
+2026-01-30 02:24:42.004005 Processing file 21/35: tta_library/my_transforms.py
+2026-01-30 02:24:42.004356   3 code chunks extracted
+2026-01-30 02:24:42.432951 New 5 triplets from code
+2026-01-30 02:24:43.185330 New 5 triplets from code
+2026-01-30 02:24:44.135475 New 5 triplets from code
+2026-01-30 02:24:44.530122 
+2026-01-30 02:24:44.530375 File 20/35 processing complete: 15 triplets extracted
+2026-01-30 02:24:44.530448 Total cost so far: $5.5780
+2026-01-30 02:24:44.530500 
+2026-01-30 02:24:44.530559 
+2026-01-30 02:24:44.530550 Processing file 22/35: quant_library/quant_utils/net_wrap.py
+2026-01-30 02:24:44.530819   4 code chunks extracted
+2026-01-30 02:24:46.558827 New 17 triplets from code
+2026-01-30 02:24:48.779981 New 5 triplets from code
+2026-01-30 02:24:52.010622 New 33 triplets from code
+2026-01-30 02:24:56.127021 New 24 triplets from code
+2026-01-30 02:24:58.156994 
+2026-01-30 02:24:58.157254 File 21/35 processing complete: 79 triplets extracted
+2026-01-30 02:24:58.157313 Total cost so far: $5.6421
+2026-01-30 02:24:58.157355 
+2026-01-30 02:24:58.157413 
+2026-01-30 02:24:58.157405 Processing file 23/35: quant_library/quant_utils/integer.py
+2026-01-30 02:24:58.157680   4 code chunks extracted
+2026-01-30 02:24:58.592391 New 4 triplets from code
+2026-01-30 02:24:59.379460 New 5 triplets from code
+2026-01-30 02:25:00.591088 New 9 triplets from code
+2026-01-30 02:25:01.675655 New 4 triplets from code
+2026-01-30 02:25:02.008708 
+2026-01-30 02:25:02.008880 File 22/35 processing complete: 22 triplets extracted
+2026-01-30 02:25:02.008938 Total cost so far: $5.6789
+2026-01-30 02:25:02.008981 
+2026-01-30 02:25:02.009026 
+2026-01-30 02:25:02.009020 Processing file 24/35: tta_library/lame.py
+2026-01-30 02:25:02.009241   4 code chunks extracted
+2026-01-30 02:25:02.339295 New 3 triplets from code
+2026-01-30 02:25:03.043875 New 4 triplets from code
+2026-01-30 02:25:03.914343 New 7 triplets from code
+2026-01-30 02:25:04.964184 New 6 triplets from code
+2026-01-30 02:25:05.433611 
+2026-01-30 02:25:05.433810 File 23/35 processing complete: 21 triplets extracted
+2026-01-30 02:25:05.433869 Total cost so far: $5.7147
+2026-01-30 02:25:05.433911 
+2026-01-30 02:25:05.433981 
+2026-01-30 02:25:05.433973 Processing file 25/35: utils/cli_utils.py
+2026-01-30 02:25:05.434186   6 code chunks extracted
+2026-01-30 02:25:05.937273 New 6 triplets from code
+2026-01-30 02:25:06.931261 New 6 triplets from code
+2026-01-30 02:25:07.975386 New 5 triplets from code
+2026-01-30 02:25:08.827015 New 1 triplets from code
+2026-01-30 02:25:09.306196 New 3 triplets from code
+2026-01-30 02:25:10.212047 New 6 triplets from code
+2026-01-30 02:25:10.642813 
+2026-01-30 02:25:10.643015 File 24/35 processing complete: 30 triplets extracted
+2026-01-30 02:25:10.643075 Total cost so far: $5.7685
+2026-01-30 02:25:10.643116 
+2026-01-30 02:25:10.643160 
+2026-01-30 02:25:10.643154 Processing file 26/35: tta_library/t3a.py
+2026-01-30 02:25:10.643364   3 code chunks extracted
+2026-01-30 02:25:10.919880 New 3 triplets from code
+2026-01-30 02:25:11.702672 New 6 triplets from code
+2026-01-30 02:25:12.460315 New 1 triplets from code
+2026-01-30 02:25:12.532681 
+2026-01-30 02:25:12.532878 File 25/35 processing complete: 14 triplets extracted
+2026-01-30 02:25:12.532935 Total cost so far: $5.7944
+2026-01-30 02:25:12.532977 
+2026-01-30 02:25:12.533022 
+2026-01-30 02:25:12.533015 Processing file 27/35: utils/utils.py
+2026-01-30 02:25:12.533197   7 code chunks extracted
+2026-01-30 02:25:13.344184 New 8 triplets from code
+2026-01-30 02:25:14.475544 New 6 triplets from code
+2026-01-30 02:25:15.749009 New 8 triplets from code
+2026-01-30 02:25:16.718241 New 4 triplets from code
+2026-01-30 02:25:17.523090 New 5 triplets from code
+2026-01-30 02:25:18.817439 New 10 triplets from code
+2026-01-30 02:25:20.270091 New 8 triplets from code
+2026-01-30 02:25:20.845341 
+2026-01-30 02:25:20.845548 File 26/35 processing complete: 50 triplets extracted
+2026-01-30 02:25:20.845608 Total cost so far: $5.8608
+2026-01-30 02:25:20.845653 
+2026-01-30 02:25:20.845699 
+2026-01-30 02:25:20.845693 Processing file 28/35: calibration_library/recalibration.py
+2026-01-30 02:25:20.845970   1 code chunks extracted
+2026-01-30 02:25:21.404956 New 6 triplets from code
+2026-01-30 02:25:21.927707 
+2026-01-30 02:25:21.927911 File 27/35 processing complete: 6 triplets extracted
+2026-01-30 02:25:21.927971 Total cost so far: $5.8703
+2026-01-30 02:25:21.928013 
+2026-01-30 02:25:21.928058 
+2026-01-30 02:25:21.928051 Processing file 29/35: tta_library/sam.py
+2026-01-30 02:25:21.928251   1 code chunks extracted
+2026-01-30 02:25:22.218267 New 3 triplets from code
+2026-01-30 02:25:22.415093 
+2026-01-30 02:25:22.415297 File 28/35 processing complete: 3 triplets extracted
+2026-01-30 02:25:22.415354 Total cost so far: $5.8785
+2026-01-30 02:25:22.415397 
+2026-01-30 02:25:22.415443 
+2026-01-30 02:25:22.415436 Processing file 30/35: tta_library/foa_shift.py
+2026-01-30 02:25:22.415625   2 code chunks extracted
+2026-01-30 02:25:22.948046 New 6 triplets from code
+2026-01-30 02:25:24.039678 New 6 triplets from code
+2026-01-30 02:25:24.409555 
+2026-01-30 02:25:24.409745 File 29/35 processing complete: 14 triplets extracted
+2026-01-30 02:25:24.409802 Total cost so far: $5.8970
+2026-01-30 02:25:24.409844 
+2026-01-30 02:25:24.409889 
+2026-01-30 02:25:24.409882 Processing file 31/35: dataset/ImagenetV2.py
+2026-01-30 02:25:24.410077   1 code chunks extracted
+2026-01-30 02:25:25.968581 New 15 triplets from code
+2026-01-30 02:25:27.023770 
+2026-01-30 02:25:27.023970 File 30/35 processing complete: 15 triplets extracted
+2026-01-30 02:25:27.024031 Total cost so far: $5.9096
+2026-01-30 02:25:27.024074 
+2026-01-30 02:25:27.024122 
+2026-01-30 02:25:27.024114 Processing file 32/35: calibration_library/datasets/cifar_new.py
+2026-01-30 02:25:27.024275   1 code chunks extracted
+2026-01-30 02:25:28.387705 New 10 triplets from code
+2026-01-30 02:25:29.233226 
+2026-01-30 02:25:29.233446 File 31/35 processing complete: 10 triplets extracted
+2026-01-30 02:25:29.233505 Total cost so far: $5.9218
+2026-01-30 02:25:29.233551 
+2026-01-30 02:25:29.233604 
+2026-01-30 02:25:29.233597 Processing file 33/35: dataset/__init__.py
+2026-01-30 02:25:29.233703   Skipping (binary or too small)
+2026-01-30 02:25:29.233753 
+2026-01-30 02:25:29.233746 Processing file 34/35: utils/__init__.py
+2026-01-30 02:25:29.233828   Skipping (binary or too small)
+2026-01-30 02:25:29.233875 
+2026-01-30 02:25:29.233869 Processing file 35/35: calibration_library/datasets/cifar_10_c.py
+2026-01-30 02:25:29.233997   1 code chunks extracted
+2026-01-30 02:25:30.219883 New 10 triplets from code
+2026-01-30 02:25:31.029743 
+2026-01-30 02:25:31.029944 File 34/35 processing complete: 10 triplets extracted
+2026-01-30 02:25:31.030030 Total cost so far: $5.9330
+2026-01-30 02:25:31.030074 
+2026-01-30 02:25:31.030127 ======================================================================
+2026-01-30 02:25:31.030168 REPRODUCTION COOKBOOK ANALYSIS
+2026-01-30 02:25:31.030204 ======================================================================
+2026-01-30 02:25:31.045182 Total processing time: 1931.57 seconds
+2026-01-30 02:25:31.045280 Total API cost: $5.9330
+2026-01-30 02:25:31.045322 Total triplets extracted: 4784
+2026-01-30 02:25:31.045357 Unique components/concepts: 3093
+2026-01-30 02:25:31.045389 
+2026-01-30 02:25:31.045420 Top 15 most connected components (key implementation elements):
+2026-01-30 02:25:31.045452   - foa: 1355 connections
+2026-01-30 02:25:31.045483   - a_interval: 558 connections
+2026-01-30 02:25:31.045513   - a_bit: 554 connections
+2026-01-30 02:25:31.045543   - a_qmax: 552 connections
+2026-01-30 02:25:31.045574   - model: 55 connections
+2026-01-30 02:25:31.045604   - 1: 43 connections
+2026-01-30 02:25:31.045633   - tta: 37 connections
+2026-01-30 02:25:31.045663   - cma: 36 connections
+2026-01-30 02:25:31.045693   - ptqslquantlinear: 35 connections
+2026-01-30 02:25:31.045724   - tent: 34 connections
+2026-01-30 02:25:31.045755   - test_loader: 34 connections
+2026-01-30 02:25:31.045785   - sar: 31 connections
+2026-01-30 02:25:31.045814   - true: 27 connections
+2026-01-30 02:25:31.045844   - fitness function: 23 connections
+2026-01-30 02:25:31.045874   - imagenetc: 22 connections
+2026-01-30 02:25:31.045903 
+2026-01-30 02:25:31.045933 Top 15 relation types:
+2026-01-30 02:25:31.046001   - impacts: 1609 occurrences
+2026-01-30 02:25:31.046037   - avoids: 622 occurrences
+2026-01-30 02:25:31.046068   - improves: 521 occurrences
+2026-01-30 02:25:31.046099   - uses: 144 occurrences
+2026-01-30 02:25:31.046129   - type: 116 occurrences
+2026-01-30 02:25:31.046161   - value: 114 occurrences
+2026-01-30 02:25:31.046191   - has parameter: 60 occurrences
+2026-01-30 02:25:31.046222   - has: 50 occurrences
+2026-01-30 02:25:31.046252   - used for: 44 occurrences
+2026-01-30 02:25:31.046298   - achieves: 26 occurrences
+2026-01-30 02:25:31.046329   - is type: 26 occurrences
+2026-01-30 02:25:31.046375   - inherits from: 23 occurrences
+2026-01-30 02:25:31.046407   - takes: 21 occurrences
+2026-01-30 02:25:31.046438   - includes: 20 occurrences
+2026-01-30 02:25:31.046469   - contains: 20 occurrences
+2026-01-30 02:25:31.046500 
+2026-01-30 02:25:31.046531 Top implementation relations:
+2026-01-30 02:25:31.046563   - uses: 144 occurrences
+2026-01-30 02:25:31.046594   - requires: 17 occurrences
+2026-01-30 02:25:31.046640   - implements: 6 occurrences
+2026-01-30 02:25:31.046670   - requires_grad: 5 occurrences
+2026-01-30 02:25:31.046713   - uses batch_size: 2 occurrences
+2026-01-30 02:25:31.046745   - uses self.test_loader_kwargs: 2 occurrences
+2026-01-30 02:25:31.046775   - uses transform: 2 occurrences
+2026-01-30 02:25:31.046807   - extends: 1 occurrences
+2026-01-30 02:25:31.046837   - uses cache: 1 occurrences
+2026-01-30 02:25:31.046866   - uses dataloader: 1 occurrences
+2026-01-30 02:25:31.046895 
+2026-01-30 02:25:31.046925 Top configuration relations:
+2026-01-30 02:25:31.046954   - value: 114 occurrences
+2026-01-30 02:25:31.046984   - has parameter: 60 occurrences
+2026-01-30 02:25:31.047014   - set to: 12 occurrences
+2026-01-30 02:25:31.047044   - parameters: 5 occurrences
+2026-01-30 02:25:31.047088   - parameter: 4 occurrences
+2026-01-30 02:25:31.047119   - k value: 3 occurrences
+2026-01-30 02:25:31.047149   - parameter of: 3 occurrences
+2026-01-30 02:25:31.047181   - has value: 2 occurrences
+2026-01-30 02:25:31.047211   - hyperparameter: 1 occurrences
+2026-01-30 02:25:31.047241   - default: 1 occurrences
+2026-01-30 02:25:31.047272 
+2026-01-30 02:25:31.468610 Reproduction cookbook saved to graph_data.json
+2026-01-30 02:31:14.291064 ======================================================================
+2026-01-30 02:31:14.291216 REPRODUCTION COOKBOOK COMPLETE
+2026-01-30 02:31:14.291262 ======================================================================
+2026-01-30 02:31:14.291299 
+2026-01-30 02:31:14.291334 This knowledge graph can guide:
+2026-01-30 02:31:14.291384   1. Setting up the implementation environment
+2026-01-30 02:31:14.291418   2. Configuring hyperparameters correctly
+2026-01-30 02:31:14.291450   3. Understanding the training procedure
+2026-01-30 02:31:14.291481   4. Reproducing experimental results
+2026-01-30 02:31:14.291514   5. Navigating the codebase at: https://github.com/mr-eggplant/FOA

@@ -32,7 +32,7 @@ New triplets: {new_triplets}.
 Warning! Replacing must be generated strictly in following format: [[outdated_triplet_1 -> actual_triplet_1], [outdated_triplet_2 -> actual_triplet_2], ...], you MUST NOT include any descriptions in answer.
 Replacing: """
 
-prompt_extraction_current = '''Objective: The main goal is to meticulously gather information from game observations and organize this data into a clear, structured knowledge graph.
+prompt_extraction_current = '''Objective: The main goal is to meticulously gather information from the paper and organize this data into a clear, structured knowledge graph.
 
 Guidelines for Building the Knowledge Graph:
 

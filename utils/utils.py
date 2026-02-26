@@ -3,6 +3,7 @@ import re
 import ast
 import json
 import torch
+import datetime
 import numpy as np
 from copy import deepcopy
 from inspect import signature
@@ -35,8 +36,8 @@ def process_triplets(raw_triplets):
         subj, relation, obj = subj.split(":")[-1].strip(''' '\n"'''), relation.strip(''' '\n"'''), obj.strip(''' '\n"''')
         if len(subj) == 0 or len(relation) == 0 or len(obj) == 0:
             continue
-        triplets.append([subj, obj, {"label": relation}])
-        
+        triplets.append(clear_triplet([subj, obj, {"label": relation}]))
+    
     return triplets
 
 def process_candidates(raw_triplets):
@@ -114,10 +115,11 @@ class Logger:
         os.makedirs(path, exist_ok=True)
         
     def __call__(self, text, filename = "log.txt", verbose = True):
+        current_datetime = datetime.datetime.now()
         if verbose:
-            print(text)
+            print(f"{current_datetime} {text}")
         with open(self.path + "/" + filename, "a") as file:
-            file.write(text + "\n")
+            file.write(str(current_datetime) + ' ' + text + "\n")
             
     def to_json(self, obj, filename = "history.json"):
         try:
@@ -161,6 +163,7 @@ def check_conn(connection):
     return "north" in connection or "south" in connection or "east" in connection or "west" in connection
 
 def clear_triplet(triplet):
+    '''
     if triplet[0] == "I":
         triplet = ("inventory", triplet[1], triplet[2])
     if triplet[1] == "I":
@@ -169,6 +172,7 @@ def clear_triplet(triplet):
         triplet = ("player", triplet[1], triplet[2])
     if triplet[1] == "P":
         triplet = (triplet[0], "player", triplet[2])
+    '''
     return [triplet[0].lower().strip('''"'. `;:'''), triplet[1].lower().strip('''"'. `;:'''), {"label": triplet[2]["label"].lower().strip('''"'. `;:''')}]
 
 def find_relation(spatial_graph, parent, loc, first):

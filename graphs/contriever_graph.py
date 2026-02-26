@@ -11,8 +11,8 @@ from utils.utils import process_triplets, parse_triplets_removing, \
     top_k_obs, clear_triplet
 
 class ContrieverGraph(TripletGraph):
-    def __init__(self, model, system_prompt, api_key, device = "cpu"):
-        super().__init__(model, system_prompt, api_key)
+    def __init__(self, model, system_prompt, api_key, base_url='', device = "cpu"):
+        super().__init__(model, system_prompt, api_key, base_url=base_url)
         self.retriever = Retriever(device)
         self.triplets_emb, self.items_emb = {}, {}
         self.obs_episodic, self.obs_episodic_list, self.top_episodic_dict_list = {}, [], []

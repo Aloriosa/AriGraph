@@ -1,18 +1,20 @@
 import requests
 from time import sleep
 from copy import deepcopy
-from openai import OpenAI
+from openai import OpenAI, DefaultHttpxClient
 
 from utils.utils import clear_triplet, check_conn, find_relation
 
 
 class TripletGraph:
-    def __init__(self, model, system_prompt, api_key):
+    def __init__(self, model, system_prompt, api_key, base_url=''):
         self.triplets = []
         self.model, self.system_prompt = model, system_prompt
         self.total_amount = 0
         self.client = OpenAI(
+            base_url=base_url,
             api_key=api_key,
+            http_client=DefaultHttpxClient(verify=False)
         )
 
 
