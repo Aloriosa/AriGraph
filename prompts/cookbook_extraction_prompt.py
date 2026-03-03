@@ -128,6 +128,35 @@ Extracted triplets: '''
 
 
 # =============================================================================
+# PROMPT FOR PAPER-TO-CODE LINKING (Phase 2: connect paper concepts to code)
+# =============================================================================
+
+prompt_paper_code_linking = '''Objective: Given a paper knowledge graph and a codebase, create triplets that LINK paper concepts to their implementations in code.
+
+Paper graph (implementation concepts from the paper):
+{paper_graph_triplets}
+
+Code index for this file:
+{code_index}
+
+Code for file {file_path}:
+{code_chunk}
+
+Rules:
+- Create triplets: (paper_entity, relation, code_entity)
+- code_entity format: "path/to/file" or "path/to/file::ClassName" or "path/to/file::function_name"
+- Relations: implemented_in, configured_in, handles, executes, defined_in
+- Only link when the code clearly implements/handles the paper concept
+- Reuse existing paper entity names from the graph exactly
+- Do not invent new paper entities
+- If no clear links exist for this file, return empty (no triplets)
+
+Output format: "subject, relation, object; subject, relation, object; ..."
+
+Linking triplets: '''
+
+
+# =============================================================================
 # PROMPT FOR INCREMENTAL GRAPH UPDATE (Adding new paper to existing graph)
 # =============================================================================
 

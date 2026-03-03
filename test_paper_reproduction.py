@@ -7,6 +7,8 @@ Extracts implementation details to create a "cookbook" for reproducing research.
 import re
 import os
 import sys
+import ast
+import json
 import argparse
 import subprocess
 import tempfile
@@ -26,7 +28,7 @@ import networkx as nx
 
 sys.path.insert(0, os.path.dirname(__file__))
 from prompts.paper_reproduction_prompt import prompt_extraction_reproduction, prompt_extraction_reproduction_with_repo
-from prompts.cookbook_extraction_prompt import prompt_cookbook_extraction, prompt_cookbook_extraction_wo_code
+from prompts.cookbook_extraction_prompt import prompt_cookbook_extraction, prompt_cookbook_extraction_wo_code, prompt_paper_code_linking
 
 
 # =============================================================================
@@ -177,6 +179,124 @@ def extract_code_chunks(file_content, file_path, max_chunk_size=3000):
                 final_chunks.append(chunk[i:i+max_chunk_size])
     
     return final_chunks#[:10]  # Max 10 chunks per file
+
+
+def build_code_index(repo_dir, code_files, log=None):
+    """
+    Parse codebase to extract structured index: file path, type (class/function/config_key), name.
+    Used for Phase 2 linking pass.
+    """
+    index = []
+    repo_path = Path(repo_dir)
+
+    for rel_path, file_path in code_files:
+        if not file_path.exists():
+            continue
+        content = read_file_safe(file_path)
+        if "[Binary file" in content or len(content) < 10:
+            continue
+
+        rel_path_str = str(rel_path)
+
+        # Python: use ast to extract class and function names
+        if str(rel_path).endswith('.py'):
+            try:
+                tree = ast.parse(content)
+
+                class _Visitor(ast.NodeVisitor):
+                    def __init__(self):
+                        self.entries = []
+                        self._class_stack = []
+                        self._in_function = False
+
+                    def visit_ClassDef(self, node):
+                        self.entries.append({
+                            "file": rel_path_str,
+                            "type": "class",
+                            "name": node.name,
+                            "qual": f"{rel_path_str}::{node.name}",
+                        })
+                        self._class_stack.append(node.name)
+                        self.generic_visit(node)
+                        self._class_stack.pop()
+
+                    def visit_FunctionDef(self, node):
+                        if self._in_function:
+                            self.generic_visit(node)
+                            return
+                        self._in_function = True
+                        if self._class_stack:
+                            qual_name = f"{self._class_stack[-1]}.{node.name}"
+                            ent_type = "method"
+                        else:
+                            qual_name = node.name
+                            ent_type = "function"
+                        self.entries.append({
+                            "file": rel_path_str,
+                            "type": ent_type,
+                            "name": qual_name,
+                            "qual": f"{rel_path_str}::{qual_name}",
+                        })
+                        self.generic_visit(node)
+                        self._in_function = False
+
+                v = _Visitor()
+                v.visit(tree)
+                index.extend(v.entries)
+            except (SyntaxError, ValueError):
+                for m in re.finditer(r'^\s*(?:class|def)\s+(\w+)', content, re.MULTILINE):
+                    idx_type = "class" if m.group(0).strip().startswith("class") else "function"
+                    index.append({
+                        "file": rel_path_str,
+                        "type": idx_type,
+                        "name": m.group(1),
+                        "qual": f"{rel_path_str}::{m.group(1)}",
+                    })
+
+        # Config files: extract top-level keys
+        elif str(rel_path).endswith(('.json', '.yaml', '.yml')):
+            try:
+                if str(rel_path).endswith('.json'):
+                    data = json.loads(content)
+                else:
+                    try:
+                        import yaml
+                        data = yaml.safe_load(content) or {}
+                    except ImportError:
+                        data = {}
+                if isinstance(data, dict):
+                    for key in list(data.keys())[:30]:
+                        index.append({
+                            "file": rel_path_str,
+                            "type": "config",
+                            "name": str(key),
+                            "qual": f"{rel_path_str}::{key}",
+                        })
+            except (json.JSONDecodeError, Exception):
+                pass
+        elif str(rel_path).endswith('.toml'):
+            try:
+                try:
+                    import tomllib
+                    data = tomllib.loads(content)
+                except ImportError:
+                    try:
+                        import tomli
+                        data = tomli.loads(content)
+                    except ImportError:
+                        data = {}
+                if isinstance(data, dict):
+                    for key in data.keys():
+                        index.append({
+                            "file": rel_path_str,
+                            "type": "config",
+                            "name": key,
+                            "qual": f"{rel_path_str}::{key}",
+                        })
+            except Exception:
+                pass
+
+    return index
 
 
 # =============================================================================
@@ -353,7 +473,8 @@ class ReproductionGraph(ContrieverGraph):
     
     def update_without_retrieve(self, observation, prev_subgraph, log, source_type="paper"):
         """Override to use reproduction-focused prompt."""
-        example = [re.sub(r"Step \d+: ", "", triplet) for triplet in prev_subgraph]
+        example = [re.sub(r"Step \d+: ", "", t) for t in prev_subgraph]
+        example_str = "; ".join(example) if example else ""
         
         if source_type == "code":
             observation = f"[CODE IMPLEMENTATION]\n{observation}"
@@ -362,7 +483,7 @@ class ReproductionGraph(ContrieverGraph):
         
         prompt = self.graph_builder_instruction + self.reproduction_prompt.format(
             observation=observation, 
-            example=example
+            example=example_str
         )
         
         response, _ = self.generate(prompt, t=0.001)
@@ -527,6 +648,77 @@ def _triplet_to_line(triplet):
     return f"{subj}, {rel_label}, {obj}"
 
 
+def run_linking_pass(paper_triplets, code_index, code_files, graph, log, max_paper_triplets=80):
+    """
+    Phase 2 linking: for each code file, use LLM to create triplets linking paper
+    entities to code entities. Uses per-file strategy (Strategy A).
+    """
+    from utils.utils import process_triplets
+
+    paper_lines = _get_context_triplets(paper_triplets, max_triplets=max_paper_triplets)
+    paper_block = "\n".join(f"- {line}" for line in paper_lines)
+
+    linking_triplets_total = 0
+
+    for rel_path, file_path in code_files:
+        if not file_path.exists():
+            continue
+        content = read_file_safe(file_path)
+        if "[Binary file" in content or len(content) < 10:
+            continue
+
+        rel_path_str = str(rel_path)
+        file_index = [e for e in code_index if e["file"] == rel_path_str]
+        if not file_index:
+            file_index = [{"file": rel_path_str, "type": "file", "name": rel_path_str, "qual": rel_path_str}]
+
+        index_lines = [f"- {e['qual']} ({e['type']})" for e in file_index]
+        index_block = "\n".join(index_lines[:50])  # Limit to avoid bloat
+
+        chunks = extract_code_chunks(content, rel_path_str)
+        code_chunk = "\n\n---\n\n".join(chunks[:3]) if chunks else content[:2000]
+        code_chunk = code_chunk[:4000]  # Cap context
+
+        prompt = prompt_paper_code_linking.format(
+            paper_graph_triplets=paper_block,
+            code_index=index_block,
+            file_path=rel_path_str,
+            code_chunk=code_chunk,
+        )
+
+        try:
+            response, _ = graph.generate(prompt, t=0.001)
+            new_triplets_raw = process_triplets(response)
+            graph.add_triplets(new_triplets_raw)
+            linking_triplets_total += len(new_triplets_raw)
+            if new_triplets_raw:
+                log(f"  Linking: {len(new_triplets_raw)} triplets for {rel_path_str}")
+                for t in new_triplets_raw[:2]:
+                    log(f"    - {_triplet_to_line(t)}")
+        except Exception as e:
+            log(f"  Error linking {rel_path_str}: {e}")
+
+    return linking_triplets_total
+
+
+def _get_context_triplets(triplets, max_triplets=40):
+    """
+    Get recent triplets formatted for prompt context.
+    Limits count to avoid prompt bloat while providing entity consistency.
+    """
+    if not triplets:
+        return []
+    lines = []
+    seen = set()
+    # Take from end (most recent) first, deduplicate by line
+    for t in reversed(triplets):
+        line = _triplet_to_line(t)
+        if line not in seen and len(lines) < max_triplets:
+            seen.add(line)
+            lines.append(line)
+    return list(reversed(lines))  # Chronological order for prompt
+
+
 def _extract_python_code(text):
     """Extract Python code from fenced output, fallback to raw text."""
     match = re.search(r"```python\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
@@ -658,7 +850,7 @@ def test_generated_code_executability(code_path, log, timeout_sec=20):
 
 
 def run_reproduction_test(paper_path, device="сpu", log_path="",
-max_code_files=-1, generate_code=True, test_generated_code=True):
+max_code_files=-1, generate_code=True, test_generated_code=True, repo_url_override=None, use_repo=True):
     """Main function to run reproduction-focused paper test."""
     log = Logger(log_path)
     
@@ -668,7 +860,12 @@ max_code_files=-1, generate_code=True, test_generated_code=True):
 
     # Get paper directory and load repo URL
     paper_dir = os.path.dirname(paper_path)
-    repo_url = None #load_repo_url(paper_dir)
+    if not use_repo:
+        repo_url = None
+    elif repo_url_override:
+        repo_url = repo_url_override
+    else:
+        repo_url = load_repo_url(paper_dir)
     
     log("="*70)
     log("REPRODUCTION COOKBOOK KNOWLEDGE GRAPH BUILDER")
@@ -715,20 +912,31 @@ max_code_files=-1, generate_code=True, test_generated_code=True):
             log(f"\n{datetime.datetime.now()} Processing chunk {j+1}/{len(chunks)}...")
             log(f"Chunk preview: {chunk[:200]}...")
             
-            try:
-                new_triplets, _ = graph.update_without_retrieve(chunk, [], log, 
-                source_type="paper")
-                section_triplets.extend(new_triplets)
-                log(f"{datetime.datetime.now()} Extracted {len(new_triplets)}")
-                
-                if new_triplets:
-                    log("Sample triplets:")
-                    for triplet in new_triplets[:3]:
-                        subj, obj, rel = triplet
-                        log(f"  - ({subj}) --[{rel.get('label', 'N/A')}]--> ({obj})")
-            except Exception as e:
-                log(f"Error processing chunk: {str(e)}")
-                assert False
+            # Pass recent triplets as context for entity consistency across chunks
+            prev_subgraph = _get_context_triplets(graph.triplets, max_triplets=40)
+            
+            retries = 3    
+            while retries > 0:    
+                try:
+                    new_triplets, _ = graph.update_without_retrieve(chunk, prev_subgraph, log, 
+                    source_type="paper")
+                    section_triplets.extend(new_triplets)
+                    log(f"{datetime.datetime.now()} Extracted {len(new_triplets)}")
+                    
+                    if new_triplets:
+                        log("Sample triplets:")
+                        for triplet in new_triplets[:3]:
+                            subj, obj, rel = triplet
+                            log(f"  - ({subj}) --[{rel.get('label', 'N/A')}]--> ({obj})")
+                except Exception as e:
+                    log(f"Error processing chunk: {str(e)}")  
+                    if e: 
+                        log(f'Retrying #{4 - retries}...')    
+                        retries -= 1    
+                        time.sleep(5)    
+                    else:    
+                        raise e
+
         
         section_time = time() - section_start_time
         
@@ -752,90 +960,56 @@ max_code_files=-1, generate_code=True, test_generated_code=True):
 
     
     # =============================================================================
-    # PHASE 2: Process Repository Code
+    # PHASE 2: Code Index + Paper-to-Code Linking
     # =============================================================================
-    log("="*70)
-    log("PHASE 2: PROCESSING REPOSITORY CODE")
-    log("="*70)
-    
-    temp_dir = log_path + '/repo'
+    paper_graph_triplets = list(graph.triplets)  # Snapshot after Phase 1
 
     code_stats = []
     if repo_url is not None:
+        log("="*70)
+        log("PHASE 2: CODE INDEX + PAPER-TO-CODE LINKING")
+        log("="*70)
+
+        temp_dir = log_path + '/repo'
         try:
             if not os.path.exists(temp_dir):
-                # Clone repository
                 log('Cloning repo...')
                 clone_repo(repo_url, temp_dir, log)
-            
             else:
-                log('Repo is already downloaded, processing it...')
-            
-            # Collect code files
+                log('Repo already downloaded, processing...')
+
             log("\nCollecting code files...")
             code_files = collect_code_files(temp_dir, max_files=max_code_files)
-            log(f"Found {len(code_files)} important code files to process")
-            log("")
-            
-            code_triplets_total = 0
-            
-            
-            for idx, (rel_path, file_path) in enumerate(code_files):
-                log(f"\n{datetime.datetime.now()} Processing file {idx+1}/{len(code_files)}: {rel_path}")
-                file_start_time = time()
-                file_content = read_file_safe(file_path)
-                
-                if "[Binary file" in file_content or len(file_content) < 10:
-                    log("  Skipping (binary or too small)")
-                    continue
-                
-                file_triplets = []
-                # Extract meaningful chunks from code
-                chunks = extract_code_chunks(file_content, str(rel_path))
-                log(f"  {len(chunks)} code chunks extracted")
-                
-                for j, chunk in enumerate(chunks):
-                    try:
-                        # Add file context to chunk
-                        chunk_with_context = f"File: {rel_path}\n\n{chunk}"
-                        
-                        new_triplets, _ = graph.update_without_retrieve(
-                            chunk_with_context, [], log, source_type="code"
-                        )
-                        code_triplets_total += len(new_triplets)
-                        file_triplets.extend(new_triplets)
-                        
-                    except Exception as e:
-                        log(f"  Error processing chunk {j+1}: {str(e)}")
-                        assert False
+            log(f"Found {len(code_files)} code files")
 
-                file_time = time() - file_start_time
-                code_stats.append({
-                'file': str(file_path),
-                'triplets_extracted': len(file_triplets),
-                'processing_time': file_time,
-                'triplets': [[t[0], t[1], t[2]] for t in file_triplets],
-                })
-                log("")
-                log(f"File {idx}/{len(code_files)} processing complete: {len(file_triplets)} triplets extracted")
-                log(f"Total cost so far: ${graph.total_amount:.4f}")
-                log("")
-            
+            log("\nBuilding code index...")
+            code_index = build_code_index(temp_dir, code_files, log)
+            log(f"Code index: {len(code_index)} entities (classes, functions, config keys)")
+
+            log("\nRunning linking pass (paper concepts -> code)...")
+            link_start = time()
+            linking_triplets_total = run_linking_pass(
+                paper_graph_triplets, code_index, code_files, graph, log, max_paper_triplets=80
+            )
+            link_time = time() - link_start
+            log(f"Linking complete: {linking_triplets_total} linking triplets in {link_time:.2f}s")
+            log(f"Total cost so far: ${graph.total_amount:.4f}")
+
+            code_stats = [{
+                'phase': 'linking',
+                'linking_triplets': linking_triplets_total,
+                'processing_time': link_time,
+                'code_index_size': len(code_index),
+            }]
+
         except subprocess.CalledProcessError as e:
             log(f"Error cloning repository: {e}")
-            assert False
+            raise
         except Exception as e:
-            log(f"Error processing repository: {e}")
-            assert False
-        '''
-        finally:
-            # Cleanup
-            if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
-                log("Cleaned up temporary repository directory")
-       '''
+            log(f"Error in Phase 2: {e}")
+            raise
     else:
-        log('No Repo provided, exiting...')
+        log('No repo provided, skipping Phase 2 (code linking).')
 
     total_time = time() - total_start_time
     
@@ -990,16 +1164,26 @@ def main():
     parser.add_argument('--no-test-generated-code', dest='test_generated_code', action='store_false',
                         help='Disable executability tests for generated code')
     parser.set_defaults(test_generated_code=True)
+    parser.add_argument('--repo', type=str, default=None,
+                        help='Repository URL for code extraction (overrides blacklist.txt)')
+    parser.add_argument('--no-repo', dest='use_repo', action='store_false',
+                        help='Skip code processing even if blacklist.txt has repo URL')
+    parser.set_defaults(use_repo=True)
+    parser.add_argument('--max-code-files', type=int, default=-1,
+                        help='Max code files to process (-1 = no limit)')
     
     args = parser.parse_args()
     starter_path = '/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/'
     # '/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/short-papers/'
     run_reproduction_test(
-        paper_path= starter_path + args.paper + '/paper.md',
+        paper_path=starter_path + args.paper + '/paper.md',
         device=args.device,
         log_path=args.log_path + '/' + args.paper,
         generate_code=args.generate_code,
         test_generated_code=args.test_generated_code,
+        repo_url_override=args.repo,
+        use_repo=args.use_repo,
+        max_code_files=args.max_code_files,
     )
 
 
