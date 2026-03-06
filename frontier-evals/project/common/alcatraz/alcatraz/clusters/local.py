@@ -111,7 +111,7 @@ class ClusterConfig(ABC, SerializableBaseModel):
     docker_compose_yaml: str | None = None
     tmux_enabled: bool = False
     no_network: bool = False
-    force_python_install: bool = False
+    force_python_install: bool = True
 
     # Pydantic config
     model_config = ConfigDict(
