@@ -8,13 +8,21 @@ from utils.contriever import Retriever
 
 
 def edge(text):
-    return [e.strip() for e in text.split(",")]
+    """Parse triplet string 'subject, relation, object'. Handles commas in subject/object."""
+    parts = [e.strip() for e in text.split(",")]
+    if len(parts) < 3:
+        return parts  # Let caller handle invalid format
+    # Subject, relation, object - object may contain commas
+    return [parts[0], parts[1], ",".join(parts[2:])]
 
 
 def build_graph(triplets):
     G = nx.Graph()
     for t in triplets:
-        src, e, trg =  edge(t)
+        parts = edge(t)
+        if len(parts) < 3:
+            continue
+        src, e, trg = parts[0], parts[1], parts[2]
         G.add_edge(src, trg, relation=e)
 
     return G
@@ -76,11 +84,15 @@ def graph_retr_search(
     while queue:
         q = queue.popleft()
         if d[q] >= max_depth: continue
-
+        #print(f"Searching {len(triplets)} triplets for query {q}")
         res = retriever.search(triplets, q, topk=topk, return_scores=True)
         for s, score in zip(res['strings'], res['scores']):
             if score < post_retrieve_threshold: continue
-            v1, e, v2 = edge(s)
+            #print(f"Found triplet {s} with score {score}")
+            parts = edge(s)
+            if len(parts) < 3:
+                continue  # Skip malformed triplet strings
+            v1, e, v2 = parts[0], parts[1], parts[2]
             for v in [v1, v2]:
                 if v not in d:
                     queue.append(v)

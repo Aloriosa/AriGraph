@@ -11,6 +11,8 @@ class TripletGraph:
         self.triplets = []
         self.model, self.system_prompt = model, system_prompt
         self.total_amount = 0
+        self.completion_tokens = 0
+        self.prompt_tokens = 0
         self.client = OpenAI(
             base_url=base_url,
             api_key=api_key,
@@ -48,21 +50,29 @@ class TripletGraph:
                     }
                 ],
                 model=self.model,
-                temperature=t
+                temperature=t,
+                
             )
         response = chat_completion.choices[0].message.content
+        # print(f"Response: {chat_completion}")
         prompt_tokens = chat_completion.usage.prompt_tokens
         completion_tokens = chat_completion.usage.completion_tokens
 
-        cost = completion_tokens * 3 / 100000 + prompt_tokens * 1 / 100000
+        #cost = completion_tokens * 3 / 100000 + prompt_tokens * 1 / 100000
         cost = completion_tokens * 3 / 100000 + prompt_tokens * 1 / 100000
         self.total_amount += cost
-        return response, cost
+        self.completion_tokens += completion_tokens
+        self.prompt_tokens += prompt_tokens
+        return response, {"completion_tokens": completion_tokens, "prompt_tokens": prompt_tokens} #cost, 
     
         
     # For triplet without embeddings
     def str(self, triplet):
         return triplet[0] + ", " + triplet[2]["label"] + ", " + triplet[1]
+
+    def str2triplet(self, string_triplet):
+        subj, rel, obj = string_triplet.split(", ")
+        return [subj, obj, {"label": rel}]
     
     def get_all_triplets(self):
         return [self.str(triplet) for triplet in self.triplets]

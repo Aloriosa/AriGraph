@@ -12,17 +12,6 @@ from pathlib import Path
 from utils.utils import clear_triplet
 
 
-# Default cookbook path (under home, per workspace rules)
-DEFAULT_COOKBOOK_PATH = os.path.join(os.path.expanduser("~"), "arigraph", "reproduction_cookbook", "cookbook_graph.json")
-
-
-def get_cookbook_path(config=None):
-    """Resolve cookbook path from config, args, or default."""
-    if config and hasattr(config, "cookbook_path") and config.cookbook_path:
-        return config.cookbook_path
-    return DEFAULT_COOKBOOK_PATH
-
-
 def _triplet_to_tuple(triplet):
     """Convert triplet to hashable tuple for deduplication."""
     subj, obj, rel_data = triplet

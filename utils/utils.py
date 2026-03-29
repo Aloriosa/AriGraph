@@ -280,8 +280,8 @@ def find_top_episodic_emb(A, B, obs_plan_embedding, retriever):
     similarity_scores = [score.item() / max_similarity_score if max_similarity_score else 0 for score in similarity_scores]
 
     # Calculate and normalize match counts
+    # so we retrived triplets and want to know for each obs how many of its triplets occured in our retrival
     match_counts = [sum(1 for element in A if element in value_list) for _, (value_list, _) in B.items()]
-    
     match_counts_relative = []
     for i, values in enumerate(B.values()):
         match_counts_relative.append((match_counts[i]/(len(values[0]) + 1e-9))*np.log((len(values[0]) + 1e-9)))

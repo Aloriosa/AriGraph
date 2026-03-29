@@ -80,7 +80,7 @@ Remember that triplets must be extracted in format: "subject_1, relation_1, obje
 Extracted triplets: '''
 
 
-prompt_cookbook_extraction_wo_code = '''Objective: Build a minimal, implementation-complete knowledge graph for yourself that will later implement the paper's code using ONLY this graph as source of truth (without access to the paper).
+prompt_cookbook_extraction_wo_code = '''Objective: Build a minimal, implementation-complete knowledge graph for yourself that will later reproduce the paper's method and all the experiments and results using ONLY this graph as source of truth (without access to the paper).
 
 Extraction Priority (highest to lowest):
 1) Exact procedure/algorithm steps and ordering constraints.
@@ -212,7 +212,7 @@ Code for file {file_path}:
 {code_chunk}
 
 Output format: For each (pattern, hypernode), output a JSON block:
-{{"pattern": "data_loading", "hypernode": {{"code": "...", "documentation": "...", "imports": [...]}}}}
+{{"pattern": "...", "hypernode": {{"code": "...", "documentation": "...", "imports": [...]}}}}
 
 Only output for REUSABLE patterns. Skip paper-specific implementations.
 If this file does not implement any reusable pattern, output nothing.
@@ -286,15 +286,42 @@ echo "r count for word 'strawberry' saved to output.csv"
 - Result: inspecting the output.csv **produced by reproduce.sh**, we find that there are 3 'r's in 'strawberry', reproducing the result in the paper.
 '''
 
-prompt_coding_agent_with_cookbook = '''You are a coding agent implementing a research paper. You have access to TWO knowledge graphs:
+prompt_coding_agent_paper_mem_graph = '''You are a coding agent implementing a research paper. You have access to TWO knowledge graphs:
 
 1) **PAPER GRAPH** — implementation details extracted from the target paper (algorithms, hyperparameters, setup, procedures).
-2) **EXPERT GRAPH** — reusable patterns and code from similar papers (pipelines, hypernodes with implementation code, documentation, imports). Use these as drop-in templates.
+2) **EXPERT GRAPH** — reusable patterns and code snippets from similar papers (pipelines, code, documentation, imports). Use these as drop-in templates.
 
 Your strategy:
-1) USE THE EXPERT GRAPH for common parts: data loading, training loop, config, evaluation. For each pattern, use the hypernode (code + docs + imports) as a template.
+1) USE THE EXPERT GRAPH for general pipeline: data loading, training loop, config, evaluation. For each pattern, use the hypernode (code + docs + imports) as a template.
 2) FOCUS on what the PAPER GRAPH specifies: the method, architecture, hyperparameters, and procedure unique to this paper.
 3) COMBINE: wire the paper-specific parts into the common pipeline from the expert graph.
+
+{BENCHMARK_RULES}
+
+{TOY_EXAMPLE}
+
+---
+PAPER GRAPH (implementation details from the paper):
+{paper_graph}
+
+---
+EXPERT GRAPH (patterns with code from similar papers):
+{expert_graph}
+
+---
+Generate a complete, runnable repository. Include reproduce.sh, README.md, and all source code. Use expert graph patterns where applicable. Implement paper-specific parts from the paper graph. Output format:
+FILE: path/to/file.ext
+```language
+<content>
+```
+'''
+
+prompt_coding_agent_paper_graph = '''You are a coding agent implementing a research paper. You have access to ONE knowledge graph:
+
+**PAPER GRAPH** — implementation details extracted from the target paper (algorithms, hyperparameters, setup, procedures).
+
+Your strategy:
+USE THE PAPER GRAPH TO IMPLEMENT THE PAPER: data loading, training loop, config, evaluation, the method, architecture, hyperparameters, and procedure unique to this paper.
 
 {BENCHMARK_RULES}
 
@@ -309,16 +336,97 @@ PAPER GRAPH (implementation details from the paper):
 {paper_graph}
 
 ---
-EXPERT GRAPH (patterns and code from similar papers):
-{expert_graph}
-
----
 Generate a complete, runnable repository. Include reproduce.sh, README.md, and all source code. Use expert graph patterns where applicable. Implement paper-specific parts from the paper graph. Output format:
 FILE: path/to/file.ext
 ```language
 <content>
 ```
 '''
+
+prompt_coding_agent_paper2code = '''You are a coding agent implementing a research paper. You are provided with the paper text.
+
+{BENCHMARK_RULES}
+
+{TOY_EXAMPLE}
+
+---
+PAPER TO IMPLEMENT:
+{paper_text}
+
+---
+Generate a complete, runnable repository. Include reproduce.sh, README.md, and all source code. Output format:
+FILE: path/to/file.ext
+```language
+<content>
+```
+'''
+
+
+# =============================================================================
+# REACT REFINEMENT PROMPT (iterative improvement based on paper + feedback)
+# =============================================================================
+
+prompt_react_refinement = '''You are a coding agent implementing a research paper. You previously generated code, but there are issues to fix.
+
+{BENCHMARK_RULES}
+
+{TOY_EXAMPLE}
+
+---
+PAPER TO IMPLEMENT (reference for correctness):
+{paper_text}
+
+---
+CURRENT CODE (has issues):
+{current_code}
+
+---
+OBSERVATION / FEEDBACK (what went wrong or what to improve):
+{feedback}
+
+---
+Your task: Fix the code to address the feedback. Ensure it aligns with the paper's description.
+Output the COMPLETE corrected repository. Use the same format:
+FILE: path/to/file.ext
+```language
+<content>
+```
+
+Only output files that need changes; you may output all files for clarity. Preserve correct parts.'''
+
+
+# =============================================================================
+# LLM-BASED PAPER REPRODUCTION CHECK (verify code implements paper requirements)
+# =============================================================================
+
+prompt_paper_reproduction_check = '''You are an expert reviewer. Compare the research paper with the generated reproduction code and verify that all important aspects from the paper are correctly implemented.
+
+PAPER (excerpt):
+{paper_text}
+
+GENERATED CODE:
+{generated_code}
+
+---
+Your task: Identify what from the paper MUST be reproduced and check if the code does it correctly.
+
+Consider:
+1. **Core method/algorithm**: Is the main contribution (e.g. model architecture, training procedure) implemented?
+2. **Hyperparameters**: Are key values (learning rate, batch size, etc.) present and correct?
+3. **Data setup**: Dataset, preprocessing, splits as described?
+4. **Evaluation**: Metrics, protocol, baselines?
+5. **Experimental setup**: Hardware, training steps, checkpoints?
+6. **reproduce.sh**: Does it run the full pipeline to produce the paper's results?
+
+Output format (be concise, actionable):
+- MISSING: <requirement from paper> — not found in code
+- INCORRECT: <requirement> — present but wrong (e.g. wrong value, wrong logic)
+- PARTIAL: <requirement> — partially implemented, needs completion
+- OK: <requirement> — correctly implemented
+
+If everything important is reproduced, respond with: "ALL_OK: Reproduction appears complete."
+
+Otherwise list all MISSING, INCORRECT, and PARTIAL items. Focus on what a developer must fix.'''
 
 
 # =============================================================================

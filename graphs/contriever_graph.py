@@ -128,6 +128,7 @@ class ContrieverGraph(TripletGraph):
         associated_subgraph = [element for element in associated_subgraph]
 
         obs_plan_embeddings = self.retriever.embed((retrieve_base))
+        # we rank observations by how many of their triplets occured in our retrival
         top_episodic_dict = find_top_episodic_emb(associated_subgraph, deepcopy(self.obs_episodic), obs_plan_embeddings, self.retriever)
         top_episodic = top_k_obs(top_episodic_dict, k=topk_episodic)
 
@@ -190,7 +191,7 @@ class LLaMAContrieverGraph(ContrieverGraph):
         self.pipeline = pipeline
 
     def generate(self, prompt, jsn = False, t = 0.2):
-        print("Prompt: ", prompt)
+        #print("Prompt: ", prompt)
         messages = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": prompt},
@@ -215,6 +216,6 @@ class LLaMAContrieverGraph(ContrieverGraph):
             temperature=t,
             top_p=0.9,
         )
-        print("response: ", outputs[0]["generated_text"])
+        #print("response: ", outputs[0]["generated_text"])
         return outputs[0]["generated_text"][len(prompt):], 0        
             

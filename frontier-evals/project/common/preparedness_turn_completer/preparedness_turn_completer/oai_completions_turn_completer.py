@@ -159,7 +159,7 @@ class QwenOpenAICompletionsTurnCompleter(TurnCompleter):
         self.model = os.getenv("OPENAI_MODEL")#'Qwen/QwQ-32B'
         self.api_key = os.getenv("OPENAI_API_KEY") #"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImFhZDEyY2YyLWIyZDAtNDdjOC1iMjg3LTIzNzkyMTBkYmIyOSIsImxvZ2dpbmdfaW5fdG9rZW4iOmZhbHNlLCJpYXQiOjE3NzIwNjUyNjAsImV4cCI6MTc3MjY3MDA2MH0.AhqeW-tV9jFHrTEFDHauMWIDBVop0Ht8B5UW_y7-fDg"
         # os.getenv("OPENAI_API_KEY")
-        self.api_base = "https://inference.airi.net:46783/v1" #os.getenv("OPENAI_API_BASE_URL")
+        self.api_base = os.getenv("OPENAI_API_BASE_URL")
         self.reasoning_effort = None
         self.response_format = response_format
         self.temperature = temperature
@@ -230,7 +230,7 @@ class QwenOpenAICompletionsTurnCompleter(TurnCompleter):
         print(f"\n\nCUSTOM CLIENT with model {self.model}\n\n")
         return openai.AsyncClient(
             api_key= os.getenv("OPENAI_API_KEY"), #"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImFhZDEyY2YyLWIyZDAtNDdjOC1iMjg3LTIzNzkyMTBkYmIyOSIsImxvZ2dpbmdfaW5fdG9rZW4iOmZhbHNlLCJpYXQiOjE3NzIwNjUyNjAsImV4cCI6MTc3MjY3MDA2MH0.AhqeW-tV9jFHrTEFDHauMWIDBVop0Ht8B5UW_y7-fDg",
-            base_url="https://inference.airi.net:46783/v1",
+            base_url=os.getenv("OPENAI_API_BASE_URL"),
         
             #api_key=self.api_key, 
         #base_url=self.api_base

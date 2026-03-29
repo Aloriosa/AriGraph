@@ -10,21 +10,23 @@ import sys
 import ast
 import json
 import argparse
+import logging
 import subprocess
 import tempfile
 import shutil
 from pathlib import Path
 from time import time, sleep
-from collections import Counter
 import datetime
 
 from graphs.contriever_graph import ContrieverGraph
 from utils.utils import Logger
+from tqdm import tqdm
 
-
-from pyvis.network import Network
+from openai import OpenAI
 import networkx as nx
+from dotenv import load_dotenv # you'll need to pip install python-dotenv
 
+load_dotenv()
 
 sys.path.insert(0, os.path.dirname(__file__))
 from prompts.paper_reproduction_prompt import prompt_extraction_reproduction, prompt_extraction_reproduction_with_repo
@@ -34,7 +36,8 @@ from prompts.cookbook_extraction_prompt import (
     prompt_paper_code_linking,
     prompt_cookbook_reusable_extraction,
     prompt_reusable_pattern_to_code_mapping,
-    prompt_coding_agent_with_cookbook,
+    prompt_coding_agent_paper_graph,
+    prompt_coding_agent_paper_mem_graph,
     prompt_pattern_compatibility_check,
     BENCHMARK_EVALUATION_RULES,
     REPRODUCTION_SCRIPT_TOY_EXAMPLE,
@@ -42,461 +45,54 @@ from prompts.cookbook_extraction_prompt import (
 from graph_storage import (
     load_cookbook_graph,
     save_cookbook_graph,
-    get_cookbook_path,
     merge_triplets_into_cookbook,
     generate_hypernode_id,
 )
 from ontology.cookbook_ontology import validate_triplet
+from utils.retriever_search_drafts import graph_retr_search
 
-
-# =============================================================================
-# REPOSITORY PROCESSING
-# =============================================================================
-
-# Common code file extensions
-CODE_EXTENSIONS = {
-    '.py', '.js', '.jsx', '.ts', '.tsx', '.java', '.cpp', '.c', '.h', '.hpp',
-    '.cs', '.go', '.rs', '.rb', '.php', '.swift', '.kt', '.scala', '.r',
-    '.sh', '.bash', '.yaml', '.yml', '.toml', '.json'
-}
-
-# Directories to skip
-SKIP_DIRS = {
-    '.git', '.github', '__pycache__', '.pytest_cache', 'venv', 'env',
-    '.venv', '.next', '.nuxt', 
-    '.idea', '.vscode', '.cache',
-    'docs', 'examples', 'notebooks', 'data', 'assets', 'figures', 'tests'
-}
-
-
-def clone_repo(repo_url, target_dir, log):
-    """Clone GitHub repository to target directory."""
-    # Ensure the destination directory exists (the command will create the repo subfolder)
-    destination_parent_dir = os.path.dirname(target_dir)
-    os.makedirs(destination_parent_dir, exist_ok=True)
-
-    log(f"Cloning {repo_url}...")
-    subprocess.run(['git', 'clone', repo_url, target_dir], 
-                   check=True, capture_output=True, #cwd=destination_parent_dir
-                   )
-    log(f"Repository cloned to {target_dir}")
-
-
-def should_process_file(file_path):
-    """Check if file should be included."""
-    return file_path.suffix.lower() in CODE_EXTENSIONS
-
-
-def collect_code_files(repo_dir, max_files=-1):
-    """Walk through repository and collect code files."""
-    code_files = []
-    repo_path = Path(repo_dir)
-    
-    for file_path in repo_path.rglob('*'):
-        if file_path.is_dir():
-            continue
-        if any(skip_dir in file_path.parts for skip_dir in SKIP_DIRS):
-            continue
-        
-        if should_process_file(file_path):
-            try:
-                rel_path = file_path.relative_to(repo_path)
-                code_files.append((str(rel_path), file_path))
-            except Exception:
-                assert False
-    
-    # Sort by likely importance (main files first, then by size)
-    def file_importance(item):
-        rel_path, file_path = item
-        score = 0
-        
-        # Prioritize main/core files
-        if 'main' in rel_path.lower() or 'core' in rel_path.lower():
-            score += 1000
-        if 'model' in rel_path.lower() or 'train' in rel_path.lower():
-            score += 500
-        if 'config' in rel_path.lower() or 'setup' in rel_path.lower():
-            score += 300
-        
-        # Deprioritize deeply nested files
-        score -= rel_path.count('/') * 10
-        
-        # Add file size (larger files tend to be more important)
-        try:
-            score += min(file_path.stat().st_size / 100, 100)
-        except:
-            pass
-        
-        return -score  # Negative for reverse sort
-    
-    code_files.sort(key=file_importance)
-    
-    # Limit number of files
-    if max_files > 0:
-        code_files = code_files[:max_files]
-    return code_files
-
-
-def read_file_safe(file_path):
-    """Read file with encoding fallback."""
-    encodings = ['utf-8', 'latin-1', 'cp1252']
-    for encoding in encodings:
-        try:
-            with open(file_path, 'r', encoding=encoding) as f:
-                return f.read()
-        except (UnicodeDecodeError, UnicodeError):
-            continue
-    return "[Binary file - content not displayed]"
-
-
-def extract_code_chunks(file_content, file_path, max_chunk_size=3000):
-    """
-    Extract meaningful chunks from code file.
-    Focus on: classes, functions, important comments, config sections.
-    """
-    chunks = []
-    
-    # For Python files, extract classes and functions
-    if file_path.endswith('.py'):
-        # Split by class or function definitions
-        pattern = r'((?:^|\n)(?:class |def |# ===|# ---)[^\n]*(?:\n(?:    |\t)[^\n]*)*)'
-        matches = re.finditer(pattern, file_content, re.MULTILINE)
-        
-        for match in matches:
-            chunk = match.group(0).strip()
-            if len(chunk) > 100:  # Skip very small chunks
-                chunks.append(chunk)
-    
-    # For config files (yaml, json, toml), take the whole content if small enough
-    elif file_path.endswith(('.yaml', '.yml', '.json', '.toml', '.cfg', '.ini')):
-        if len(file_content) < max_chunk_size:
-            chunks.append(file_content)
-        else:
-            # Split into sections
-            sections = file_content.split('\n\n')
-            for section in sections:
-                if len(section) > 100:
-                    chunks.append(section)
-    
-    # For other files, use simple chunking
-    else:
-        # Split by double newlines or comments
-        sections = re.split(r'\n\n+|(?:\n *//.*\n)+|(?:\n *#.*\n)+', file_content)
-        for section in sections:
-            if len(section) > 100:
-                chunks.append(section)
-    
-    # Ensure chunks are not too large
-    final_chunks = []
-    for chunk in chunks:
-        if len(chunk) <= max_chunk_size:
-            final_chunks.append(chunk)
-        else:
-            # Split large chunks
-            for i in range(0, len(chunk), max_chunk_size):
-                final_chunks.append(chunk[i:i+max_chunk_size])
-    
-    return final_chunks#[:10]  # Max 10 chunks per file
-
-
-def build_code_index(repo_dir, code_files, log=None):
-    """
-    Parse codebase to extract structured index: file path, type (class/function/config_key), name.
-    Used for Phase 2 linking pass.
-    """
-    index = []
-    repo_path = Path(repo_dir)
-
-    for rel_path, file_path in code_files:
-        if not file_path.exists():
-            continue
-        content = read_file_safe(file_path)
-        if "[Binary file" in content or len(content) < 10:
-            continue
-
-        rel_path_str = str(rel_path)
-
-        # Python: use ast to extract class and function names
-        if str(rel_path).endswith('.py'):
-            try:
-                tree = ast.parse(content)
-
-                class _Visitor(ast.NodeVisitor):
-                    def __init__(self):
-                        self.entries = []
-                        self._class_stack = []
-                        self._in_function = False
-
-                    def visit_ClassDef(self, node):
-                        self.entries.append({
-                            "file": rel_path_str,
-                            "type": "class",
-                            "name": node.name,
-                            "qual": f"{rel_path_str}::{node.name}",
-                        })
-                        self._class_stack.append(node.name)
-                        self.generic_visit(node)
-                        self._class_stack.pop()
-
-                    def visit_FunctionDef(self, node):
-                        if self._in_function:
-                            self.generic_visit(node)
-                            return
-                        self._in_function = True
-                        if self._class_stack:
-                            qual_name = f"{self._class_stack[-1]}.{node.name}"
-                            ent_type = "method"
-                        else:
-                            qual_name = node.name
-                            ent_type = "function"
-                        self.entries.append({
-                            "file": rel_path_str,
-                            "type": ent_type,
-                            "name": qual_name,
-                            "qual": f"{rel_path_str}::{qual_name}",
-                        })
-                        self.generic_visit(node)
-                        self._in_function = False
-
-                v = _Visitor()
-                v.visit(tree)
-                index.extend(v.entries)
-            except (SyntaxError, ValueError):
-                for m in re.finditer(r'^\s*(?:class|def)\s+(\w+)', content, re.MULTILINE):
-                    idx_type = "class" if m.group(0).strip().startswith("class") else "function"
-                    index.append({
-                        "file": rel_path_str,
-                        "type": idx_type,
-                        "name": m.group(1),
-                        "qual": f"{rel_path_str}::{m.group(1)}",
-                    })
-
-        # Config files: extract top-level keys
-        elif str(rel_path).endswith(('.json', '.yaml', '.yml')):
-            try:
-                if str(rel_path).endswith('.json'):
-                    data = json.loads(content)
-                else:
-                    try:
-                        import yaml
-                        data = yaml.safe_load(content) or {}
-                    except ImportError:
-                        data = {}
-                if isinstance(data, dict):
-                    for key in list(data.keys())[:30]:
-                        index.append({
-                            "file": rel_path_str,
-                            "type": "config",
-                            "name": str(key),
-                            "qual": f"{rel_path_str}::{key}",
-                        })
-            except (json.JSONDecodeError, Exception):
-                pass
-        elif str(rel_path).endswith('.toml'):
-            try:
-                try:
-                    import tomllib
-                    data = tomllib.loads(content)
-                except ImportError:
-                    try:
-                        import tomli
-                        data = tomli.loads(content)
-                    except ImportError:
-                        data = {}
-                if isinstance(data, dict):
-                    for key in data.keys():
-                        index.append({
-                            "file": rel_path_str,
-                            "type": "config",
-                            "name": key,
-                            "qual": f"{rel_path_str}::{key}",
-                        })
-            except Exception:
-                pass
-
-    return index
-
-
-# =============================================================================
-# PAPER PROCESSING
-# =============================================================================
-
-def load_paper(paper_path):
-    """Load the paper markdown file."""
-    with open(paper_path, 'r', encoding='utf-8') as f:
-        content = f.read()
-    return content
-
-
-def load_repo_url(paper_dir):
-    """Load repository URL from blacklist.txt in paper directory."""
-    blacklist_path = os.path.join(paper_dir, 'blacklist.txt')
-    if os.path.exists(blacklist_path):
-        with open(blacklist_path, 'r') as f:
-            url = f.read().strip()
-            return url if url.startswith('http') else None
-    return None
-
-
-def split_into_sections(paper_content):
-    """Split paper into sections based on \\section* delimiters."""
-    section_pattern = r'\\section\*\{([^}]+)\}'
-    sections = []
-    
-    matches = list(re.finditer(section_pattern, paper_content))
-    
-    for i, match in enumerate(matches):
-        section_title = match.group(1)
-        start_pos = match.end()
-        
-        if i + 1 < len(matches):
-            end_pos = matches[i + 1].start()
-        else:
-            end_pos = len(paper_content)
-        
-        section_content = paper_content[start_pos:end_pos].strip()
-        
-        if section_content:
-            sections.append({
-                'title': section_title,
-                'content': section_content
-            })
-    
-    if matches:
-        preamble = paper_content[:matches[0].start()].strip()
-        if preamble:
-            sections.insert(0, {
-                'title': 'Title and Abstract',
-                'content': preamble
-            })
-    
-    return sections
-
-
-def clean_latex(text):
-    """Clean LaTeX commands and formatting from text."""
-    text = re.sub(r'\\title\{([^}]+)\}', r'\1', text)
-    text = re.sub(r'\\author\{([^}]+)\}', r'\1', text)
-    text = re.sub(r'\\begin\{abstract\}', '', text)
-    text = re.sub(r'\\end\{abstract\}', '', text)
-    text = re.sub(r'\\footnotetext\{[^}]+\}', '', text)
-    text = re.sub(r'\\cite\{[^}]+\}', '', text)
-    text = re.sub(r'\\ref\{[^}]+\}', '', text)
-    text = re.sub(r'\\label\{[^}]+\}', '', text)
-    
-    # Keep equations but simplify
-    text = re.sub(r'\$\$([^\$]+)\$\$', r'[\1]', text)
-    text = re.sub(r'\$([^\$]+)\$', r'\1', text)
-    text = re.sub(r'\\\[([^\]]+)\\\]', r'[\1]', text)
-    text = re.sub(r'\\\(([^\)]+)\\\)', r'\1', text)
-    
-    text = re.sub(r'!\[\]\([^)]+\)', '[Figure]', text)
-    text = re.sub(r'\\begin\{tabular\}.*?\\end\{tabular\}', '[Table]', text, flags=re.DOTALL)
-    
-    text = re.sub(r'\\[a-zA-Z]+\{([^}]*)\}', r'\1', text)
-    text = re.sub(r'\\[a-zA-Z]+', '', text)
-    text = re.sub(r'\{|\}', '', text)
-    text = re.sub(r'\\\\', ' ', text)
-    text = re.sub(r'\s+', ' ', text)
-    text = text.strip()
-    
-    return text
-
-
-def preprocess_section(section_content):
-    """Preprocess a section by cleaning LaTeX and preparing for graph extraction."""
-    cleaned = clean_latex(section_content)
-    
-    sentences = re.split(r'(?<=[.!?])\s+', cleaned)
-    
-    max_chars = 2000  # Slightly longer chunks for reproduction details
-    chunks = []
-    current_chunk = ""
-    
-    for sentence in sentences:
-        if len(current_chunk) + len(sentence) < max_chars:
-            current_chunk += " " + sentence
-        else:
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-            current_chunk = sentence
-    
-    if current_chunk:
-        chunks.append(current_chunk.strip())
-    
-    return chunks
-
-
-def analyze_reproduction_graph(graph):
-    """Analyze the reproduction-focused knowledge graph."""
-    triplets = graph.triplets
-    
-    stats = {
-        'total_triplets': len(triplets),
-        'unique_entities': set(),
-        'entity_connections': Counter(),
-        'relation_types': Counter(),
-        'implementation_relations': Counter(),
-        'configuration_relations': Counter(),
-        'procedure_relations': Counter(),
-    }
-    
-    # Categorize relations
-    impl_keywords = ['implements', 'implemented', 'extends', 'uses', 'requires']
-    config_keywords = ['parameter', 'configured', 'set to', 'default', 'value']
-    proc_keywords = ['step', 'procedure', 'first', 'then', 'after']
-    
-    for triplet in triplets:
-        subject, obj, rel_data = triplet
-        relation = rel_data.get('label', '').lower()
-        
-        stats['unique_entities'].add(subject)
-        stats['unique_entities'].add(obj)
-        stats['entity_connections'][subject] += 1
-        stats['entity_connections'][obj] += 1
-        stats['relation_types'][rel_data.get('label', 'unknown')] += 1
-        
-        # Categorize relations
-        if any(kw in relation for kw in impl_keywords):
-            stats['implementation_relations'][relation] += 1
-        if any(kw in relation for kw in config_keywords):
-            stats['configuration_relations'][relation] += 1
-        if any(kw in relation for kw in proc_keywords):
-            stats['procedure_relations'][relation] += 1
-    
-    stats['num_unique_entities'] = len(stats['unique_entities'])
-    stats['top_entities'] = stats['entity_connections'].most_common(15)
-    stats['top_relations'] = stats['relation_types'].most_common(15)
-    stats['top_impl_relations'] = stats['implementation_relations'].most_common(10)
-    stats['top_config_relations'] = stats['configuration_relations'].most_common(10)
-    
-    return stats
+import utils_reproduction as reprutil
 
 
 class ReproductionGraph(ContrieverGraph):
     """Extended ContrieverGraph that uses reproduction-focused prompts."""
 
-    def __init__(self, model, system_prompt, api_key, log, base_url='', device="cpu"):
+    def __init__(self, model, system_prompt, api_key, log, base_url='', device="cpu", type='paper'): # or type 'mem'
         super().__init__(model, system_prompt, api_key, base_url, device)
-        self.graph_builder_instruction = (
-            "Extract only REUSABLE patterns for a cumulative cookbook. "
-            "Skip paper-specific details. This graph helps implement OTHER papers in the area.\n\n"
-        )
-        self.reproduction_prompt = prompt_cookbook_reusable_extraction
+        if type == 'mem':
+            self.graph_builder_instruction = (
+                "Extract only REUSABLE patterns for a cumulative cookbook. "
+                "Skip paper-specific details. This graph helps implement OTHER papers in the area.\n\n"
+            )
+            self.reproduction_prompt = prompt_cookbook_reusable_extraction
+        elif type == 'paper':
+            self.graph_builder_instruction = (
+                "Extract all the imprtant information required to reproduce the method described in the paper with all the quantitative and qualitativeresults.\n\n"
+            )
+            self.reproduction_prompt = prompt_cookbook_extraction_wo_code
+        else:
+            raise ValueError(f"Invalid type: {type}")
         self.hypernode_store = {}
         self._log = log
         log(f'\nPrompt: {self.reproduction_prompt[:200]}...')
+        self.completion_tokens  = 0
+        self.prompt_tokens  = 0
+        self.triplet2code = {}
 
-    def add_triplets(self, triplets):
+    def add_triplets(self, triplets, ontology_validation=False):
         """Override to enforce ontology validation before adding."""
         validated = []
-        for t in triplets:
-            if validate_triplet(t):
-                validated.append(t)
-            else:
-                self._log(f"Skipping invalid triplet (ontology): {t}")
+        if ontology_validation:
+            for t in triplets:
+                if validate_triplet(t):
+                    validated.append(t)
+                else:
+                    self._log(f"Skipping invalid triplet (ontology): {t}")
+        else:
+            validated = triplets
         if validated:
             super().add_triplets(validated)
+        
     
     def update_without_retrieve(self, observation, prev_subgraph, log, source_type="paper"):
         """Override to use reproduction-focused prompt."""
@@ -513,7 +109,9 @@ class ReproductionGraph(ContrieverGraph):
             example=example_str
         )
         
-        response, _ = self.generate(prompt, t=0.001)
+        response, tokens = self.generate(prompt, t=0.001)
+        self.completion_tokens += tokens["completion_tokens"]
+        self.prompt_tokens += tokens["prompt_tokens"]
         #log('response generated')
         # Process triplets (reuse parent class logic)
         from utils.utils import process_triplets
@@ -537,191 +135,19 @@ class ReproductionGraph(ContrieverGraph):
         return new_triplets_raw, obs_value
 
 
-def vis_net(subgraph, exp_path, save_as=''):
-    """
-    Visualize graph with multiple connected components properly separated.
-    Each component is positioned independently to prevent overlap.
-    """
-    import math
-    # Find connected components within the subgraph
-    components = list(nx.connected_components(subgraph))
-    num_comps = len(components)
-    # Create pyvis network
-    net = Network(
-        height="1000px",
-        width="100%",
-        bgcolor="#ffffff",
-        font_color='#10000000' if num_comps < 2 else "black",
-        directed=True,
-    )
-
-    
-    import matplotlib.colors as mcolors
-    colors = list(mcolors.TABLEAU_COLORS.values())
-    if len(components) > len(colors):
-        colors = list(mcolors.CSS4_COLORS.values())
-
-    # Assign colors to nodes based on component
-    component_map = {}
-    for i, component in enumerate(components):
-        color = colors[i % len(colors)]
-        for node in component:
-            component_map[node] = {'component_id': i, 'color': color}
-
-    # Calculate layout for each component separately with proper spacing
-    all_positions = {}
-    component_spacing = 2000  # Space between components
-    
-    # Arrange components in a grid layout
-    grid_cols = math.ceil(math.sqrt(len(components)))
-    
-    for idx, component in enumerate(components):
-        # Create subgraph for this component
-        comp_subgraph = subgraph.subgraph(component)
-        
-        # Choose layout algorithm based on component size
-        if len(component) < 30:
-            # For small components, use spring layout
-            pos = nx.spring_layout(comp_subgraph, k=2, iterations=50, scale=500)
-        elif len(component) < 100:
-            # For medium components, use spring layout with more space
-            pos = nx.spring_layout(comp_subgraph, k=1.5, iterations=50, scale=800)
-        else:
-            # For large components, use kamada_kawai or spring with large scale
-            try:
-                pos = nx.kamada_kawai_layout(comp_subgraph, scale=1000)
-            except:
-                pos = nx.spring_layout(comp_subgraph, k=1, iterations=50, scale=1000)
-        
-        # Calculate offset for this component in the grid
-        row = idx // grid_cols
-        col = idx % grid_cols
-        offset_x = col * component_spacing
-        offset_y = row * component_spacing
-        
-        # Apply offset to separate components
-        for node, (x, y) in pos.items():
-            all_positions[node] = (x + offset_x, y + offset_y)
-    
-    # Add nodes with fixed positions
-    for node in subgraph.nodes():
-        x, y = all_positions[node]
-        net.add_node(
-            node,
-            label=node,
-            title=node,
-            color=component_map[node]['color'],
-            shape='dot',
-            size=10,
-            x=x,
-            y=y,
-            physics=False,  # Fix position
-        )
-
-    # Add edges
-    for s, o, edge_data in subgraph.edges(data=True):
-        net.add_edge(
-            s, o, 
-            label=edge_data.get('label', ''),
-            title=edge_data.get('label', ''),
-        )
-    
-    # Disable physics since we have fixed positions
-    net.toggle_physics(False)
-    
-    # Set options for better visualization
-    net.set_options("""
-    {
-      "nodes": {
-        "font": {
-          "size": 12
-        }
-      },
-      "edges": {
-        "color": {
-          "inherit": false,
-          "color": "#848484"
-        },
-        "smooth": {
-          "type": "continuous"
-        },
-        "arrows": {
-          "to": {
-            "enabled": true,
-            "scaleFactor": 0.5
-          }
-        },
-        "font": {
-          "size": 10,
-          "align": "middle"
-        }
-      },
-      "physics": {
-        "enabled": false
-      },
-      "interaction": {
-        "hover": true,
-        "tooltipDelay": 100,
-        "navigationButtons": true,
-        "keyboard": true
-      }
-    }
-    """)
-
-    # Save and display
-    filename = f'{exp_path}/{save_as}.html'
-    net.save_graph(filename)
-
-
-def _triplet_to_line(triplet):
-    """Convert internal triplet representation to prompt-friendly text."""
-    subj, obj, rel = triplet
-    rel_label = rel.get('label', 'related_to') if isinstance(rel, dict) else str(rel)
-    return f"{subj}, {rel_label}, {obj}"
-
-
-def _extract_json_blocks(text):
-    """Extract JSON objects from LLM response (handles multiple blocks)."""
-    blocks = []
-    depth = 0
-    start = None
-    for i, c in enumerate(text):
-        if c == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0 and start is not None:
-                try:
-                    obj = json.loads(text[start : i + 1])
-                    blocks.append(obj)
-                except json.JSONDecodeError:
-                    pass
-                start = None
-    return blocks
-
-
-def run_linking_pass_hypernodes(paper_triplets, code_index, code_files, graph, log, max_paper_triplets=None):
+def run_linking_pass_hypernodes(graph, code_index, code_files, log, max_paper_triplets=None):
     """
     Phase 2 linking (hypernode mode): for each code file, use LLM to produce hypernodes
     linking reusable patterns to code. Parses JSON blocks, stores in hypernode_store,
     adds (pattern, implemented_in, hypernode_id) triplets.
     """
-    paper_lines = _get_context_triplets(paper_triplets, max_triplets=max_paper_triplets)
-    reusable_patterns_block = "\n".join(f"- {line}" for line in paper_lines)
-
-    hypernode_store = getattr(graph, "hypernode_store", {})
-    if not isinstance(hypernode_store, dict):
-        hypernode_store = {}
-        graph.hypernode_store = hypernode_store
-
-    hypernodes_added = 0
+    all_triplets = graph.get_all_triplets() if graph else []
+    reusable_patterns_block = "\n".join(f"- {line}" for line in all_triplets)
 
     for rel_path, file_path in code_files:
         if not file_path.exists():
             continue
-        content = read_file_safe(file_path)
+        content = reprutil.read_file_safe(file_path)
         if "[Binary file" in content or len(content) < 10:
             continue
 
@@ -731,12 +157,12 @@ def run_linking_pass_hypernodes(paper_triplets, code_index, code_files, graph, l
             file_index = [{"file": rel_path_str, "type": "file", "name": rel_path_str, "qual": rel_path_str}]
 
         index_lines = [f"- {e['qual']} ({e['type']})" for e in file_index]
-        index_block = "\n".join(index_lines[:50])
+        index_block = "\n".join(index_lines)
 
-        chunks = extract_code_chunks(content, rel_path_str)
-        code_chunk = "\n\n---\n\n".join(chunks[:3]) if chunks else content[:2000]
-        code_chunk = code_chunk[:4000]
-
+        chunks = reprutil.extract_code_chunks(content, rel_path_str)
+        code_chunk = "\n\n---\n\n".join(chunks) if chunks else content#[:2000]
+        #code_chunk = code_chunk[:4000]
+        print(f"inde block: {index_block}\n code chunk: {code_chunk}")
         prompt = prompt_reusable_pattern_to_code_mapping.format(
             reusable_patterns=reusable_patterns_block,
             code_index=index_block,
@@ -745,12 +171,15 @@ def run_linking_pass_hypernodes(paper_triplets, code_index, code_files, graph, l
         )
 
         try:
-            response, _ = graph.generate(prompt, t=0.001)
-            blocks = _extract_json_blocks(response)
+            response, _ = graph.generate(prompt)
+            blocks = reprutil._extract_json_blocks(response)
             for block in blocks:
                 pattern = block.get("pattern")
                 hypernode = block.get("hypernode")
                 if not pattern or not hypernode:
+                    print(f"  Warning: pattern or hypernode not found for {rel_path_str}")
+                    continue
+                if pattern not in all_triplets:
                     continue
                 code_val = hypernode.get("code", "")
                 doc = hypernode.get("documentation", "")
@@ -759,70 +188,21 @@ def run_linking_pass_hypernodes(paper_triplets, code_index, code_files, graph, l
                     imports = [imports] if imports else []
                 if not code_val and not doc:
                     continue
-                hn = {"code": code_val, "documentation": doc, "imports": imports}
-                hid = generate_hypernode_id(pattern, code_val)
-                if hid not in hypernode_store:
-                    hypernode_store[hid] = hn
-                    graph.add_triplets([[pattern, hid, {"label": "implemented_in"}]])
-                    hypernodes_added += 1
-                    log(f"  Hypernode: {pattern} -> {hid} ({rel_path_str})")
+                graph.triplet2code[pattern] = hypernode
+                
+                #hn = {"code": code_val, "documentation": doc, "imports": imports}
+                #hid = generate_hypernode_id(pattern, code_val)
+                #if hid not in graph.hypernode_store:
+                #    graph.hypernode_store[hid] = hn
+                #    graph.add_triplets([[pattern, hid, {"label": "implemented_in"}]])
+                #    hypernodes_added += 1
+                #    log(f"  Hypernode: {pattern} -> {hid} ({rel_path_str})")
+                log(f"  Hypernode for {pattern} added")
         except Exception as e:
             log(f"  Error linking {rel_path_str}: {e}")
-
-    return hypernodes_added
-
-
-def run_linking_pass(paper_triplets, code_index, code_files, graph, log, max_paper_triplets=None):
-    """
-    Phase 2 linking (legacy path-based): for each code file, use LLM to create triplets
-    linking paper entities to code paths. Uses prompt_paper_code_linking.
-    """
-    from utils.utils import process_triplets
-
-    paper_lines = _get_context_triplets(paper_triplets, max_triplets=max_paper_triplets)
-    paper_block = "\n".join(f"- {line}" for line in paper_lines)
-
-    linking_triplets_total = 0
-
-    for rel_path, file_path in code_files:
-        if not file_path.exists():
-            continue
-        content = read_file_safe(file_path)
-        if "[Binary file" in content or len(content) < 10:
-            continue
-
-        rel_path_str = str(rel_path)
-        file_index = [e for e in code_index if e["file"] == rel_path_str]
-        if not file_index:
-            file_index = [{"file": rel_path_str, "type": "file", "name": rel_path_str, "qual": rel_path_str}]
-
-        index_lines = [f"- {e['qual']} ({e['type']})" for e in file_index]
-        index_block = "\n".join(index_lines[:50])
-
-        chunks = extract_code_chunks(content, rel_path_str)
-        code_chunk = "\n\n---\n\n".join(chunks[:3]) if chunks else content[:2000]
-        code_chunk = code_chunk[:4000]
-
-        prompt = prompt_paper_code_linking.format(
-            paper_graph_triplets=paper_block,
-            code_index=index_block,
-            file_path=rel_path_str,
-            code_chunk=code_chunk,
-        )
-
-        try:
-            response, _ = graph.generate(prompt, t=0.001)
-            new_triplets_raw = process_triplets(response)
-            graph.add_triplets(new_triplets_raw)
-            linking_triplets_total += len(new_triplets_raw)
-            if new_triplets_raw:
-                log(f"  Linking: {len(new_triplets_raw)} triplets for {rel_path_str}")
-                for t in new_triplets_raw[:2]:
-                    log(f"    - {_triplet_to_line(t)}")
-        except Exception as e:
-            log(f"  Error linking {rel_path_str}: {e}")
-
-    return linking_triplets_total
+            raise e
+    log(f" Unique hypernodes added: {len(graph.triplet2code)}")
+    return graph
 
 
 def _get_context_triplets(triplets, max_triplets=None, recent_first=False):
@@ -838,7 +218,7 @@ def _get_context_triplets(triplets, max_triplets=None, recent_first=False):
     seen = set()
     it = reversed(triplets) if (recent_first and max_triplets is not None) else triplets
     for t in it:
-        line = _triplet_to_line(t)
+        line = str(t)#reprutil._triplet_to_line(t)
         if line not in seen and (max_triplets is None or len(lines) < max_triplets):
             seen.add(line)
             lines.append(line)
@@ -847,7 +227,8 @@ def _get_context_triplets(triplets, max_triplets=None, recent_first=False):
     return lines
 
 
-def _extract_python_code(text):
+
+'''def _extract_python_code(text):
     """Extract Python code from fenced output, fallback to raw text."""
     match = re.search(r"```python\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
     if match:
@@ -856,7 +237,7 @@ def _extract_python_code(text):
     if match:
         return match.group(1).strip()
     return text.strip()
-
+'''
 
 def _parse_code_generator_output(response_text, repo_root):
     """
@@ -872,18 +253,80 @@ def _parse_code_generator_output(response_text, repo_root):
     files_created = []
     primary_python = None
 
-    # Pattern: FILE: path (allow spaces, forward/back slashes)
-    file_decl_re = re.compile(r"^FILE:\s*(.+?)\s*$", re.MULTILINE | re.IGNORECASE)
+    # Pattern 1: FILE: path (allow any prefix before FILE:, e.g. ##, **, -, 1., etc.)
+    file_decl_re = re.compile(r"^\s*.*?FILE:\s*(.+?)\s*\*{0,2}\s*$", re.MULTILINE | re.IGNORECASE)
+    # Pattern 2: **/path/to/file** (no FILE: - some LLMs use this format)
+    #file_decl_alt_re = re.compile(r"^\s*\*{1,2}\s*(/[a-zA-Z0-9_/.-]+)\s*\*{0,2}\s*$", re.MULTILINE)
     # Fenced code block: ```lang\n...``` (content can span lines)
     code_block_re = re.compile(r"^```(\w*)\s*\n([\s\S]*?)```", re.MULTILINE)
+    fence_re = re.compile(r"^```", re.MULTILINE)
 
-    # Find all FILE: declarations with their positions
-    file_matches = list(file_decl_re.finditer(response_text))
+    # Find FILE: declarations that are NOT inside fenced code blocks (e.g. markdown
+    # content often contains code blocks with "FILE: path" as documentation)
+    def _is_inside_code_block(pos):
+        # Build (start, end) for each code block; fences can nest (e.g. ```markdown with ```bash inside)
+        fences = list(fence_re.finditer(response_text))
+        blocks = []
+        stack = []
+        for m in fences:
+            p = m.start()
+            rest = response_text[p + 3 :]
+            is_opening = rest and (rest[0].isalnum() or rest[0] == "_")
+            if is_opening:
+                stack.append(p)
+            else:
+                if stack:
+                    start = stack.pop()
+                    blocks.append((start, p + 3))
+        return any(start <= pos < end for start, end in blocks)
+
+    def _unwrap_markdown_segment(segment):
+        """If segment is wrapped in ```markdown ... ```, extract inner content.
+        The segment already ends at the next FILE: declaration, so we use the LAST ```
+        in the segment as the closing fence - this correctly handles nested code blocks
+        (e.g. ```bash, plain ```) inside the markdown."""
+        segment = segment.strip()
+        if not re.match(r"^```(?:markdown|md)\s*\n", segment, re.IGNORECASE):
+            return segment
+        start = re.match(r"^```\w*\s*\n", segment, re.IGNORECASE).end()
+        # Find the last ``` at start of line - that closes the outer markdown block
+        last_fence = -1
+        pos = 0
+        while True:
+            idx = segment.find("```", pos)
+            if idx == -1:
+                break
+            if idx == 0 or segment[idx - 1] == "\n":
+                last_fence = idx
+            pos = idx + 3
+        if last_fence >= 0:
+            return segment[start:last_fence].rstrip()
+        return segment
+
+    # Collect matches from both patterns, filter out those inside code blocks
+    file_matches = [m for m in file_decl_re.finditer(response_text) if not _is_inside_code_block(m.start())]
+    #alt_matches = [m for m in file_decl_alt_re.finditer(response_text) if not _is_inside_code_block(m.start())]
+    # Merge and sort by position; for alt pattern, use group(1) as path (need to extract path from match)
+    #for m in alt_matches:
+    #    if not any(fm.start() == m.start() for fm in file_matches):  # avoid duplicate
+    #        file_matches.append(m)
+    file_matches.sort(key=lambda m: m.start())
+
+    if not file_matches and ("FILE" in response_text.upper() or "**/" in response_text):
+        logging.warning(
+            "Parse: 'FILE' found in response but no FILE: declarations matched regex; "
+            "falling back to single code block or raw text"
+        )
 
     for i, file_match in enumerate(file_matches):
         raw_path = file_match.group(1).strip()
         # Normalize: forward slashes, strip leading slashes
         raw_path = raw_path.replace("\\", "/").lstrip("/")
+        # Strip /home/submission/ prefix (common in **/path** format)
+        #if raw_path.startswith("home/submission/"):
+        #    raw_path = raw_path[len("home/submission/"):]
+        #elif raw_path.startswith("/home/submission/"):
+        #    raw_path = raw_path[len("/home/submission/"):]
         if not raw_path:
             continue
         # Sanitize: avoid path traversal
@@ -893,23 +336,27 @@ def _parse_code_generator_output(response_text, repo_root):
         if not rel_path:
             continue
 
-        # Find the next code block after this FILE: line
         start = file_match.end()
         next_file_start = file_matches[i + 1].start() if i + 1 < len(file_matches) else len(response_text)
         segment = response_text[start:next_file_start]
-        code_match = code_block_re.search(segment)
-        if not code_match:
-            continue
-        content = code_match.group(2).rstrip()
+
+        if rel_path.lower().endswith(".md"):
+            content = _unwrap_markdown_segment(segment)
+        else:
+            code_match = code_block_re.search(segment)
+            if not code_match:
+                continue
+            content = code_match.group(2).rstrip()
         if content.endswith("\n"):
             content = content[:-1]  # Keep trailing newline behavior consistent
 
         out_path = Path(repo_root) / rel_path
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            out_path.write_text(content, encoding="utf-8")
-        except Exception:
-            out_path.write_text(content, encoding="utf-8", errors="replace")
+        #try:
+        out_path.write_text(content, encoding="utf-8")
+        #except Exception as e:
+        #    out_path.write_text(content, encoding="utf-8", errors="replace")
+        #    raise e
         files_created.append(out_path)
         if primary_python is None and out_path.suffix.lower() in (".py", ".pyw"):
             primary_python = out_path
@@ -952,6 +399,8 @@ def _format_triplets_for_prompt(triplets, max_triplets=None):
             s, o, r = row
             rel = r.get("label", r) if isinstance(r, dict) else str(r)
             lines.append(f"- {s}, {rel}, {o}")
+    # remove duplicates
+    lines = list(set(lines))
     return "\n".join(lines) if lines else "(none)"
 
 
@@ -967,7 +416,7 @@ def _format_cookbook_for_agent(graph, hypernode_store, max_triplets=1500):
     for triplet in graph.triplets:
         subj, obj, rel_data = triplet
         rel = rel_data.get("label", "") if isinstance(rel_data, dict) else str(rel_data)
-        line = _triplet_to_line(triplet)
+        line = reprutil._triplet_to_line(triplet)
         if rel == "implemented_in":
             impl_triplets.append((subj, obj))
         else:
@@ -1002,6 +451,88 @@ def _format_cookbook_for_agent(graph, hypernode_store, max_triplets=1500):
                 parts.append(f"Code:\n```\n{code[:3000]}\n```")  # Cap code length
 
     return "\n".join(parts)
+
+
+# Implementation-related relations to prioritize when sampling paper queries for retrieval
+_IMPL_RELATIONS = frozenset({"implements", "uses", "requires", "configures", "contains", "extends"})
+
+
+
+def _retrieve_relevant_expert_snippets(paper_triplets, expert_triplets,
+    expert_hypernodes, graph, topk=3, max_depth=3, threshold=0.75, max_paper_queries=25):
+    """
+    Use paper graph to retrieve relevant code snippets from the expert knowledge graph.
+    Returns (retrieved_triplets, retrieved_hypernodes) - subset of expert graph.
+    """
+    retriever = graph.retriever
+
+    if not expert_triplets:
+        return [], {}
+
+    # Build expert triplet strings and str -> triplet mapping
+
+    expert_triplet_strs = graph.triplets_to_str(expert_triplets)
+    expert_str_to_triplet = {s:t for s, t in zip(expert_triplet_strs, expert_triplets)}
+
+    # Build paper queries: triplet strings, prioritizing implementation-related relations
+    all_queries = graph.triplets_to_str(paper_triplets)
+    '''
+    impl_queries = []
+    other_queries = []
+    for row in paper_triplets:
+        if isinstance(row, (list, tuple)) and len(row) >= 3:
+            s, o, r = row[0], row[1], row[2]
+            rel = (r.get("label", r) if isinstance(r, dict) else str(r)).lower()
+            q = _triplet_to_str(row)
+            if not q:
+                continue
+            if any(impl in rel for impl in _IMPL_RELATIONS):
+                impl_queries.append(q)
+            else:
+                other_queries.append(q)
+
+    # Sample queries: impl first, then others, cap at max_paper_queries
+    all_queries = impl_queries[: max_paper_queries // 2] + other_queries[: max_paper_queries // 2]
+    all_queries = all_queries[:max_paper_queries]
+    if not all_queries:
+        all_queries = [_triplet_to_str(t) for t in paper_triplets[:max_paper_queries] if _triplet_to_str(t)]
+    '''
+    # Retrieve from expert graph for each query
+    retrieved_strs = set()
+    print(f"Retrieving {len(all_queries)} queries from expert graph, max_depth {max_depth}, topk {topk}, post_retrieve_threshold {threshold}")
+    for query in tqdm(all_queries):
+        results = graph_retr_search(
+            query,
+            expert_triplet_strs,
+            retriever,
+            max_depth=max_depth,
+            topk=topk,
+            post_retrieve_threshold=threshold, 
+            verbose=2
+        )
+        retrieved_strs.update(results)
+    # need add ranking the retrieved triplets like
+    """
+    obs_plan_embeddings = self.retriever.embed((retrieve_base))
+    top_episodic_dict = find_top_episodic_emb(associated_subgraph, deepcopy(self.obs_episodic), obs_plan_embeddings, self.retriever)
+    top_episodic = top_k_obs(top_episodic_dict, k=topk_episodic)
+
+    top_episodic = [item for item in top_episodic]
+    """
+    # Map back to triplets and collect hypernodes
+    retrieved_triplets = []
+    retrieved_hypernodes = {}
+    for s in retrieved_strs:
+        if s in expert_str_to_triplet:
+            t = expert_str_to_triplet[s]
+            retrieved_triplets.append(t)
+            rel = t[2].get("label", t[2]) if isinstance(t[2], dict) else str(t[2])
+            if rel == "implemented_in" and expert_hypernodes:
+                hid = t[1]
+                if hid in expert_hypernodes and hid not in retrieved_hypernodes:
+                    retrieved_hypernodes[hid] = expert_hypernodes[hid]
+
+    return retrieved_triplets, retrieved_hypernodes
 
 
 def _format_expert_graph_for_agent(triplets, hypernode_store, max_triplets=None):
@@ -1049,70 +580,168 @@ def _format_expert_graph_for_agent(triplets, hypernode_store, max_triplets=None)
     return "\n".join(parts)
 
 
-def generate_code_from_graph(graph, paper_path, log, output_dir, max_triplets=None,
-                             paper_summary=None, hypernode_store=None):
+def generate_code_from_graph(graph, paper_path, paper_name, log, output_dir=None, max_triplets=None,
+                             paper_summary=None, hypernode_store=None, graph_base_dir=None):
     """
     Generate implementation code using paper graph + expert graph.
-    Loads paper_graph_data.json (paper details) and graph_data.json (expert knowledge) from output_dir.
-    Falls back to graph + paper_path if files are missing.
+    Loads paper_graph_data.json and graph_data.json from graph_base_dir (or output_dir if None).
+    Writes submission, generated_code_response to output_dir.
     """
-    paper_graph_path = os.path.join(output_dir, "paper_graph_data.json")
-    graph_data_path = os.path.join(output_dir, "graph_data.json")
-
+    output_dir = graph_base_dir if output_dir is None else output_dir
+    graph_data_path = os.path.join(graph_base_dir, "graph_data.json")
+    paper_graph_path = os.path.join(graph_base_dir, "paper_graph_data.json")
+    
     paper_graph_block = ""
-    expert_graph_block = ""
+    if os.path.exists(paper_graph_path):
+        with open(paper_graph_path, "r", encoding="utf-8") as f:
+            paper_data = json.load(f)
+        paper_triplets = paper_data.get("triplets", [])
+        paper_graph_block = _format_triplets_for_prompt(paper_triplets, max_triplets)
+    expert_graph_block = False
+    if os.path.exists(graph_data_path):
+        with open(graph_data_path, "r", encoding="utf-8") as f:
+            expert_data = json.load(f)
+        expert_triplets = expert_data.get("triplets", [])
+        expert_hypernodes = expert_data.get("hypernode_store", {})
+        expert_graph_block = _format_expert_graph_for_agent(
+            expert_triplets, expert_hypernodes, max_triplets
+        )
 
-    if os.path.exists(paper_graph_path) and os.path.exists(graph_data_path):
-        try:
-            with open(paper_graph_path, "r", encoding="utf-8") as f:
-                paper_data = json.load(f)
-            with open(graph_data_path, "r", encoding="utf-8") as f:
-                expert_data = json.load(f)
-            paper_triplets = paper_data.get("triplets", [])
-            expert_triplets = expert_data.get("triplets", [])
-            expert_hypernodes = expert_data.get("hypernode_store", {})
-            paper_graph_block = _format_triplets_for_prompt(paper_triplets, max_triplets)
-            expert_graph_block = _format_expert_graph_for_agent(
-                expert_triplets, expert_hypernodes, max_triplets
-            )
-            log(f"Loaded paper graph ({len(paper_triplets)} triplets) and expert graph ({len(expert_triplets)} triplets) for code generation")
-        except (json.JSONDecodeError, KeyError) as e:
-            log(f"Could not load graphs: {e}, falling back to in-memory graph")
-            paper_graph_block = ""
-            expert_graph_block = ""
-    '''
-    if not paper_graph_block or not expert_graph_block:
-        # Fallback: use in-memory graph (no paper_graph.json / graph_data.json)
-        if graph:
-            paper_triplets = [[t[0], t[1], t[2]] for t in graph.triplets]
-            hs = hypernode_store if hypernode_store is not None else getattr(graph, "hypernode_store", {})
-            paper_graph_block = _format_triplets_for_prompt(paper_triplets, max_triplets)
-            expert_graph_block = _format_cookbook_for_agent(graph, hs, max_triplets)
-            log("Using in-memory graph (paper_graph.json / graph_data.json not found)")
-    '''
     if not paper_summary and paper_path:
-        try:
-            with open(paper_path, "r", encoding="utf-8") as f:
-                full = f.read()
-            paper_summary = full[:3000] + ("..." if len(full) > 3000 else "")
-        except Exception:
-            pass
+        
+        with open(paper_path, "r", encoding="utf-8") as f:
+            full = f.read()
+        paper_summary = full[:2000] + ("..." if len(full) > 2000 else "")
+        
     if not paper_summary:
-        paper_summary = f"Paper: {os.path.basename(paper_path)} (content not loaded)"
+        paper_summary = "None"
 
-    prompt = prompt_coding_agent_with_cookbook.format(
-        BENCHMARK_RULES=BENCHMARK_EVALUATION_RULES,
-        TOY_EXAMPLE=REPRODUCTION_SCRIPT_TOY_EXAMPLE,
-        paper_summary=paper_summary,
-        paper_graph=paper_graph_block,
-        expert_graph=expert_graph_block,
-    )
-
-    response, _ = graph.generate(prompt, t=0.2)
+    
+    if paper_graph_block and expert_graph_block:
+        prompt = prompt_coding_agent_paper_mem_graph.format(
+            BENCHMARK_RULES=BENCHMARK_EVALUATION_RULES,
+            TOY_EXAMPLE=REPRODUCTION_SCRIPT_TOY_EXAMPLE,
+            paper_summary=paper_summary,
+            paper_graph=paper_graph_block,
+            expert_graph=expert_graph_block,
+        )
+    elif paper_graph_block:
+        prompt = prompt_coding_agent_paper_graph.format(
+            BENCHMARK_RULES=BENCHMARK_EVALUATION_RULES,
+            TOY_EXAMPLE=REPRODUCTION_SCRIPT_TOY_EXAMPLE,
+            paper_summary=paper_summary,
+            paper_graph=paper_graph_block,
+        )
+    log(f"Prompt length: {len(prompt)} chars: benchmark rules {len(BENCHMARK_EVALUATION_RULES)} chars, toy example {len(REPRODUCTION_SCRIPT_TOY_EXAMPLE)} chars, paper summary {len(paper_summary)} chars, paper graph {len(paper_graph_block)} chars")
+    response, tokens = graph.generate(prompt)
+    completion_tokens = tokens["completion_tokens"]
+    prompt_tokens = tokens["prompt_tokens"]
+    log(f"Code generation response: {len(response)} chars")
+    log(f"Code generation tokens: {completion_tokens} completion, {prompt_tokens} prompt")
 
     os.makedirs(output_dir, exist_ok=True)
     raw_output_path = os.path.join(output_dir, "generated_code_response.txt")
-    repo_root = os.path.join(output_dir, "submission")
+    repo_root = os.path.join(output_dir, paper_name, "submission")
+    os.makedirs(repo_root, exist_ok=True)
+
+    with open(raw_output_path, "w", encoding="utf-8") as f:
+        f.write(response)
+
+    files_created, primary_python = _parse_code_generator_output(response, repo_root)
+    code_path = str(primary_python) if primary_python else (os.path.join(repo_root, "generated_reproduction.py") if files_created else None)
+
+    for p in files_created:
+        rel = Path(p).relative_to(Path(repo_root))
+        log(f"  Created: {rel}")
+    log(f"Generated repo at {repo_root} ({len(files_created)} files)")
+    log(f"Raw model response saved to: {raw_output_path}")
+
+    return {
+        "code_path": code_path,
+        "repo_root": repo_root,
+        "files_created": [str(p) for p in files_created],
+        "raw_response_path": raw_output_path,
+        "paper_triplets": len(paper_graph_block),
+        #"expert_triplets": len(expert_graph_block),
+        "code_chars": sum(p.stat().st_size for p in files_created if p.exists()),
+    }
+
+
+def generate_code_from_graph_with_retrieval(mem_graph, paper_graph, paper_name, log,
+output_dir=None, max_triplets=None, paper_summary=None, 
+graph_base_dir=None, retrieval_topk=8, retrieval_max_depth=2, retrieval_threshold=0.7, 
+max_paper_queries=25,):
+    """
+    Generate implementation code using paper graph + RETRIEVED relevant snippets from expert graph.
+    First uses paper graph to retrieve relevant code snippets from expert knowledge graph,
+    then concatenates paper graph + retrieval results into the coding agent input.
+    Loads from graph_base_dir (or output_dir if None); writes to output_dir.
+    """
+    
+    agent = OpenAI(
+            base_url=os.getenv("OPENAI_API_BASE_URL"),
+            api_key=os.getenv("OPENAI_API_KEY"),
+        )
+    
+
+
+    output_dir = graph_base_dir if output_dir is None else output_dir
+    #graph_data_path = os.path.join(graph_base_dir, "graph_data.json")
+    #paper_graph_path = os.path.join(graph_base_dir, "paper_graph_data.json")
+
+    paper_items = {k: 2 for k in paper_graph.get_all_triplets()}
+    
+
+
+    topk_episodic = 2 
+    # subgaph is a list of str triplets
+    subgraph, _ = mem_graph.retrieve(paper_items, '', [], topk_episodic)
+    log(f"ASSOCIATED SUBGRAPH len: {len(subgraph)}")
+    expert_graph = []
+    for striplet in subgraph:
+        expert_graph.append(f"Pattern: {striplet}, Code snippet: {mem_graph.triplet2code.get(striplet, '')}")
+
+
+
+
+
+    paper_graph_block = "\n".join(paper_graph.get_all_triplets()) #_format_triplets_for_prompt(paper_graph.get_all_triplets())
+    expert_graph_block = "\n".join(expert_graph)
+    
+    prompt = prompt_coding_agent_paper_mem_graph.format(
+        BENCHMARK_RULES=BENCHMARK_EVALUATION_RULES,
+        TOY_EXAMPLE=REPRODUCTION_SCRIPT_TOY_EXAMPLE,
+        #paper_summary=paper_summary,
+        paper_graph=paper_graph_block,
+        expert_graph=expert_graph_block,
+    )
+    log(f"Prompt length: {len(prompt)} chars, generating code...")
+    chat_completion = agent.chat.completions.create(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": 'You are a helpful assistant for research reproduction',
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    }
+                ],
+                model=os.getenv("OPENAI_MODEL"),
+                temperature=0.7,
+                
+            )
+    response = chat_completion.choices[0].message.content
+    # print(f"Response: {chat_completion}")
+    prompt_tokens = chat_completion.usage.prompt_tokens
+    completion_tokens = chat_completion.usage.completion_tokens
+
+    log(f"Code generation response: {len(response)} chars")
+    log(f"Code generation tokens: {completion_tokens} completion, {prompt_tokens} prompt")
+
+    os.makedirs(output_dir, exist_ok=True)
+    raw_output_path = os.path.join(output_dir, "generated_code_response.txt")
+    repo_root = os.path.join(output_dir, paper_name, "submission")
     os.makedirs(repo_root, exist_ok=True)
 
     with open(raw_output_path, "w", encoding="utf-8") as f:
@@ -1135,9 +764,11 @@ def generate_code_from_graph(graph, paper_path, log, output_dir, max_triplets=No
         "repo_root": repo_root,
         "files_created": [str(p) for p in files_created],
         "raw_response_path": raw_output_path,
-        "triplets_used": len(paper_graph_block) + len(expert_graph_block),
+        "triplets_used": len(paper_graph.get_all_triplets()) + len(subgraph),
         "code_chars": sum(p.stat().st_size for p in files_created if p.exists()),
+        "retrieval_variant": True,
     }
+
 
 '''
 def test_generated_code_executability(code_path, log, timeout_sec=20):
@@ -1198,70 +829,45 @@ def test_generated_code_executability(code_path, log, timeout_sec=20):
     return results
 '''
 
-def run_reproduction_test(paper_path, device="cpu", log_path="",
-max_code_files=-1, generate_code=True, test_generated_code=True, repo_url_override=None, use_repo=True,
-cookbook_path=None, load_cookbook=True, repo_dir=None):
-    """Main function to run reproduction-focused paper test."""
-    CONTEXT_WINDOW_LENGTHS: dict[str, int] = {
-    "Qwen/QwQ-32B": 16384,
-    "Qwen/Qwen3-Next-80B-A3B-Instruct": 262144,
-    }
+def run_reproduction_test(log, args, paper_path, device="cpu", log_path="", 
+                        generate_code=True, use_repo=True,
+                        repo_dir=None, code_gen_variant="full", experiment_name=None):
+    """Main function to run reproduction-focused paper test.
+    code_gen_variant: 'full' = paper + full expert graph; 'retrieval' = paper + retrieved expert snippets.
+    experiment_name: if set, creates log_path/experiment_name/ for submission, code_generation, and log.
+    """
+
+    # Experiment path: when set, submission, code_generation, and log go to log_path/experiment_name/
+    output_base = log_path
+    if experiment_name:
+        experiment_path = os.path.join(output_base, experiment_name)
+        code_output_dir = experiment_path
+    else:
+        code_output_dir = output_base
     
-    
-    
-    log = Logger(log_path)
-    
-    base_url = "https://inference.airi.net:46783/v1"
-    api_key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImFhZDEyY2YyLWIyZDAtNDdjOC1iMjg3LTIzNzkyMTBkYmIyOSIsImxvZ2dpbmdfaW5fdG9rZW4iOmZhbHNlLCJpYXQiOjE3NzIwNjUyNjAsImV4cCI6MTc3MjY3MDA2MH0.AhqeW-tV9jFHrTEFDHauMWIDBVop0Ht8B5UW_y7-fDg"
-    model = 'Qwen/Qwen3-Next-80B-A3B-Instruct'#'Qwen/QwQ-32B'#'Qwen/Qwen3-Coder-30B-A3B-Instruct'
+    base_url = os.getenv("OPENAI_API_BASE_URL") # "https://inference.airi.net:46783/v1"
+    api_key = os.getenv("OPENAI_API_KEY") # "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImFhZDEyY2YyLWIyZDAtNDdjOC1iMjg3LTIzNzkyMTBkYmIyOSIsImxvZ2dpbmdfaW5fdG9rZW4iOmZhbHNlLCJpYXQiOjE3NzMwMDAwNjEsImV4cCI6MTc3MzYwNDg2MX0.xQYUhUzkgTjvFhUplVKuyu0j1T7IEVm-L90NDH1_LLE"
+    model = os.getenv("OPENAI_MODEL") # "Qwen/Qwen3-Next-80B-A3B-Instruct" #"Qwen/QwQ-32B"
 
     # Get paper directory and load repo URL
     paper_dir = os.path.dirname(paper_path)
     if not use_repo:
         repo_url = None
-    elif repo_url_override:
-        repo_url = repo_url_override
     else:
-        repo_url = load_repo_url(paper_dir)
-    
-    cookbook_file = cookbook_path or get_cookbook_path()
-    existing_triplets = []
-    hypernode_store = {}
-    existing_metadata = {}
-
-    if load_cookbook and os.path.exists(cookbook_file):
-        log(f"Loading cookbook from {cookbook_file}...")
-        existing_triplets, hypernode_store, existing_metadata = load_cookbook_graph(cookbook_file)
-        log(f"Loaded {len(existing_triplets)} triplets, {len(hypernode_store)} hypernodes")
-    else:
-        log("Starting with empty cookbook (--no-load-cookbook or file not found)")
-
-        log("="*70)
-        log("REPRODUCTION COOKBOOK KNOWLEDGE GRAPH BUILDER")
-        log("="*70)
+        repo_url = reprutil.load_repo_url(paper_dir)
+        
     log(f"Paper: {paper_path}")
     log(f"Repository: {repo_url or 'Not specified'}")
     log(f"Model: {model}")
     log(f"Device: {device}")
-    log(f"Cookbook: {cookbook_file}")
     log("")
 
     total_start_time = time()
 
-    log("Initializing reproduction-focused knowledge graph...")
-    graph = ReproductionGraph(model, "You are a helpful assistant specializing in research reproduction",
-                             api_key, log, base_url, device)
-    # Pre-populate with existing cookbook
-    for t in existing_triplets:
-        graph.add_triplets([t])
-    graph.hypernode_store = hypernode_store
-    log("Graph initialized with reproduction-focused prompt")
-    log("")
-
-    # Check if graph was already built for this paper (skip regeneration)
     graph_data_path = os.path.join(log_path, "graph_data.json")
     paper_graph_path = os.path.join(log_path, "paper_graph_data.json")
-    if os.path.exists(graph_data_path):
+    if os.path.exists(paper_graph_path):
+        '''
         try:
             with open(graph_data_path, "r") as f:
                 cached = json.load(f)
@@ -1283,35 +889,37 @@ cookbook_path=None, load_cookbook=True, repo_dir=None):
                 log(f"Loaded cached: paper graph ({len(paper_triplets)} triplets) + expert graph ({len(expert_triplets)} triplets)")
             else:
                 assert False, "Paper graph data file not found"
-                '''
-                # Legacy format: full graph in graph_data.json
-                loaded_triplets = cached.get("triplets", [])
-                graph.triplets = []
-                for row in loaded_triplets:
-                    s, o, r = row[0], row[1], row[2]
-                    if isinstance(r, str):
-                        r = {"label": r}
-                    graph.add_triplets([(s, o, r)])
-                graph.hypernode_store = cached.get("hypernode_store", hypernode_store)
-                section_stats = cached.get("sections", [])
-                code_stats = cached.get("code_stats", [])
-                total_time = cached.get("stats", {}).get("total_time", 0)
-                log(f"Loaded cached graph from {graph_data_path} ({len(loaded_triplets)} triplets)")
-                '''
+            
             log("Skipping Phase 1 (paper extraction) and Phase 2 (code linking)")
-            skip_regeneration = True
+            skip_paper_graph_generation = True
         except (json.JSONDecodeError, KeyError) as e:
             log(f"Could not load cached graph: {e}, regenerating")
-            skip_regeneration = False
+            skip_paper_graph_generation = False
+        '''
+        skip_paper_graph_generation = True
     else:
-        skip_regeneration = False
+        skip_paper_graph_generation = False
+    
+    if os.path.exists(graph_data_path):
+        skip_mem_graph_generation = True
+    else:
+        skip_mem_graph_generation = False
 
-    if not skip_regeneration:
+    log(f"skip_paper_graph_generation: {skip_paper_graph_generation}")
+    log(f"skip_mem_graph_generation: {skip_mem_graph_generation}")
+    if not skip_paper_graph_generation:
         log("Loading paper...")
-        paper_content = load_paper(paper_path)
-        sections = split_into_sections(paper_content)
+        paper_content = reprutil.load_paper(paper_path)
+        sections = reprutil.split_into_sections(paper_content)
         log(f"Paper split into {len(sections)} sections")
         log("")
+
+        paper_graph = ReproductionGraph(model, "You are a helpful assistant specializing in research reproduction",
+                             api_key, log, base_url, device, type='paper')
+        if not skip_mem_graph_generation:
+            mem_graph = ReproductionGraph(model, "You are a helpful assistant specializing in research replication",
+                                 api_key, log, base_url, device, type='mem')
+        
 
         # Process sections
         section_stats = []
@@ -1323,28 +931,38 @@ cookbook_path=None, load_cookbook=True, repo_dir=None):
             log(f"{current_datetime} SECTION {i+1}/{len(sections)}: {section['title']}")
             log("="*70)
 
-            chunks = preprocess_section(section['content'])
+            chunks = reprutil.preprocess_section(section['content'])
             log(f"Section split into {len(chunks)} chunks")
 
-            section_triplets = []
-
+            section_triplets_paper = []
+            section_triplets_mem = []
             for j, chunk in enumerate(chunks):
                 log(f"\n{datetime.datetime.now()} Processing chunk {j+1}/{len(chunks)}...")
                 log(f"Chunk preview: {chunk[:100]}...")
 
                 # Pass recent triplets as context for entity consistency across chunks
-                prev_subgraph = _get_context_triplets(graph.triplets, max_triplets=40, recent_first=True)
+                #prev_subgraph = _get_context_triplets(paper_graph.triplets, max_triplets=40, recent_first=True)
 
                 retries = 3
                 while retries > 0:
                     try:
-                        new_triplets, _ = graph.update_without_retrieve(chunk, prev_subgraph, log,
-                        source_type="paper")
-                        section_triplets.extend(new_triplets)
+                        log(f"Try {4-retries}/{retries}")
+                        new_triplets_paper, _ = paper_graph.update_without_retrieve(chunk, [], log, source_type="paper")
+                        section_triplets_paper.extend(new_triplets_paper)
+                        new_triplets_mem = None
+                        if not skip_mem_graph_generation:
+                            new_triplets_mem, _ = mem_graph.update_without_retrieve(chunk, [], log, source_type="paper")
+                            section_triplets_mem.extend(new_triplets_mem)
                         log(f"{datetime.datetime.now()} Chunk {j+1}/{len(chunks)} done")
-                        if new_triplets:
-                            log("Sample triplets:")
-                            for triplet in new_triplets[:3]:
+                        if new_triplets_paper:
+                            log("Sample triplets paper:")
+                            for triplet in new_triplets_paper[:3]:
+                                subj, obj, rel = triplet
+                                log(f"  - ({subj}) --[{rel.get('label', 'N/A')}]--> ({obj})")
+                        
+                        if new_triplets_mem:
+                            log("Sample triplets mem:")
+                            for triplet in new_triplets_mem[:3]:
                                 subj, obj, rel = triplet
                                 log(f"  - ({subj}) --[{rel.get('label', 'N/A')}]--> ({obj})")
                         break
@@ -1361,175 +979,179 @@ cookbook_path=None, load_cookbook=True, repo_dir=None):
 
             log("")
             log(f"Section summary:")
-            log(f"  - Triplets extracted: {len(section_triplets)}")
-            log(f"  - Total triplets in graph: {len(graph.triplets)}")
+            log(f"  - Triplets extracted: paper {len(section_triplets_paper)}, mem {len(section_triplets_mem)}")
+            log(f"  - Total triplets in graph: paper {len(paper_graph.triplets)}, mem {len(mem_graph.triplets) if not skip_mem_graph_generation else 'None'}")
             log(f"  - Processing time: {section_time:.2f} seconds")
-            log(f"  - API cost so far: ${graph.total_amount:.4f}")
+            log(f"  - API tokens: paper {paper_graph.completion_tokens} completion, {paper_graph.prompt_tokens} prompt")
+            if not skip_mem_graph_generation:
+                log(f"  - API tokens: mem {mem_graph.completion_tokens} completion, {mem_graph.prompt_tokens} prompt")
             log("")
-
-            # Save current graph state after each section (allows stopping and inspecting)
-            log.to_json({
+            # Save current graph state after each section (to output_base for shared access)
+            reprutil._write_json_to_path(output_base, "paper_graph_data.json", {
                 "paper": os.path.basename(paper_path),
                 "sections_processed": i + 1,
-                "triplets": [[t[0], t[1], t[2]] for t in graph.triplets],
-                "hypernode_store": getattr(graph, "hypernode_store", {}),
-                "stats": {"total_triplets": len(graph.triplets), "api_cost": graph.total_amount},
-            }, "graph_data.json")
-            log("Graph state saved to graph_data.json")
+                "triplets": [[t[0], t[1], t[2]] for t in paper_graph.triplets],
+                "stats": {"total_triplets": len(paper_graph.triplets), 
+                "prompt_tokens": paper_graph.prompt_tokens,
+                "completion_tokens": paper_graph.completion_tokens},
+            })
+            log("Graph state saved to paper_graph_data.json")
+            if not skip_mem_graph_generation:
+                reprutil._write_json_to_path(output_base, "mem_graph_data.json", {
+                    "paper": os.path.basename(paper_path),
+                    "sections_processed": i + 1,
+                    "triplets": [[t[0], t[1], t[2]] for t in mem_graph.triplets],
+                    "stats": {"total_triplets": len(mem_graph.triplets), 
+                    "prompt_tokens": mem_graph.prompt_tokens,
+                    "completion_tokens": mem_graph.completion_tokens},
+                })
+                log("Graph state saved to mem_graph_data.json")
 
             section_stats.append({
                 'section_num': i + 1,
                 'title': section['title'],
-                'triplets_extracted': len(section_triplets),
+                'triplets_extracted_paper': len(section_triplets_paper),
+                'triplets_extracted_mem': len(section_triplets_mem) if not skip_mem_graph_generation else -1,
                 'processing_time': section_time,
-                'triplets': [[t[0], t[1], t[2]] for t in section_triplets],
+                'triplets_paper': [[t[0], t[1], t[2]] for t in section_triplets_paper],
+                'triplets_mem': [[t[0], t[1], t[2]] for t in section_triplets_mem] if not skip_mem_graph_generation else [],
             })
+    
+    #'''
+    # =============================================================================
+    # PHASE 2: Code to mem graph Linking
+    # =============================================================================
+    log("Linking code to  MEMORY graph...")
 
-        # =============================================================================
-        # PHASE 2: Code Index + Paper-to-Code Linking
-        # =============================================================================
-        paper_graph_triplets = list(graph.triplets)  # Snapshot after Phase 1
+    code_stats = []
+    if repo_dir is not None or repo_url is not None:
+        log("="*70)
+        log("PHASE 2: CODE INDEX + PAPER-TO-CODE LINKING")
+        log("="*70)
 
-        code_stats = []
-        if repo_dir is not None or repo_url is not None:
-            log("="*70)
-            log("PHASE 2: CODE INDEX + PAPER-TO-CODE LINKING")
-            log("="*70)
-
-            if repo_dir is not None:
-                temp_dir = repo_dir
-                log(f'Using local repo at {temp_dir}')
-            else:
-                temp_dir = log_path + '/repo'
-                try:
-                    if not os.path.exists(temp_dir):
-                        log('Cloning repo...')
-                        clone_repo(repo_url, temp_dir, log)
-                    else:
-                        log('Repo already downloaded, processing...')
-                except subprocess.CalledProcessError as e:
-                    log(f"Error cloning repository: {e}")
-                    raise
-            try:
-
-                log("\nCollecting code files...")
-                code_files = collect_code_files(temp_dir, max_files=max_code_files)
-                log(f"Found {len(code_files)} code files")
-
-                log("\nBuilding code index...")
-                code_index = build_code_index(temp_dir, code_files, log)
-                log(f"Code index: {len(code_index)} entities (classes, functions, config keys)")
-
-                log("\nRunning linking pass (hypernodes: patterns -> code)...")
-                link_start = time()
-                hypernodes_added = run_linking_pass_hypernodes(
-                    paper_graph_triplets, code_index, code_files, graph, log, max_paper_triplets=None
-                )
-                link_time = time() - link_start
-                log(f"Linking complete: {hypernodes_added} hypernodes in {link_time:.2f}s")
-                log(f"Total cost so far: ${graph.total_amount:.4f}")
-
-                code_stats = [{
-                    'phase': 'linking',
-                    'hypernodes_added': hypernodes_added,
-                    'processing_time': link_time,
-                    'code_index_size': len(code_index),
-                }]
-
-            except Exception as e:
-                log(f"Error in Phase 2: {e}")
-                raise
+        if repo_dir is not None:
+            temp_dir = repo_dir
+            log(f'Using local repo at {temp_dir}')
         else:
-            log('No repo provided, skipping Phase 2 (code linking).')
+            temp_dir = log_path + '/repo'
+            try:
+                if not os.path.exists(temp_dir):
+                    log('Cloning repo...')
+                    reprutil.clone_repo(repo_url, temp_dir, log)
+                else:
+                    log('Repo already downloaded, processing...')
+            except subprocess.CalledProcessError as e:
+                log(f"Error cloning repository: {e}")
+                raise
+        try:
 
-        # Save paper graph (paper-specific triplets only) for code generation
-        initial_count = len(existing_triplets)
-        paper_only_triplets = graph.triplets[initial_count:] if initial_count > 0 else list(graph.triplets)
-        log.to_json({
-            "paper": os.path.basename(paper_path),
-            "triplets": [[t[0], t[1], t[2]] for t in paper_only_triplets],
-            "sections": section_stats,
-            "code_stats": code_stats,
-        }, "paper_graph.json")
-        log("Paper graph saved to paper_graph.json")
+            log("\nCollecting code files...")
+            code_files = reprutil.collect_code_files(temp_dir)
+            log(f"Found {len(code_files)} code files")
 
-        total_time = time() - total_start_time
+            log("\nBuilding code index...")
+            code_index = reprutil.build_code_index(temp_dir, code_files, log)
+            log(f"Code index: {len(code_index)} entities (classes, functions, config keys)")
+
+            log("\nRunning linking pass (hypernodes: patterns -> code)...")
+            link_start = time()
+            mem_graph = run_linking_pass_hypernodes(
+                mem_graph, code_index, code_files, log, max_paper_triplets=None
+            )
+            link_time = time() - link_start
+            log(f"Linking complete: {len(mem_graph.triplet2code)} hypernodes in {link_time:.2f}s")
+            log(f"Total cost so far: ${mem_graph.total_amount:.4f}")
+            log('Saving graph with code linking to a file0')
+            reprutil._write_json_to_path(output_base, "mem_graph_data_with_code.json", {
+                "paper": os.path.basename(paper_path),
+                "triplets": [[t[0], t[1], t[2]] for t in mem_graph.triplets],
+                "triplet2code": mem_graph.triplet2code,
+                "stats": {"total_triplets": len(mem_graph.triplets), 
+                "prompt_tokens": mem_graph.prompt_tokens,
+                "completion_tokens": mem_graph.completion_tokens},
+            })
+            
+
+        except Exception as e:
+            log(f"Error in Phase 2: {e}")
+            raise e
+    else:
+        log('No repo provided, skipping Phase 2 (code linking).')
+
+    # Save paper graph (paper-specific triplets only) for code generation (to output_base)
+    #initial_count = len(existing_triplets)
+    #paper_only_triplets = graph.triplets[initial_count:] if initial_count > 0 else list(graph.triplets)
+    #paper_graph_data = {
+    #    "paper": os.path.basename(paper_path),
+    #    "triplets": [[t[0], t[1], t[2]] for t in paper_only_triplets],
+    #    "sections": section_stats,
+    #    "code_stats": code_stats,
+    #}
+    #_write_json_to_path(output_base, "paper_graph_data.json", paper_graph_data)
+    #_write_json_to_path(output_base, "paper_graph.json", paper_graph_data)
+    #log("Paper graph saved to paper_graph_data.json")
+    '''
+    total_time = time() - total_start_time
+
+    # Final analysis
+    log("="*70)
+    log("REPRODUCTION COOKBOOK ANALYSIS")
+    log("="*70)
     
-        # Final analysis
-        log("="*70)
-        log("REPRODUCTION COOKBOOK ANALYSIS")
-        log("="*70)
-        
-        stats = analyze_reproduction_graph(graph)
-        
-        log(f"Total processing time: {total_time:.2f} seconds")
-        log(f"Total API cost: ${graph.total_amount:.4f}")
-        log(f"Total triplets extracted: {stats['total_triplets']}")
-        log(f"Unique components/concepts: {stats['num_unique_entities']}")
-        log("")
-        
-        log("Top 15 most connected components (key implementation elements):")
-        for entity, count in stats['top_entities']:
-            log(f"  - {entity}: {count} connections")
-        log("")
+    stats = analyze_reproduction_graph(graph)
     
-        log("Top 15 relation types:")
-        for relation, count in stats['top_relations']:
+    log(f"Total processing time: {total_time:.2f} seconds")
+    log(f"Total API tokens: ${graph.total_amount:.4f}")
+    log(f"Total triplets extracted: {stats['total_triplets']}")
+    log(f"Unique components/concepts: {stats['num_unique_entities']}")
+    log("")
+    
+    log("Top 15 most connected components (key implementation elements):")
+    for entity, count in stats['top_entities']:
+        log(f"  - {entity}: {count} connections")
+    log("")
+
+    log("Top 15 relation types:")
+    for relation, count in stats['top_relations']:
+        log(f"  - {relation}: {count} occurrences")
+    log("")
+    
+    if stats['top_impl_relations']:
+        log("Top implementation relations:")
+        for relation, count in stats['top_impl_relations']:
             log(f"  - {relation}: {count} occurrences")
         log("")
-        
-        if stats['top_impl_relations']:
-            log("Top implementation relations:")
-            for relation, count in stats['top_impl_relations']:
-                log(f"  - {relation}: {count} occurrences")
-            log("")
-        
-        if stats['top_config_relations']:
-            log("Top configuration relations:")
-            for relation, count in stats['top_config_relations']:
-                log(f"  - {relation}: {count} occurrences")
-            log("")
-        '''
-        log("Section-by-section breakdown:")
-        for stat in section_stats:
-            log(f"  Section {stat['section_num']}: {stat['title']}")
-            log(f"    Triplets: {stat['triplets_extracted']}, Time: {stat['processing_time']:.2f}s")
+    
+    if stats['top_config_relations']:
+        log("Top configuration relations:")
+        for relation, count in stats['top_config_relations']:
+            log(f"  - {relation}: {count} occurrences")
         log("")
-        '''
-        graph_data = {
-            'paper': os.path.basename(paper_path),
-            'repository': repo_url,
-            'triplets': [[t[0], t[1], t[2]] for t in graph.triplets],
-            'hypernode_store': getattr(graph, "hypernode_store", {}),
-            'stats': {
-                'total_triplets': stats['total_triplets'],
-                'num_unique_entities': stats['num_unique_entities'],
-                'total_time': total_time,
-                'total_cost': graph.total_amount,
-            },
-            'sections': section_stats,
-            'code_stats': code_stats,
-        }
-    else:
-        # Skip path: build graph_data from loaded graph for visualization
-        stats = analyze_reproduction_graph(graph)
-        graph_data = {
-            'paper': os.path.basename(paper_path),
-            'repository': repo_url,
-            'triplets': [[t[0], t[1], t[2]] for t in graph.triplets],
-            'hypernode_store': getattr(graph, "hypernode_store", {}),
-            'stats': {
-                'total_triplets': stats['total_triplets'],
-                'num_unique_entities': stats['num_unique_entities'],
-                'total_time': total_time,
-                'total_cost': graph.total_amount,
-            },
-            'sections': section_stats,
-            'code_stats': code_stats,
-        }
-
+    
+    #log("Section-by-section breakdown:")
+    #for stat in section_stats:
+    #    log(f"  Section {stat['section_num']}: {stat['title']}")
+    #    log(f"    Triplets: {stat['triplets_extracted']}, Time: {stat['processing_time']:.2f}s")
+    #log("")
+    
+    graph_data = {
+        'paper': os.path.basename(paper_path),
+        'repository': repo_url,
+        'triplets': [[t[0], t[1], t[2]] for t in graph.triplets],
+        'hypernode_store': getattr(graph, "hypernode_store", {}),
+        'stats': {
+            'total_triplets': stats['total_triplets'],
+            'num_unique_entities': stats['num_unique_entities'],
+            'total_time': total_time,
+            'total_cost': graph.total_amount,
+        },
+        'sections': section_stats,
+        'code_stats': code_stats,
+    }
+    '''
+    '''
     # Merge and persist cookbook (skip when loaded from cache)
-    if not skip_regeneration:
+    if not skip_paper_graph_generation:
         initial_count = len(existing_triplets)
         new_triplets = graph.triplets[initial_count:] if initial_count > 0 else graph.triplets
         new_hypernodes = {k: v for k, v in getattr(graph, "hypernode_store", {}).items()
@@ -1551,15 +1173,15 @@ cookbook_path=None, load_cookbook=True, repo_dir=None):
                 "papers_processed": existing_papers,
                 "version": existing_metadata.get("version", 1),
             }
-            save_cookbook_graph(cookbook_file, merged_triplets, merged_hypernodes, meta)
-            log(f"Cookbook saved to {cookbook_file} ({len(merged_triplets)} triplets, {len(merged_hypernodes)} hypernodes)")
+            save_cookbook_graph(cookbook_path, merged_triplets, merged_hypernodes, meta)
+            log(f"Cookbook saved to {cookbook_path} ({len(merged_triplets)} triplets, {len(merged_hypernodes)} hypernodes)")
             # Save expert graph (cookbook) for code generation
             expert_data = {
                 "type": "expert",
                 "triplets": [[t[0], t[1], t[2]] for t in merged_triplets],
                 "hypernode_store": merged_hypernodes,
             }
-            log.to_json(expert_data, "graph_data.json")
+            _write_json_to_path(output_base, "graph_data.json", expert_data)
             log("Expert graph saved to graph_data.json")
         else:
             # No new triplets to merge; save existing cookbook as expert graph
@@ -1568,11 +1190,14 @@ cookbook_path=None, load_cookbook=True, repo_dir=None):
                 "triplets": [[t[0], t[1], t[2]] for t in existing_triplets],
                 "hypernode_store": hypernode_store,
             }
-            log.to_json(expert_data, "graph_data.json")
+            _write_json_to_path(output_base, "graph_data.json", expert_data)
             log("Expert graph saved to graph_data.json")
     
-    triplets = graph_data['triplets']
-    if not skip_regeneration:
+
+
+
+        triplets = graph_data['triplets']
+    
         G = nx.Graph()  # Use Graph for undirected, DiGraph for directed
 
         for s, o, r in triplets:
@@ -1598,7 +1223,7 @@ cookbook_path=None, load_cookbook=True, repo_dir=None):
             subgraph = G.subgraph(comps_to_join).copy()
             vis_net(subgraph, log_path, save_as=f'small_comps_{len(comps_to_join)}nodes')
 
-
+    '''
     
     # =============================================================================
     # PHASE 3: Generate and validate code from graph
@@ -1608,23 +1233,32 @@ cookbook_path=None, load_cookbook=True, repo_dir=None):
         log("="*70)
         log("PHASE 3: GRAPH-ONLY CODE GENERATION")
         log("="*70)
-        try:
-            code_generation = generate_code_from_graph(
-                graph=graph,
-                paper_path=paper_path,
-                log=log,
-                output_dir=log_path,
+        
+        #if code_gen_variant == "retrieval":
+        code_generation = generate_code_from_graph_with_retrieval(
+            mem_graph=mem_graph,
+            paper_graph=paper_graph,
+            paper_name=args.paper,
+            log=log,
+            output_dir=code_output_dir if experiment_name else None,
+            graph_base_dir=output_base,
+        )
+        #else:
+        #    code_generation = generate_code_from_graph(
+        #        graph=graph,
+        #        paper_path=paper_path,
+        #        paper_name=args.paper,
+        #        log=log,
+        #        output_dir=code_output_dir if experiment_name else None,
+        #        graph_base_dir=output_base,
+        #    )
+        #if test_generated_code and code_generation.get("code_path"):
+        '''
+            exec_results = test_generated_code_executability(
+                code_generation["code_path"], log
             )
-            #if test_generated_code and code_generation.get("code_path"):
-            '''
-                exec_results = test_generated_code_executability(
-                    code_generation["code_path"], log
-                )
-                code_generation["executability"] = exec_results
-            '''
-        except Exception as e:
-            log(f"Error in graph-based code generation: {e}")
-            code_generation = {"error": str(e)}
+            code_generation["executability"] = exec_results
+        '''
         log.to_json(code_generation, "code_generation.json")
         log("code_generation saved to code_generation.json")
     else:
@@ -1633,14 +1267,15 @@ cookbook_path=None, load_cookbook=True, repo_dir=None):
     
 
     log("="*70)
-    log("REPRODUCTION COOKBOOK COMPLETE")
+    log("REPRODUCTION RUN COMPLETE")
     log("="*70)
+    log(f"Total time: {time() - total_start_time:.2f} seconds")
     log("")
     
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Build reproduction-focused cookbook knowledge graph from academic paper'
+        description='Build replication-focused cookbook knowledge graph from academic paper'
     )
     parser.add_argument('--paper', type=str,
                         default='adaptive-pruning',
@@ -1648,52 +1283,55 @@ def main():
     parser.add_argument('--device', type=str, default='cpu',
                         choices=['cpu', 'cuda'],
                         help='Device for retriever (default: cpu)')
-    parser.add_argument('--log-path', type=str, default='reproduction_cookbook',
-                        help='Path for log output (default: reproduction_cookbook)')
-    parser.add_argument('--save-graph', default=True,
-                        help='Save final graph structure to JSON')
-    parser.add_argument('--generate-code', dest='generate_code', action='store_true',
+    parser.add_argument('--log-path', type=str, default='',
+                        help='Path for log output (default: none)')
+    parser.add_argument('--generate-code', dest='generate_code', default=True, type=bool,
                         help='Generate code from final graph (default: enabled)')
-    parser.add_argument('--no-generate-code', dest='generate_code', action='store_false',
-                        help='Disable code generation from graph')
-    parser.set_defaults(generate_code=True)
-    parser.add_argument('--test-generated-code', dest='test_generated_code', action='store_true',
-                        help='Run executability tests for generated code (default: enabled)')
-    parser.add_argument('--no-test-generated-code', dest='test_generated_code', action='store_false',
-                        help='Disable executability tests for generated code')
-    parser.set_defaults(test_generated_code=True)
-    parser.add_argument('--repo', type=str, default=None,
-                        help='Repository URL for code extraction (overrides blacklist.txt)')
-    parser.add_argument('--no-repo', dest='use_repo', action='store_false',
-                        help='Skip code processing even if blacklist.txt has repo URL')
-    parser.set_defaults(use_repo=True)
-    parser.add_argument('--max-code-files', type=int, default=-1,
-                        help='Max code files to process (-1 = no limit)')
-    parser.add_argument('--cookbook-path', type=str, default=None,
-                        help='Path to load/save cookbook JSON (default: ~/arigraph/reproduction_cookbook/cookbook_graph.json)')
-    parser.add_argument('--no-load-cookbook', dest='load_cookbook', action='store_false',
-                        help='Start with empty graph, do not load existing cookbook')
-    parser.set_defaults(load_cookbook=True)
+    #parser.add_argument('--test-generated-code', dest='test_generated_code', default=True, type=bool,
+    #                    help='Run executability tests for generated code (default: enabled)')
+    parser.add_argument('--use-repo', dest='use_repo', default=False, type=bool,
+                        help='use repo url from blacklist.txt')
     parser.add_argument('--repo-dir', type=str, default=None,
                         help='Path to local repository (use instead of cloning)')
+    parser.add_argument('--code-gen-variant', type=str, default='full',
+                        choices=['full', 'retrieval'],
+                        help='Code generation variant: full=paper+full expert graph, retrieval=paper+retrieved expert snippets (default: full)')
+    parser.add_argument('--experiment', type=str, default=None,
+                        help='Experiment name inside output_dir: creates output_dir/experiment/ with submission, code_generation, and log (default: none)')
 
     args = parser.parse_args()
-    starter_path = '/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/'
+    paperbench_data_path = '/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/'
     # '/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/short-papers/'
-    run_reproduction_test(
-        paper_path=starter_path + args.paper + '/paper.md',
-        device=args.device,
-        log_path=args.log_path + '/' + args.paper,
-        generate_code=args.generate_code,
-        test_generated_code=args.test_generated_code,
-        repo_url_override=args.repo,
-        use_repo=args.use_repo,
-        max_code_files=args.max_code_files,
-        cookbook_path=args.cookbook_path,
-        load_cookbook=args.load_cookbook,
-        repo_dir=args.repo_dir,
-    )
+    
+    output_base = args.log_path + '/' + args.paper
+    if args.experiment:
+        experiment_path = os.path.join(output_base, args.experiment)
+        os.makedirs(experiment_path, exist_ok=True)
+        log = Logger(experiment_path)
+        log(f"Experiment: {args.experiment} (output in {experiment_path})")
+    else:
+        log = Logger(output_base)
+        log(f"Output in {output_base}")
 
+    try:
+     
+        run_reproduction_test(
+            log=log,
+            args=args,
+            paper_path=paperbench_data_path + args.paper + '/paper.md',
+            device=args.device,
+            log_path=args.log_path + '/' + args.paper,
+            generate_code=args.generate_code,
+            use_repo=args.use_repo,
+            repo_dir=args.repo_dir,
+            code_gen_variant=args.code_gen_variant,
+            experiment_name=args.experiment,
+        )
+
+    except Exception as e:
+        log("Unexpected Exception: %s" % str(e))
+        raise e
+        
 
 if __name__ == "__main__":
     main()

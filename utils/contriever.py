@@ -24,8 +24,11 @@ class Retriever:
     @staticmethod
     @torch.no_grad()
     def get_embeddings(list_of_strings, embedder, tokenizer):
+        #print(f"Tokenizing {len(list_of_strings)} strings")
         inputs = tokenizer(list_of_strings, padding=True, truncation=True, return_tensors="pt").to(embedder.device)
+        #print(f"Embedding {len(inputs)} inputs")
         embeds = embedder(**inputs)
+        #print('Done embedding')
         return embeds
 
     def __init__(self, device="cpu"):
@@ -71,9 +74,10 @@ class Retriever:
             query_strings = [query_strings]
 
         num_q = len(query_strings)
-
+        #print(f"Embedding {len(key_strings)} key strings and {len(query_strings)} query strings")
         key_embeds = self.embed(key_strings)
         query_embeds = self.embed(query_strings)
+        #print(f"Searching {len(key_embeds)} key embeddings and {len(query_embeds)} query embeddings")
         result = self.search_in_embeds(
             key_embeds, query_embeds, topk, similarity_threshold, return_embeds, return_scores
         )
