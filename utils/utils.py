@@ -25,6 +25,8 @@ def find_args(callable, args):
     return args_for_return
 
 def process_triplets(raw_triplets):
+    if not raw_triplets:
+        return []
     raw_triplets = raw_triplets.split(";")
     triplets = []
     for triplet in raw_triplets:

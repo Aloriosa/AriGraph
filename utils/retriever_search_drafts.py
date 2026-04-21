@@ -65,7 +65,7 @@ def claster(nodes, retriever: Retriever):
 
     print("Final nodes:\n", "\n".join(curr_nodes), sep="")
 
-def graph_retr_search(
+def graph_retr_search_old(
         start_query,
         triplets,
         retriever: Retriever,
@@ -77,31 +77,67 @@ def graph_retr_search(
 
     queue = deque()
     queue.append(start_query)
-    d = {start_query:0}
+    d = {start_query: 0}
 
     result = []
-
+    print(f"queue : {queue}")
     while queue:
         q = queue.popleft()
         if d[q] >= max_depth: continue
-        #print(f"Searching {len(triplets)} triplets for query {q}")
+        print(f"Searching {len(triplets)} triplets for query {q}")
         res = retriever.search(triplets, q, topk=topk, return_scores=True)
+        print(f"Found {len(res['strings'])} triplets")
         for s, score in zip(res['strings'], res['scores']):
             if score < post_retrieve_threshold: continue
-            #print(f"Found triplet {s} with score {score}")
+            print(f"triplet {s} with score {score}")
             parts = edge(s)
             if len(parts) < 3:
+                print(f"malformed triplet {s}")
                 continue  # Skip malformed triplet strings
             v1, e, v2 = parts[0], parts[1], parts[2]
             for v in [v1, v2]:
                 if v not in d:
                     queue.append(v)
+                    print(f"adding {v} to queue")
                     d[v] = d[q] + 1
             if s not in result:
                 result.append(s)
-
+                print(f"adding {s} to result")
     return result
 
+
+def graph_retr_search(
+        queries,
+        triplets,
+        retriever: Retriever,
+        topk :int=3,
+        post_retrieve_threshold: float=0.7, #not exclusive with topk here
+        verbose=2,
+        #flatten_results=False,
+):
+
+    
+    result = []
+
+    #print(f"Searching {len(triplets)} triplets for {len(queries)} queries")
+    res = retriever.search(triplets, queries, topk=topk, return_scores=True#, flatten_results=flatten_results
+    ) # dict with values = 2d lists
+    #print(f"Found {len(res['strings'])} answers")
+
+    for strings, scores in zip(res['strings'], res['scores']):
+        query_result = []
+        for s, score in zip(strings, scores):
+            if score < post_retrieve_threshold: continue
+            #print(f"triplet {s} with score {score}")
+            parts = edge(s)
+            if len(parts) < 3:
+                #print(f"malformed triplet {s}")
+                continue  # Skip malformed triplet strings
+            if s not in result:
+                query_result.append(s)
+                #print(f"adding {s} to result")
+        result.append(query_result)
+    return result
 
 def eval_triplets(triplets):
     reference_full = [

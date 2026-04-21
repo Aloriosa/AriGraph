@@ -19,6 +19,7 @@ from preparedness_turn_completer.utils import (
     get_model_context_window_length,
     warn_about_non_empty_params,
 )
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 logger = structlog.stdlib.get_logger(component=__name__)
@@ -170,11 +171,13 @@ class QwenOpenAICompletionsTurnCompleter(TurnCompleter):
         self.encoding_name: str
         self.retry_config = retry_config or RetryConfig()
         try:
-            self.encoding_name = tiktoken.encoding_name_for_model(model)
+            self.encoding_name = model # tiktoken.encoding_name_for_model(model)
+            logger.info(f"Encoding name: {self.encoding_name}")
         except KeyError:
             # Fallback to o200k_base
-            logger.warning(f"Model {model} not found in tiktoken, using o200k_base")
-            self.encoding_name = "o200k_base"
+            
+            self.encoding_name = "o200k_harmony"#"o200k_base"
+            logger.warning(f"Model {model} not found in tiktoken, using {self.encoding_name}")
         self.n_ctx: int = get_model_context_window_length(model)
 
     class Config(TurnCompleter.Config):

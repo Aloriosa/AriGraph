@@ -48,6 +48,7 @@ class Retriever:
             similarity_threshold: float=None,
             return_embeds=False,
             return_scores=False,
+            #flatten_results=False,
     ):
         """
         Finds most_similar key strings for each of query string and returns these strings and their indices
@@ -79,7 +80,7 @@ class Retriever:
         query_embeds = self.embed(query_strings)
         #print(f"Searching {len(key_embeds)} key embeddings and {len(query_embeds)} query embeddings")
         result = self.search_in_embeds(
-            key_embeds, query_embeds, topk, similarity_threshold, return_embeds, return_scores
+            key_embeds, query_embeds, topk, similarity_threshold, return_embeds, return_scores#, flatten_results
         )
 
         result['strings'] = [[key_strings[k_id] for k_id in result['idx'][q_id] ] for q_id in range(num_q)]
@@ -97,6 +98,7 @@ class Retriever:
         similarity_threshold: float=None,
         return_embeds=False,
         return_scores=False,
+        #flatten_results=False,
     ):
         """
         Finds closest key_embeds for each of query_embeds and returns these embeddings and their indices
@@ -148,7 +150,7 @@ class Retriever:
             result['scores'] = [
                  [scores[q_id, k_id] for k_id in selected_idx[q_id]]
                  for q_id in range(num_q)
-            ]
+                ]
         if not batch_request:
             result = {k: v[0] for k,v in result.items()}
 

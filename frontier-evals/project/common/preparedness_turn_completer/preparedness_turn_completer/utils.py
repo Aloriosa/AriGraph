@@ -57,7 +57,9 @@ CONTEXT_WINDOW_LENGTHS: dict[str, int] = {
     "Qwen/QwQ-32B": 16384,
     "Qwen/Qwen3-Next-80B-A3B-Instruct": 262144,
     "Openai/Gpt-oss-20b": 131072,
+    "openai/gpt-oss-20b": 131072,
     'qwen/qwen3-next-80b-a3b-instruct:free': 262144,
+    'Qwen/Qwen3-Next-80B-A3B-Instruct-FP8': 262144,
 }
 
 

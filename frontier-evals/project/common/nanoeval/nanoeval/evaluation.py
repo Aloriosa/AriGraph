@@ -9,6 +9,7 @@ from contextlib import AsyncExitStack
 from datetime import datetime
 from pprint import pformat
 from typing import Any
+import json
 
 import dill
 import structlog.stdlib
@@ -295,6 +296,8 @@ async def run_eval_in_database(run_id: str) -> dict[str, Any]:
                 f"Summary:\n{pformat(summary)}\nEvaluated {num_tasks} tasks with {spec.eval.get_name()}",
                 _print=True,
             )
+            #with open(f"summary_{recorder.run_spec.run_id}.json", "w") as f:
+            #    json.dump(summary, f)
             logger.info(
                 f"\033[36m\033[1mEvalboard Summary: {recorder.evalboard_url('run') or 'unknown, add in pr?'}\033[0m",
                 _print=True,

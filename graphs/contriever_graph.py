@@ -110,29 +110,32 @@ class ContrieverGraph(TripletGraph):
         self.obs_episodic[observation] = obs_value
         return new_triplets_raw, obs_value
     
-    def retrieve(self, items1, retrieve_base, retrieve_facts, topk_episodic):
+    def retrieve(self, items1, retrieve_base, retrieve_facts, topk_episodic=1):
         triplets = self.triplets_to_str(self.triplets)
         associated_subgraph = set()
-        
+        from tqdm import tqdm
         #retrieve for dict of items
+        print(f"retrieve  items: {list(items1.keys())[:10]}")
 
-        for query, depth in items1.items():  # items1 is now a dictionary
+        for query, depth in tqdm(items1.items()):  # items1 is now a dictionary
+            print(f"retrieving {query} with depth {depth}")
             results = graph_retr_search(
                 query, triplets, self.retriever, max_depth=depth,  
-                topk=6,
+                topk=3,
                 post_retrieve_threshold=0.75, 
                 verbose=2
             )
             associated_subgraph.update(results)
 
         associated_subgraph = [element for element in associated_subgraph]
+        top_episodic = []
+        if len(retrieve_base) > 0:
+            obs_plan_embeddings = self.retriever.embed((retrieve_base))
+            # we rank observations by how many of their triplets occured in our retrival
+            top_episodic_dict = find_top_episodic_emb(associated_subgraph, deepcopy(self.obs_episodic), obs_plan_embeddings, self.retriever)
+            top_episodic = top_k_obs(top_episodic_dict, k=topk_episodic)
 
-        obs_plan_embeddings = self.retriever.embed((retrieve_base))
-        # we rank observations by how many of their triplets occured in our retrival
-        top_episodic_dict = find_top_episodic_emb(associated_subgraph, deepcopy(self.obs_episodic), obs_plan_embeddings, self.retriever)
-        top_episodic = top_k_obs(top_episodic_dict, k=topk_episodic)
-
-        top_episodic = [item for item in top_episodic]
+            top_episodic = [item for item in top_episodic]
         return associated_subgraph, top_episodic
     
     def triplets_to_str(self, triplets):

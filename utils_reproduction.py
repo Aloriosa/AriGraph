@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from typing import Optional, Tuple
 import ast
 from collections import Counter
 from pyvis.network import Network
@@ -53,6 +54,24 @@ def analyze_reproduction_graph(graph):
     
     return stats
 
+
+def parse_linking_json_response(response_text: str) -> list:
+    """Parse JSON object with 'links' array from structured linking output."""
+    if not response_text:
+        return []
+    try:
+        obj = json.loads(response_text.strip())
+    except json.JSONDecodeError:
+        blocks = reprutil._extract_json_blocks(response_text)
+        for b in blocks:
+            if isinstance(b, dict) and "links" in b:
+                return b.get("links", [])
+        return []
+    if isinstance(obj, dict) and "links" in obj:
+        return obj.get("links", [])
+    if isinstance(obj, list):
+        return obj
+    return []
 
 def vis_net(subgraph, exp_path, save_as=''):
     """
@@ -272,11 +291,8 @@ def collect_code_files(repo_dir):
             continue
         
         if file_path.suffix.lower() in CODE_EXTENSIONS:
-            try:
-                rel_path = file_path.relative_to(repo_path)
-                code_files.append((str(rel_path), file_path))
-            except Exception as e:
-                raise e
+            rel_path = file_path.relative_to(repo_path)
+            code_files.append((str(rel_path), file_path))
     
     # Sort by likely importance (main files first, then by size)
     def file_importance(item):
@@ -302,7 +318,7 @@ def collect_code_files(repo_dir):
         
         return -score  # Negative for reverse sort
     
-    code_files.sort(key=file_importance)
+    #code_files.sort(key=file_importance)
     return code_files
 
 
@@ -487,6 +503,191 @@ def build_code_index(repo_dir, code_files, log=None):
                 pass
 
     return index
+
+
+def _symbol_index_python(content: str, _rel_path: str) -> dict:
+    """Build class/method hierarchy with line numbers for one Python file."""
+    tree = ast.parse(content)
+    
+    classes: dict = {}
+    module_functions: list = []
+
+    class _V(ast.NodeVisitor):
+        def __init__(self):
+            self._depth = 0
+
+        def visit_ClassDef(self, node):
+            methods = {}
+            for child in node.body:
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    methods[child.name] = child.lineno
+            classes[node.name] = {"line": node.lineno, "methods": methods}
+
+        def visit_FunctionDef(self, node):
+            if self._depth == 0:
+                module_functions.append({"name": node.name, "line": node.lineno})
+            self.generic_visit(node)
+
+        def visit_AsyncFunctionDef(self, node):
+            if self._depth == 0:
+                module_functions.append({"name": node.name, "line": node.lineno})
+            self.generic_visit(node)
+
+        def generic_visit(self, node):
+            self._depth += 1
+            super().generic_visit(node)
+            self._depth -= 1
+
+    _V().visit(tree)
+    return {"kind": "python", "classes": classes, "functions": module_functions}
+
+
+def build_symbol_index(code_files) -> dict:
+    """
+    Pre-process code into a symbol index: file → classes → methods (with line numbers).
+    Non-Python files get a minimal stub so paths still appear in prompts.
+    """
+    idx: dict = {}
+    for rel_path, file_path in code_files:
+        if not file_path.exists():
+            continue
+        content = read_file_safe(file_path)
+        if "[Binary file" in content or len(content) < 10:
+            continue
+        rp = str(rel_path)
+        if rp.endswith(".py"):
+            idx[rp] = _symbol_index_python(content, rp)
+        else:
+            idx[rp] = {"kind": "other", "content": content}
+    return idx
+
+
+def build_symbol_index_text(code_files) -> str:
+    
+    symbol_index = build_symbol_index(code_files)
+    lines: list = []
+    
+    for path in sorted(symbol_index.keys()):
+        entry = symbol_index[path]
+        lines.append(f"### {path}")
+        kind = entry.get("kind")
+        if kind == "parse_error":
+            lines.append("  (python parse error — no symbols)")
+            continue
+        if kind == "other":
+            lines.append(entry.get("content", ''))
+            continue
+        for cname, cinfo in sorted(
+            entry.get("classes", {}).items(),
+            key=lambda kv: kv[1].get("line", 0),
+        ):
+            lines.append(f"  class {cname} (line {cinfo['line']})")
+            methods = cinfo.get("methods", {})
+            for mname, mline in sorted(methods.items(), key=lambda kv: kv[1]):
+                lines.append(f"    method {mname} (line {mline})")
+        for fn in sorted(entry.get("functions", []), key=lambda d: d.get("line", 0)):
+            lines.append(f"  function {fn['name']} (line {fn['line']})")
+    return "\n".join(lines)
+
+
+_CODE_LOC_RE = re.compile(r"^(.+):(\d+)\s*$")
+
+
+def estimate_tokens(text: str, model: str = "o200k_harmony") -> int:
+    """Token estimate for backbone budget; prefer tiktoken when installed."""
+    if not text:
+        return 0
+    #import tiktoken
+    #enc = tiktoken.get_encoding(model)
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path=model)
+    return len(tokenizer.encode(text))
+
+def format_numbered_triplet_lines(new_triplets_str) -> str:
+    """Format triplet strings as a numbered list (1-based) for LLM reference."""
+    lines = []
+    for i, line in enumerate(new_triplets_str, start=1):
+        lines.append(f"{i}) {line}")
+    return "\n".join(lines)
+
+
+def parse_code_location(code_location: str) -> Optional[Tuple[str, int]]:
+    """
+    Parse 'relative/path/file.py:42' into (relative path, 1-based line).
+    Uses the last ':digits' segment as the line number.
+    """
+    if not code_location or not isinstance(code_location, str):
+        return None
+    s = code_location.strip()
+    m = _CODE_LOC_RE.match(s)
+    if not m:
+        return None
+    rel, ln = m.group(1).strip(), int(m.group(2))
+    if ln < 1:
+        return None
+    return rel, ln
+
+
+def _python_block_span(content: str, line_no: int) -> Optional[Tuple[int, int]]:
+    """Smallest ClassDef/FunctionDef span (1-based lines) containing line_no, or None."""
+    try:
+        tree = ast.parse(content)
+    except (SyntaxError, ValueError):
+        return None
+    best = None
+    best_span = None
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            end = getattr(node, "end_lineno", None) or node.lineno
+            if node.lineno <= line_no <= end:
+                span = end - node.lineno
+                if best is None or span < best_span:
+                    best = (node.lineno, end)
+                    best_span = span
+    return best
+
+
+def snippet_from_file_line(repo_root, code_location: str, window: int = 48) -> dict:
+    """
+    Resolve 'path/to/file.py:LINE' to a source snippet.
+    Returns dict with keys: code, line_start, line_end, path, and optional error.
+    """
+    parsed = parse_code_location(code_location)
+    if not parsed:
+        return {"error": "invalid code_location", "code": "", "path": "", "line_start": 0, "line_end": 0}
+    rel, ln = parsed
+    root = Path(repo_root)
+    file_path = root / rel
+    if not file_path.is_file():
+        return {"error": f"file not found: {rel}", "code": "", "path": rel, "line_start": 0, "line_end": 0}
+    content = read_file_safe(file_path)
+    lines = content.splitlines()
+    n = len(lines)
+    if ln < 1 or ln > n:
+        return {"error": "line out of range", "code": "", "path": rel, "line_start": 0, "line_end": 0}
+
+    if rel.endswith(".py"):
+        span = _python_block_span(content, ln)
+        if span:
+            sl, el = span
+            seg = lines[sl - 1 : el]
+            return {
+                "code": "\n".join(seg),
+                "line_start": sl,
+                "line_end": el,
+                "path": rel,
+            }
+
+    sl = max(1, ln - window)
+    el = min(n, ln + window)
+    seg = lines[sl - 1 : el]
+    return {
+        "code": "\n".join(seg),
+        "line_start": sl,
+        "line_end": el,
+        "path": rel,
+    }
 
 
 # =============================================================================

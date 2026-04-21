@@ -1,28 +1,56 @@
 #!/usr/bin/env python3
+"""
+Test script for building a reproduction-focused knowledge graph from academic papers.
+Extracts implementation details to create a "cookbook" for reproducing research.
+"""
 
 import re
 import os
 import sys
+import ast
 import json
 import argparse
 import logging
 import subprocess
+import tempfile
+import shutil
 from pathlib import Path
 from time import time, sleep
 import datetime
 
 from graphs.contriever_graph import ContrieverGraph
-from utils.retriever_search_drafts import graph_retr_search
 from utils.utils import Logger
+from tqdm import tqdm
 
 from openai import OpenAI
+import networkx as nx
 from dotenv import load_dotenv # you'll need to pip install python-dotenv
 
 load_dotenv()
 
 sys.path.insert(0, os.path.dirname(__file__))
-import prompts.cookbook_extraction_prompt as prmt
+from prompts.paper_reproduction_prompt import prompt_extraction_reproduction, prompt_extraction_reproduction_with_repo
+from prompts.cookbook_extraction_prompt import (
+    prompt_cookbook_extraction,
+    prompt_cookbook_extraction_wo_code,
+    prompt_paper_code_linking,
+    prompt_cookbook_reusable_extraction,
+    prompt_reusable_pattern_to_code_mapping,
+    prompt_coding_agent_paper_graph,
+    prompt_coding_agent_paper_mem_graph,
+    prompt_pattern_compatibility_check,
+    BENCHMARK_EVALUATION_RULES,
+    REPRODUCTION_SCRIPT_TOY_EXAMPLE,
+)
+from graph_storage import (
+    load_cookbook_graph,
+    save_cookbook_graph,
+    merge_triplets_into_cookbook,
+    generate_hypernode_id,
+)
 from ontology.cookbook_ontology import validate_triplet
+from utils.retriever_search_drafts import graph_retr_search
+
 import utils_reproduction as reprutil
 
 
@@ -36,12 +64,12 @@ class ReproductionGraph(ContrieverGraph):
                 "Extract only REUSABLE patterns for a cumulative cookbook. "
                 "Skip paper-specific details. This graph helps implement OTHER papers in the area.\n\n"
             )
-            self.reproduction_prompt = prmt.prompt_cookbook_reusable_extraction
+            self.reproduction_prompt = prompt_cookbook_reusable_extraction
         elif type == 'paper':
             self.graph_builder_instruction = (
-                "Extract all the important information required to reproduce the method described in the paper with all the quantitative and qualitative results.\n\n"
+                "Extract all the imprtant information required to reproduce the method described in the paper with all the quantitative and qualitativeresults.\n\n"
             )
-            self.reproduction_prompt = prmt.prompt_cookbook_extraction_wo_code
+            self.reproduction_prompt = prompt_cookbook_extraction_wo_code
         else:
             raise ValueError(f"Invalid type: {type}")
         self.hypernode_store = {}
@@ -108,164 +136,72 @@ class ReproductionGraph(ContrieverGraph):
         
         return new_triplets_raw, obs_value
 
-    def load_triplets_from_json(self, path, clear_first=True):
-        path = os.path.abspath(path)
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        self._log(f"Loaded data from {path} with keys: {data.keys()}")
-        triplets = data.get("triplets", [])
-        if not triplets:
-            self._log(f"No triplets found in {path}")
-        else:
-            if clear_first:
-                self.clear()
-            self.add_triplets(triplets)
-            n = len(self.triplets)
-            obs_episodic = data.get("obs_episodic", [])               
-            if not obs_episodic:
-                self._log(f"No triplets found in {path}")
-            else:
-                self.obs_episodic = {k: [v, self.retriever.embed(k)] for k, v in obs_episodic.items()}
-            if path.endswith("mem_graph_data_with_code.json"):
-                triplet2code = data.get("triplet2code", {})
-                if not triplet2code:
-                    self._log(f"No code- linking found in {path}")
-                else:
-                    self.triplet2code = triplet2code
-
-            self._log(f"Loaded {n} triplets from {path}")
-        return n
-
-    def retrieve(self, queries, topk=3):
-        triplets = self.triplets_to_str(self.triplets)
-        
-        #associated_subgraph = set()
-        #retrieve for dict of items
-        #print(f"retrieve  items: {queries[:10]}")
-
-        results = graph_retr_search(
-            queries, triplets, self.retriever, 
-            topk=topk,
-            post_retrieve_threshold=0.75, 
-            verbose=2
-        )
-        #associated_subgraph.update(results)
-
-        #associated_subgraph = [element for element in associated_subgraph]
-        assert len(results) == len(queries), f"len(results) != len(queries): {len(results)} != {len(queries)}"
-        return results # associated_subgraph
-    
 
 
-def run_linking_pass_hypernodes(graph, code_files, log,
-    output_base=None, paper_path=None, repo_dir=None):
+def run_linking_pass_hypernodes(graph, code_index, code_files, log, new_triplets=None):
+    """
+    Phase 2 linking (hypernode mode): for each code file, use LLM to produce hypernodes
+    linking reusable patterns to code. Parses JSON blocks, stores in hypernode_store,
+    adds (pattern, implemented_in, hypernode_id) triplets.
+    """
+    if not new_triplets:
+        triplets_to_link = graph.get_all_triplets() if graph else []
+    else:
+        triplets_to_link = new_triplets
+    reusable_patterns_block = "\n".join(f"- {line}" for line in triplets_to_link)
 
-    symbol_index_full = reprutil.build_symbol_index_text(code_files)
-    if len(symbol_index_full) == 0:
-        log('no code files')
-        return graph
-    max_seq_len = int(os.getenv("MODEL_MAX_SEQ_LEN"))
-    obs_idx = 0
-    for observation, (new_triplets_str, _) in graph.obs_episodic.items():
-        if len(new_triplets_str) == 0:
-            log('no triplets in obs')
+    for rel_path, file_path in code_files:
+        if not file_path.exists():
             continue
-        log(f"Processing observation {obs_idx}/{len(graph.obs_episodic)}")
-        numbered_triplets = reprutil.format_numbered_triplet_lines(new_triplets_str)
-        sym_start = 0
-        while sym_start < len(symbol_index_full):
-            
-            # 1 token ~ 4 chars
-            template = prmt.prompt_code_linking_symbol_index.format(
-                observation=observation,
-                numbered_triplets=numbered_triplets,
-                symbol_index='',
-            )
-            chars_left = int(3.8 * (max_seq_len - reprutil.estimate_tokens(
-                template,
-                model=os.getenv("OPENAI_MODEL"))))
-            #log(f"Chars left: {chars_left}")
-            end = sym_start + chars_left
-            
-            sym_chunk = symbol_index_full[sym_start:end]
-            prompt = prmt.prompt_code_linking_symbol_index.format(
-                observation=observation,
-                numbered_triplets=numbered_triplets,
-                symbol_index=sym_chunk,
-            )
-            log(f"Prompt tokens: {reprutil.estimate_tokens(prompt, model=os.getenv('OPENAI_MODEL'))}")
+        content = reprutil.read_file_safe(file_path)
+        if "[Binary file" in content or len(content) < 10:
+            continue
 
-            
-            log(
-                f"  Chars [{sym_start}:{end}] of {len(symbol_index_full)}"
-            )
+        rel_path_str = str(rel_path)
+        file_index = [e for e in code_index if e["file"] == rel_path_str]
+        if not file_index:
+            file_index = [{"file": rel_path_str, "type": "file", "name": rel_path_str, "qual": rel_path_str}]
 
-            
-            response, _ = graph.generate(prompt, jsn=True, t=0.001)
-            if response:
-                links = reprutil.parse_linking_json_response(response)
-                for link in links:
-                    if not isinstance(link, dict):
-                        continue
-                    tid = link.get("triplet_id")
-                    code_loc = link.get("code_location")
-                    conf = link.get("confidence")
-                    if tid is None or not code_loc:
-                        continue
-                    tid = int(tid)
-                    lines = list(new_triplets_str)
-                    if tid < 1 or tid > len(lines):
-                        log(f"  Warning: triplet_id {tid} out of range (1..{len(lines)})")
-                        continue
-                    
-                    try:
-                        conf_f = float(conf) if conf is not None else 0.0
-                    except (TypeError, ValueError):
-                        conf_f = 0.0
-                    
-                    pattern = lines[tid - 1]
-                    if pattern in graph.triplet2code and graph.triplet2code[pattern]['confidence'] > conf_f:
-                        continue
-                    
-                    snip = reprutil.snippet_from_file_line(repo_dir, str(code_loc).strip())
-                    code_val = snip.get("code", '')
-                    err = snip.get("error")
-                    if err:
-                        log(f"  Could not resolve {code_loc!r}: {err}")
-                    if not code_val:
-                        continue
-                    graph.triplet2code[pattern] = {
-                        "code": code_val,
-                        "code_location": str(code_loc).strip(),
-                        "confidence": conf_f,
-                        "line_start": snip.get("line_start", 0),
-                        "line_end": snip.get("line_end", 0),
-                        "path": snip.get("path", ""),
-                        "documentation": "",
-                        "imports": [],
-                    }
-                    log(f"  Obs {obs_idx}, sym_start {sym_start}: Linked triplet [{tid}] -> {code_loc} (confidence={round(conf_f, 3)})")
+        index_lines = [f"- {e['qual']} ({e['type']})" for e in file_index]
+        index_block = "\n".join(index_lines)
 
-                if output_base and paper_path:
-                    reprutil._write_json_to_path(
-                        output_base,
-                        "mem_graph_data_with_code.json",
-                        {
-                            "paper": os.path.basename(paper_path),
-                            "triplets": [[t[0], t[1], t[2]] for t in graph.triplets],
-                            "triplet2code": graph.triplet2code,
-                            "stats": {
-                                "total_triplets": len(graph.triplets),
-                                "prompt_tokens": graph.prompt_tokens,
-                                "completion_tokens": graph.completion_tokens,
-                            },
-                        },
-                    )
+        chunks = reprutil.extract_code_chunks(content, rel_path_str)
+        code_chunk = "\n\n---\n\n".join(chunks) if chunks else content#[:2000]
+        #code_chunk = code_chunk[:4000]
+        print(f"inde block: {index_block}\n code chunk: {code_chunk}")
+        prompt = prompt_reusable_pattern_to_code_mapping.format(
+            reusable_patterns=reusable_patterns_block,
+            code_index=index_block,
+            file_path=rel_path_str,
+            code_chunk=code_chunk,
+        )
 
-            # Advance only after this chunk is processed; full symbol text is covered with no truncation.
-            sym_start = end
-            
-        obs_idx += 1
+        try:
+            response, _ = graph.generate(prompt)
+            blocks = reprutil._extract_json_blocks(response)
+            for block in blocks:
+                pattern = block.get("pattern")
+                hypernode = block.get("hypernode")
+                if not pattern or not hypernode:
+                    print(f"  Warning: pattern or hypernode not found for {rel_path_str}")
+                    continue
+                if pattern not in triplets_to_link:
+                    continue
+                code_val = hypernode.get("code", "")
+                doc = hypernode.get("documentation", "")
+                imports = hypernode.get("imports", [])
+                if not isinstance(imports, list):
+                    imports = [imports] if imports else []
+                if not code_val and not doc:
+                    continue
+                if pattern not in graph.triplet2code:
+                    log(f"  Hypernode for {pattern} already exists skipping")
+                else:
+                    graph.triplet2code[pattern] = hypernode
+                    log(f"  Hypernode for {pattern} added")
+        except Exception as e:
+            log(f"  Error linking {rel_path_str}: {e}")
+            raise e
     log(f" Unique hypernodes added: {len(graph.triplet2code)}")
     return graph
 
@@ -435,6 +371,10 @@ def _format_triplets_for_prompt(triplets, max_triplets=None):
     return "\n".join(lines) if lines else "(none)"
 
 
+# Implementation-related relations to prioritize when sampling paper queries for retrieval
+_IMPL_RELATIONS = frozenset({"implements", "uses", "requires", "configures", "contains", "extends"})
+
+
 def _format_expert_graph_for_agent(triplets, hypernode_store, max_triplets=None):
     """Format expert triplets + hypernodes for the coding agent (same logic as _format_cookbook_for_agent)."""
     parts = []
@@ -518,21 +458,21 @@ def generate_code_from_graph(graph, paper_path, paper_name, log, output_dir=None
 
     
     if paper_graph_block and expert_graph_block:
-        prompt = prmt.prompt_coding_agent_paper_mem_graph.format(
-            BENCHMARK_RULES=prmt.BENCHMARK_EVALUATION_RULES,
-            TOY_EXAMPLE=prmt.REPRODUCTION_SCRIPT_TOY_EXAMPLE,
+        prompt = prompt_coding_agent_paper_mem_graph.format(
+            BENCHMARK_RULES=BENCHMARK_EVALUATION_RULES,
+            TOY_EXAMPLE=REPRODUCTION_SCRIPT_TOY_EXAMPLE,
             paper_summary=paper_summary,
             paper_graph=paper_graph_block,
             expert_graph=expert_graph_block,
         )
     elif paper_graph_block:
-        prompt = prmt.prompt_coding_agent_paper_graph.format(
-            BENCHMARK_RULES=prmt.BENCHMARK_EVALUATION_RULES,
-            TOY_EXAMPLE=prmt.REPRODUCTION_SCRIPT_TOY_EXAMPLE,
+        prompt = prompt_coding_agent_paper_graph.format(
+            BENCHMARK_RULES=BENCHMARK_EVALUATION_RULES,
+            TOY_EXAMPLE=REPRODUCTION_SCRIPT_TOY_EXAMPLE,
             paper_summary=paper_summary,
             paper_graph=paper_graph_block,
         )
-    log(f"Prompt length: {len(prompt)} chars: benchmark rules {len(prmt.BENCHMARK_EVALUATION_RULES)} chars, toy example {len(prmt.REPRODUCTION_SCRIPT_TOY_EXAMPLE)} chars, paper summary {len(paper_summary)} chars, paper graph {len(paper_graph_block)} chars")
+    log(f"Prompt length: {len(prompt)} chars: benchmark rules {len(BENCHMARK_EVALUATION_RULES)} chars, toy example {len(REPRODUCTION_SCRIPT_TOY_EXAMPLE)} chars, paper summary {len(paper_summary)} chars, paper graph {len(paper_graph_block)} chars")
     response, tokens = graph.generate(prompt)
     completion_tokens = tokens["completion_tokens"]
     prompt_tokens = tokens["prompt_tokens"]
@@ -562,15 +502,11 @@ def generate_code_from_graph(graph, paper_path, paper_name, log, output_dir=None
         "files_created": [str(p) for p in files_created],
         "raw_response_path": raw_output_path,
         "paper_triplets": len(paper_graph_block),
-        #"expert_triplets": len(expert_graph_block),
         "code_chars": sum(p.stat().st_size for p in files_created if p.exists()),
     }
 
 
-def generate_code_from_graph_with_retrieval(mem_graph, paper_graph, log,
-output_dir=None, max_triplets=None, paper_summary=None, 
-graph_base_dir=None, retrieval_topk=8, retrieval_max_depth=2, retrieval_threshold=0.7, 
-max_paper_queries=25, code_snippet_len=5000):
+def generate_code_from_graph_with_retrieval(mem_graph, paper_graph, paper_name, log, output_dir=None, graph_base_dir=None):
     """
     Generate implementation code using paper graph + RETRIEVED relevant snippets from expert graph.
     First uses paper graph to retrieve relevant code snippets from expert knowledge graph,
@@ -584,81 +520,27 @@ max_paper_queries=25, code_snippet_len=5000):
         )
     
     output_dir = graph_base_dir if output_dir is None else output_dir
-    #graph_data_path = os.path.join(graph_base_dir, "graph_data.json")
-    #paper_graph_path = os.path.join(graph_base_dir, "paper_graph_data.json")
+    paper_items = {k: 2 for k in paper_graph.get_all_triplets()}
 
-    #paper_items = paper_graph.get_all_triplets()
+    topk_episodic = 2 
+    # subgaph is a list of str triplets
+    subgraph, _ = mem_graph.retrieve(paper_items, '', [], topk_episodic)
+    log(f"ASSOCIATED SUBGRAPH len: {len(subgraph)}")
+    expert_graph = []
+    for striplet in subgraph:
+        expert_graph.append(f"Pattern: {striplet}, Code snippet: {mem_graph.triplet2code.get(striplet, '')}")
+
+    paper_graph_block = "\n".join(paper_graph.get_all_triplets()) #_format_triplets_for_prompt(paper_graph.get_all_triplets())
+    expert_graph_block = "\n".join(expert_graph)
     
-    log(f"Starting retrieval")
-    
-    topk = 3
-    
-    
-    paper_items = []
-    for observation, (pp, _) in paper_graph.obs_episodic.items():
-        if len(pp) == 0:
-            #log('no triplets in obs')
-            continue
-        paper_items.append("; ".join(pp)) # join triplets with ; to make a single query
-
-        #log(f"Processing observation {obs_idx}/{len(paper_graph.obs_episodic)}")
-        
-    # subgaph is a list of lists of str triplets
-    subgraph = mem_graph.retrieve(paper_items, topk=topk)
-
-
-    expert_knowledge = ""
-    expert_data = {}
-    for obs, query in zip(list(paper_graph.obs_episodic.keys()), paper_items):
-        if len(paper_graph.obs_episodic[obs][0]) == 0:
-            #log('no triplets in obs')
-            continue
-        expert_data[obs] = {'triplets': query, 'expert_knowledge': []}
-        #for pi in pis:
-        obs_line = f"Paper triplets: {query}\nExpert knowledge:\n" #f"Paper excerpt: {obs}"
-        query_striplets = subgraph.pop(0)
-        for striplet in query_striplets:
-            hn = mem_graph.triplet2code.get(striplet, "")
-            if isinstance(hn, dict):
-                snip = hn.get("code", "None")
-            else:
-                snip = hn
-            obs_line += f"Pattern: {striplet}\nCode snippet: {snip[:code_snippet_len]}\n"
-            expert_data[obs]['expert_knowledge'].append({'Mem triplet': striplet, 'Code snippet': snip[:code_snippet_len]})
-        
-        expert_knowledge += obs_line
-
-    log(f"expert_knowledge built")
-
-    reprutil._write_json_to_path(output_dir, "expert_data.json", expert_data)
-    log(f"expert_data saved to {os.path.join(output_dir, 'expert_data.json')}")
-    #paper_graph_block = "\n".join(paper_graph.get_all_triplets()) #_format_triplets_for_prompt(paper_graph.get_all_triplets())
-    #expert_knowledge = "\n".join(expert_graph)
-
-    max_seq_len = int(os.getenv("MODEL_MAX_SEQ_LEN"))
-    
-    # 1 token ~ 4 chars
-    prompt = prmt.prompt_coding_agent_paper_mem_graph.format(
-        BENCHMARK_RULES=prmt.BENCHMARK_EVALUATION_RULES,
-        TOY_EXAMPLE=prmt.REPRODUCTION_SCRIPT_TOY_EXAMPLE,
+    prompt = prompt_coding_agent_paper_mem_graph.format(
+        BENCHMARK_RULES=BENCHMARK_EVALUATION_RULES,
+        TOY_EXAMPLE=REPRODUCTION_SCRIPT_TOY_EXAMPLE,
         #paper_summary=paper_summary,
-        #paper_graph=paper_graph_block,
-        expert_knowledge=expert_knowledge,
+        paper_graph=paper_graph_block,
+        expert_graph=expert_graph_block,
     )
-    template_seq_len = reprutil.estimate_tokens(prompt,
-                                                model=os.getenv("OPENAI_MODEL"))
-    if template_seq_len > 2 * max_seq_len / 3:
-        log(f"Prompt length {template_seq_len} exceeds 2/3 of max_seq_len {max_seq_len}, truncating...")
-        neg_tail = int(4.1 * (2 * max_seq_len / 3 - template_seq_len)) # < 0
-        prompt = prmt.prompt_coding_agent_paper_mem_graph.format(
-        BENCHMARK_RULES=prmt.BENCHMARK_EVALUATION_RULES,
-        TOY_EXAMPLE=prmt.REPRODUCTION_SCRIPT_TOY_EXAMPLE,
-        #paper_summary=paper_summary,
-        #paper_graph=paper_graph_block,
-        expert_knowledge=expert_knowledge[:neg_tail],
-        )
-
-    log(f"Prompt length: {reprutil.estimate_tokens(prompt,model=os.getenv('OPENAI_MODEL'))} TOKENS, generating code...")
+    log(f"Prompt length: {len(prompt)} chars, generating code...")
     chat_completion = agent.chat.completions.create(
                 messages=[
                     {
@@ -684,7 +566,7 @@ max_paper_queries=25, code_snippet_len=5000):
 
     os.makedirs(output_dir, exist_ok=True)
     raw_output_path = os.path.join(output_dir, "generated_code_response.txt")
-    repo_root = os.path.join(output_dir, "submission")
+    repo_root = os.path.join(output_dir, paper_name, "submission")
     os.makedirs(repo_root, exist_ok=True)
 
     with open(raw_output_path, "w", encoding="utf-8") as f:
@@ -707,191 +589,94 @@ max_paper_queries=25, code_snippet_len=5000):
         "repo_root": repo_root,
         "files_created": [str(p) for p in files_created],
         "raw_response_path": raw_output_path,
+        "triplets_used": len(paper_graph.get_all_triplets()) + len(subgraph),
+        "code_chars": sum(p.stat().st_size for p in files_created if p.exists()),
+        "retrieval_variant": True,
     }
 
 
-def run_reproduction_test(log, args, paper_path, device="cpu", log_path="", 
-                        generate_code=True, use_repo=True,
-                        repo_dir=None, code_gen_variant="full", experiment_name=None):
-    """Main function to run reproduction-focused paper test.
-    code_gen_variant: 'full' = paper + full expert graph; 'retrieval' = paper + retrieved expert snippets.
-    experiment_name: if set, creates log_path/experiment_name/ for submission, code_generation, and log.
-    """
 
-    # Experiment path: when set, submission, code_generation, and log go to log_path/experiment_name/
-    output_base = log_path
-    if experiment_name:
-        experiment_path = os.path.join(output_base, experiment_name)
-        code_output_dir = experiment_path
-    else:
-        code_output_dir = output_base
-    
-    base_url = os.getenv("OPENAI_API_BASE_URL")
-    api_key = os.getenv("OPENAI_API_KEY")
-    model = os.getenv("OPENAI_MODEL") # "Qwen/Qwen3-Next-80B-A3B-Instruct" #"Qwen/QwQ-32B"
+def test_generated_code_executability(code_path, log, timeout_sec=20):
+    """Run lightweight executability checks for generated Python code."""
+    results = {
+        "compile_check": {"success": False, "stdout": "", "stderr": ""},
+        "smoke_run": {"success": False, "stdout": "", "stderr": ""},
+    }
 
-    # Get paper directory and load repo URL
-    paper_dir = os.path.dirname(paper_path)
-    if not use_repo:
-        repo_url = None
-    else:
-        repo_url = reprutil.load_repo_url(paper_dir)
-        
-    log(f"Paper: {paper_path}")
-    log(f"Repository: {repo_url or 'Not specified'}")
-    log(f"Model: {model}")
-    log(f"Device: {device}")
-    log("")
+    try:
+        compile_result = subprocess.run(
+            [sys.executable, "-m", "py_compile", code_path],
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+        )
+        results["compile_check"] = {
+            "success": compile_result.returncode == 0,
+            "stdout": compile_result.stdout[-4000:],
+            "stderr": compile_result.stderr[-4000:],
+        }
+    except subprocess.TimeoutExpired as e:
+        results["compile_check"] = {
+            "success": False,
+            "stdout": (e.stdout or "")[-4000:],
+            "stderr": f"Timeout after {timeout_sec}s",
+        }
 
-    total_start_time = time()
+    if results["compile_check"]["success"]:
+        try:
+            smoke_result = subprocess.run(
+                [sys.executable, code_path],
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+                cwd=os.path.dirname(code_path),
+            )
+            results["smoke_run"] = {
+                "success": smoke_result.returncode == 0,
+                "stdout": smoke_result.stdout[-4000:],
+                "stderr": smoke_result.stderr[-4000:],
+            }
+        except subprocess.TimeoutExpired as e:
+            results["smoke_run"] = {
+                "success": False,
+                "stdout": (e.stdout or "")[-4000:],
+                "stderr": f"Timeout after {timeout_sec}s",
+            }
 
-    paper_graph = ReproductionGraph(model, 
-    "You are a helpful assistant specializing in research reproduction",
-                            api_key, log, base_url, device, type='paper')
-    mem_graph = ReproductionGraph(model, 
-    "You are a helpful assistant specializing in research replication",
-                                api_key, log, base_url, device, type='mem')
-    
-    if os.path.exists(
-        os.path.join(output_base, "paper_graph_data.json")) and os.path.exists(
-            os.path.join(output_base, "mem_graph_data_with_code.json")):
-        log("Loading paper and mem graphs from disk") 
-        paper_graph.load_triplets_from_json(os.path.join(output_base, "paper_graph_data.json"),clear_first=True,)
-        mem_graph.load_triplets_from_json(os.path.join(output_base, "mem_graph_data_with_code.json"),clear_first=True,)
-        
-    else:
-        log("Loading paper...")
-        paper_content = reprutil.load_paper(paper_path)
-        sections = reprutil.split_into_sections(paper_content)
-        log(f"Paper split into {len(sections)} sections")
-        log("")
-        # Process sections
-        section_stats = []
+    log("Generated code executability checks:")
+    log(f"  - Compile check: {'PASS' if results['compile_check']['success'] else 'FAIL'}")
+    log(f"  - Smoke run: {'PASS' if results['smoke_run']['success'] else 'FAIL'}")
+    if results["compile_check"]["stderr"]:
+        log(f"  - Compile stderr: {results['compile_check']['stderr'][:500]}")
+    if results["smoke_run"]["stderr"]:
+        log(f"  - Smoke stderr: {results['smoke_run']['stderr'][:500]}")
 
-        for i, section in enumerate(sections):
-            #if "references" in section['title'].lower():
-            #    break
-            section_start_time = time()
-            current_datetime = datetime.datetime.now()
-            log("="*70)
-            log(f"{current_datetime} SECTION {i+1}/{len(sections)}: {section['title']}")
-            log("="*70)
+    return results
 
-            chunks = reprutil.preprocess_section(section['content'])
-            log(f"Section split into {len(chunks)} chunks")
 
-            section_triplets_paper = []
-            section_triplets_mem = []
-            for j, chunk in enumerate(chunks):
-                log(f"\n{datetime.datetime.now()} Processing chunk {j+1}/{len(chunks)}...")
-                log(f"Chunk preview: {chunk[:100]}...")
+def link_code_to_mem_graph(mem_graph, log, log_path, paper_path, output_base, repo_dir=None, new_triplets=None):
+    log("Linking code to  MEMORY graph...")
 
-                
-                retries = 3
-                while retries > 0:
-                    try:
-                        log(f"Try {4-retries}/{retries}")
-                        new_triplets_paper, _ = paper_graph.update_without_retrieve(chunk, [], log, source_type="paper")
-                        section_triplets_paper.extend(new_triplets_paper)
-                        new_triplets_mem = None
-                        
-                        new_triplets_mem, _ = mem_graph.update_without_retrieve(chunk, [], log, source_type="paper")
-                        section_triplets_mem.extend(new_triplets_mem)
-                        log(f"{datetime.datetime.now()} Chunk {j+1}/{len(chunks)} done")
-                        if new_triplets_paper:
-                            log("Sample triplets paper:")
-                            for triplet in new_triplets_paper[:3]:
-                                subj, obj, rel = triplet
-                                log(f"  - ({subj}) --[{rel.get('label', 'N/A')}]--> ({obj})")
-                        
-                        if new_triplets_mem:
-                            log("Sample triplets mem:")
-                            for triplet in new_triplets_mem[:3]:
-                                subj, obj, rel = triplet
-                                log(f"  - ({subj}) --[{rel.get('label', 'N/A')}]--> ({obj})")
-                        break
-                    except Exception as e:
-                        log(f"Error processing chunk: {str(e)}")
-                        retries -= 1
-                        if retries > 0:
-                            log(f"Retrying ({retries} left)...")
-                            sleep(5)
-                        else:
-                            raise e
+    if repo_dir is not None:
+        log("="*70)
+        log("PHASE 2: CODE INDEX + PAPER-TO-CODE LINKING")
+        log("="*70)
 
-            section_time = time() - section_start_time
+        log(f'Using local repo at {repo_dir}')
+        try:
 
-            log("")
-            log(f"Section summary:")
-            log(f"  - Triplets extracted: paper {len(section_triplets_paper)}, mem {len(section_triplets_mem)}")
-            log(f"  - Total triplets in graph: paper {len(paper_graph.triplets)}, mem {len(mem_graph.triplets)}")
-            log(f"  - Processing time: {section_time:.2f} seconds")
-            log(f"  - API tokens: paper {paper_graph.completion_tokens} completion, {paper_graph.prompt_tokens} prompt")
-            log(f"  - API tokens: mem {mem_graph.completion_tokens} completion, {mem_graph.prompt_tokens} prompt")
-            log("")
-            # Save current graph state after each section (to output_base for shared access)
-            reprutil._write_json_to_path(output_base, "paper_graph_data.json", {
-                "paper": os.path.basename(paper_path),
-                "sections_processed": i + 1,
-                "triplets": [[t[0], t[1], t[2]] for t in paper_graph.triplets],
-                "obs_episodic": {k: v[0] for k, v in paper_graph.obs_episodic.items()},
-                "stats": {"total_triplets": len(paper_graph.triplets), 
-                "prompt_tokens": paper_graph.prompt_tokens,
-                "completion_tokens": paper_graph.completion_tokens},
-                
-            })
-            log("Graph state saved to paper_graph_data.json")
-            reprutil._write_json_to_path(output_base, "mem_graph_data_with_code.json", {
-                "paper": os.path.basename(paper_path),
-                "sections_processed": i + 1,
-                "triplets": [[t[0], t[1], t[2]] for t in mem_graph.triplets],
-                "obs_episodic": {k: v[0] for k, v in mem_graph.obs_episodic.items()},
-                "stats": {"total_triplets": len(mem_graph.triplets), 
-                "prompt_tokens": mem_graph.prompt_tokens,
-                "completion_tokens": mem_graph.completion_tokens},
-            })
-            log("Graph state saved to mem_graph_data_with_code.json")
-
-            section_stats.append({
-                'section_num': i + 1,
-                'title': section['title'],
-                'triplets_extracted_paper': len(section_triplets_paper),
-                'triplets_extracted_mem': len(section_triplets_mem),
-                'processing_time': section_time,
-                'triplets_paper': [[t[0], t[1], t[2]] for t in section_triplets_paper],
-                'triplets_mem': [[t[0], t[1], t[2]] for t in section_triplets_mem],
-            })
-
-    #'''
-    # =============================================================================
-    # PHASE 2: Code to mem graph Linking
-    # =============================================================================
-    if len(mem_graph.triplet2code) == 0:
-        log("Linking code to  MEMORY graph...")
-
-        if repo_dir is not None or repo_url is not None:
-            log("="*70)
-            log("PHASE 2: CODE INDEX + PAPER-TO-CODE LINKING")
-            log("="*70)
-
-            if repo_dir is not None:
-                temp_dir = repo_dir
-                log(f'Using local repo at {temp_dir}')
-            else:
-                assert False, "No repo provided."
-            
-            code_files = reprutil.collect_code_files(temp_dir)
+            log("\nCollecting code files...")
+            code_files = reprutil.collect_code_files(repo_dir)
             log(f"Found {len(code_files)} code files")
 
             log("\nBuilding code index...")
-            #code_index = reprutil.build_code_index(temp_dir, code_files, log)
-            #log(f"Code index: {len(code_index)} entities (classes, functions, config keys)")
+            code_index = reprutil.build_code_index(repo_dir, code_files, log)
+            log(f"Code index: {len(code_index)} entities (classes, functions, config keys)")
 
             log("\nRunning linking pass (hypernodes: patterns -> code)...")
             link_start = time()
             mem_graph = run_linking_pass_hypernodes(
-                mem_graph, code_files, log,
-                output_base=output_base, paper_path=paper_path, repo_dir=temp_dir,
+                mem_graph, code_index, code_files, log, new_triplets=new_triplets
             )
             link_time = time() - link_start
             log(f"Linking complete: {len(mem_graph.triplet2code)} hypernodes in {link_time:.2f}s")
@@ -899,65 +684,218 @@ def run_reproduction_test(log, args, paper_path, device="cpu", log_path="",
             log('Saving graph with code linking to a file0')
             reprutil._write_json_to_path(output_base, "mem_graph_data_with_code.json", {
                 "paper": os.path.basename(paper_path),
-                "triplets": [[t[0], t[1], t[2]] for t in mem_graph.triplets],                           
-                "obs_episodic": {k: v[0] for k, v in mem_graph.obs_episodic.items()},
+                "triplets": [[t[0], t[1], t[2]] for t in mem_graph.triplets],
                 "triplet2code": mem_graph.triplet2code,
                 "stats": {"total_triplets": len(mem_graph.triplets), 
                 "prompt_tokens": mem_graph.prompt_tokens,
                 "completion_tokens": mem_graph.completion_tokens},
             })
-        else:
-            log('No repo provided, skipping Phase 2 (code linking).')
+            
 
-    
-    
-    # =============================================================================
-    # PHASE 3: Generate and validate code from graph
-    # =============================================================================
-    code_generation = {}
-    if generate_code:
-        log("="*70)
-        log("PHASE 3: GRAPH-ONLY CODE GENERATION")
-        log("="*70)
-        
-        #if code_gen_variant == "retrieval":
-        code_generation = generate_code_from_graph_with_retrieval(
-            mem_graph=mem_graph,
-            paper_graph=paper_graph,
-            log=log,
-            output_dir=code_output_dir if experiment_name else None,
-            graph_base_dir=output_base,
-            #retrieval_topk=3,
-            #retrieval_max_depth=2,
-            #retrieval_threshold=0.7,
-            #max_paper_queries=25,
-            code_snippet_len=10000,
-        )
-        #else:
-        #    code_generation = generate_code_from_graph(
-        #        graph=graph,
-        #        paper_path=paper_path,
-        #        paper_name=args.paper,
-        #        log=log,
-        #        output_dir=code_output_dir if experiment_name else None,
-        #        graph_base_dir=output_base,
-        #    )
-        #if test_generated_code and code_generation.get("code_path"):
-        
-        #exec_results = test_generated_code_executability(code_generation["code_path"], log)
-        #code_generation["executability"] = exec_rreprutil.estimate_tokens(prompt, model=os.getenv("OPENAI_MODEL"))n.json")
-        log("code_generation saved to code_generation.json")
+        except Exception as e:
+            log(f"Error in Phase 2: {e}")
+            raise e
     else:
-        log("Skipping graph-based code generation (--no-generate-code)")
-       
-    
+        log('No repo provided, skipping Phase 2 (code linking).')
+    return mem_graph
 
-    log("="*70)
-    log("REPRODUCTION RUN COMPLETE")
-    log("="*70)
-    log(f"Total time: {time() - total_start_time:.2f} seconds")
+
+def generate_paper_and_mem_graphs(paper_path, output_base, model, api_key, log, base_url, device):
+    log("Loading paper...")
+    paper_content = reprutil.load_paper(paper_path)
+    sections = reprutil.split_into_sections(paper_content)
+    log(f"Paper split into {len(sections)} sections")
     log("")
 
+    paper_graph = ReproductionGraph(model, "You are a helpful assistant specializing in research reproduction",
+                        api_key, log, base_url, device, type='paper')
+    mem_graph = ReproductionGraph(model, "You are a helpful assistant specializing in research replication",
+                            api_key, log, base_url, device, type='mem')
+    
+
+    # Process sections
+    section_stats = []
+
+    for i, section in enumerate(sections):
+        section_start_time = time()
+        current_datetime = datetime.datetime.now()
+        log("="*70)
+        log(f"{current_datetime} SECTION {i+1}/{len(sections)}: {section['title']}")
+        log("="*70)
+
+        chunks = reprutil.preprocess_section(section['content'])
+        log(f"Section split into {len(chunks)} chunks")
+
+        section_triplets_paper = []
+        section_triplets_mem = []
+        for j, chunk in enumerate(chunks):
+            log(f"\n{datetime.datetime.now()} Processing chunk {j+1}/{len(chunks)}...")
+            log(f"Chunk preview: {chunk[:100]}...")
+
+            # Pass recent triplets as context for entity consistency across chunks
+            #prev_subgraph = _get_context_triplets(paper_graph.triplets, max_triplets=40, recent_first=True)
+
+            retries = 3
+            while retries > 0:
+                try:
+                    log(f"Try {4-retries}/{retries}")
+                    new_triplets_paper, _ = paper_graph.update_without_retrieve(chunk, [], log, source_type="paper")
+                    section_triplets_paper.extend(new_triplets_paper)
+                    new_triplets_mem = None
+                    
+                    new_triplets_mem, _ = mem_graph.update_without_retrieve(chunk, [], log, source_type="paper")
+                    section_triplets_mem.extend(new_triplets_mem)
+                    log(f"{datetime.datetime.now()} Chunk {j+1}/{len(chunks)} done")
+                    if new_triplets_paper:
+                        log("Sample triplets paper:")
+                        for triplet in new_triplets_paper[:3]:
+                            subj, obj, rel = triplet
+                            log(f"  - ({subj}) --[{rel.get('label', 'N/A')}]--> ({obj})")
+                    
+                    if new_triplets_mem:
+                        log("Sample triplets mem:")
+                        for triplet in new_triplets_mem[:3]:
+                            subj, obj, rel = triplet
+                            log(f"  - ({subj}) --[{rel.get('label', 'N/A')}]--> ({obj})")
+                    break
+                except Exception as e:
+                    log(f"Error processing chunk: {str(e)}")
+                    retries -= 1
+                    if retries > 0:
+                        log(f"Retrying ({retries} left)...")
+                        sleep(5)
+                    else:
+                        raise e
+
+        section_time = time() - section_start_time
+
+        log("")
+        log(f"Section summary:")
+        log(f"  - Triplets extracted: paper {len(section_triplets_paper)}, mem {len(section_triplets_mem)}")
+        log(f"  - Total triplets in graph: paper {len(paper_graph.triplets)}, mem {len(mem_graph.triplets)}")
+        log(f"  - Processing time: {section_time:.2f} seconds")
+        log(f"  - API tokens: paper {paper_graph.completion_tokens} completion, {paper_graph.prompt_tokens} prompt")
+        log(f"  - API tokens: mem {mem_graph.completion_tokens} completion, {mem_graph.prompt_tokens} prompt")
+        log("")
+        # Save current graph state after each section (to output_base for shared access)
+        reprutil._write_json_to_path(output_base, "paper_graph_data.json", {
+            "paper": os.path.basename(paper_path),
+            "sections_processed": i + 1,
+            "triplets": [[t[0], t[1], t[2]] for t in paper_graph.triplets],
+            "stats": {"total_triplets": len(paper_graph.triplets), 
+            "prompt_tokens": paper_graph.prompt_tokens,
+            "completion_tokens": paper_graph.completion_tokens},
+        })
+        log("Graph state saved to paper_graph_data.json")
+        
+        reprutil._write_json_to_path(output_base, "mem_graph_data.json", {
+            "paper": os.path.basename(paper_path),
+            "sections_processed": i + 1,
+            "triplets": [[t[0], t[1], t[2]] for t in mem_graph.triplets],
+            "stats": {"total_triplets": len(mem_graph.triplets), 
+            "prompt_tokens": mem_graph.prompt_tokens,
+            "completion_tokens": mem_graph.completion_tokens},
+        })
+        log("Graph state saved to mem_graph_data.json")
+
+        section_stats.append({
+            'section_num': i + 1,
+            'title': section['title'],
+            'triplets_extracted_paper': len(section_triplets_paper),
+            'triplets_extracted_mem': len(section_triplets_mem),
+            'processing_time': section_time,
+            'triplets_paper': [[t[0], t[1], t[2]] for t in section_triplets_paper],
+            'triplets_mem': [[t[0], t[1], t[2]] for t in section_triplets_mem],
+        })
+    return paper_graph, mem_graph
+
+
+def generate_code_from_paper_and_mem_graphs(paper_graph, mem_graph, args, log, output_base, output_dir=None, graph_base_dir=None):
+            code_generation = {}
+            
+            log("="*70)
+            log("PHASE 3: GRAPH-ONLY CODE GENERATION")
+            log("="*70)
+            
+            code_generation = generate_code_from_graph_with_retrieval(
+                mem_graph=mem_graph,
+                paper_graph=paper_graph,
+                paper_name=args.paper,
+                log=log,
+                output_dir=os.path.join(output_base, args.experiment) if args.experiment else None,
+                graph_base_dir=output_base,
+            )
+            log.to_json(code_generation, "code_generation.json")
+            log("code_generation saved to code_generation.json")
+        
+            return code_generation
+
+
+def run_reproduction_test(log, args, paperbench_data_path, n_papers=2):
+    """Main function to run reproduction-focused paper test.
+    """
+    
+    for pid, paper_name in enumerate(os.listdir(paperbench_data_path))[:n_papers]:
+        paper_path = os.path.join(paperbench_data_path, paper_name + '/paper.md')
+        # Experiment path: when set, submission, code_generation, and log go to log_path/experiment_name/
+        output_base = args.log_path + '/' + paper_name
+        
+        
+        base_url = os.getenv("OPENAI_API_BASE_URL")
+        api_key = os.getenv("OPENAI_API_KEY")
+        model = os.getenv("OPENAI_MODEL") # "Qwen/Qwen3-Next-80B-A3B-Instruct" #"Qwen/QwQ-32B"
+
+        # Get paper directory and load repo URL
+        paper_dir = os.path.dirname(paper_path)
+        
+        log(f"Paper: {paper_path}")
+        log(f"Model: {model}")
+        log(f"Device: {args.device}")
+        log("")
+
+        total_start_time = time()
+        
+        paper_graph, add_mem_graph = generate_paper_and_mem_graphs(paper_path, output_base, model, api_key, log, base_url, args.device)
+        
+        # =============================================================================
+        # PHASE 2: Code to mem graph Linking
+        # =============================================================================
+        if pid == 0:
+            mem_graph = add_mem_graph
+            mem_graph = link_code_to_mem_graph(mem_graph, log, args.log_path, paper_path, output_base, repo_dir=args.repo_dir)
+            # =============================================================================
+            # PHASE 3: Generate and validate code from graph
+            # =============================================================================
+            if args.generate_code:
+                code_generation = generate_code_from_paper_and_mem_graphs(paper_graph, mem_graph, args, log, output_base, output_dir=None, graph_base_dir=None)
+            else:
+                log("Skipping graph-based code generation (--no-generate-code)")
+        
+        else:
+            if args.generate_code:
+                # generate code from old mem graph
+                code_generation = generate_code_from_paper_and_mem_graphs(paper_graph, mem_graph, args, log, output_dir=None, graph_base_dir=None)
+            else:
+                log("Skipping graph-based code generation (--no-generate-code)")
+            # find new triplets fro add mem graph that are absent in old mem graph
+            new_triplets = [t for t in add_mem_graph.triplets if t not in mem_graph.triplets]
+            if len(new_triplets) > 0:
+                log(f"Found {len(new_triplets)} new triplets to update mem graph")
+                # add new triplets to old mem graph
+                mem_graph.add_triplets(new_triplets)
+                # link code to new mem graph
+                mem_graph = link_code_to_mem_graph(mem_graph, log, args.log_path, paper_path, output_base, repo_dir=code_generation["repo_root"], 
+                new_triplets=[add_mem_graph.str(t) for t in new_triplets])
+                # as triplets in linkuing are sawe and ode files hange the useful ones ay be oerwritten
+            else:
+                log("No new triplets found to update mem graph, skipping update")
+        
+
+        log("="*70)
+        log("REPRODUCTION RUN COMPLETE")
+        log("="*70)
+        log(f"Total time: {time() - total_start_time:.2f} seconds")
+        
 
 def main():
     parser = argparse.ArgumentParser(
@@ -989,7 +927,7 @@ def main():
     paperbench_data_path = '/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/'
     # '/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/short-papers/'
     
-    output_base = args.log_path + '/' + args.paper
+    output_base = args.log_path
     if args.experiment:
         experiment_path = os.path.join(output_base, args.experiment)
         os.makedirs(experiment_path, exist_ok=True)
@@ -1004,14 +942,8 @@ def main():
         run_reproduction_test(
             log=log,
             args=args,
-            paper_path=paperbench_data_path + args.paper + '/paper.md',
-            device=args.device,
-            log_path=args.log_path + '/' + args.paper,
-            generate_code=args.generate_code,
-            use_repo=args.use_repo,
-            repo_dir=args.repo_dir,
-            code_gen_variant=args.code_gen_variant,
-            experiment_name=args.experiment,
+            paperbench_data_path=paperbench_data_path, 
+            n_papers=2
         )
 
     except Exception as e:

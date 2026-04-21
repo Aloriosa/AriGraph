@@ -82,6 +82,8 @@ Extracted triplets: '''
 
 prompt_cookbook_extraction_wo_code = '''Objective: Build a minimal, implementation-complete knowledge graph for yourself that will later reproduce the paper's method and all the experiments and results using ONLY this graph as source of truth (without access to the paper).
 
+{observation}
+
 Extraction Priority (highest to lowest):
 1) Exact procedure/algorithm steps and ordering constraints.
 2) Hyperparameters, schedules, thresholds, stopping criteria, and optimization settings.
@@ -119,8 +121,6 @@ ALWAYS include units when mentioned (%, seconds, tokens, dimensions, GB, etc.).
 Target output budget efficiency where possible; prioritize high-value implementation facts first.
 
 Example of triplets you have extracted before: {example}
-
-Input to process: {observation}
 
 Remember that triplets must be extracted in format: "subject_1, relation_1, object_1; subject_2, relation_2, object_2; ..."
 
@@ -191,10 +191,18 @@ Extracted triplets: '''
 # PHASE 2: REUSABLE PATTERN TO CODE MAPPING (hypernodes)
 # =============================================================================
 
-prompt_reusable_pattern_to_code_mapping = '''You have REUSABLE PATTERNS from the cookbook (extracted from a paper in this research area).
+prompt_reusable_pattern_to_code_mapping = '''You have excerpt from the paper and REUSABLE PATTERNS for reprodution extracted from the excerpt.
 You have the paper's codebase.
 
-Your task: For each reusable pattern implemented in this file, produce a HYPERNODE — a structured entry containing:
+Excerpt from the paper:
+{observation}
+
+Reusable patterns from the cookbook:
+{reusable_patterns}
+
+{codebase}
+
+Your task: For each reusable pattern, produce a HYPERNODE — a structured entry containing:
 1) code: the exact implementation (class or function body, or config snippet)
 2) documentation: brief description (1-3 sentences) of what it does and when to use it
 3) imports: list of required packages/imports (e.g. ["torch", "transformers", "from datasets import load_dataset"])
@@ -202,14 +210,6 @@ Your task: For each reusable pattern implemented in this file, produce a HYPERNO
 Think: "Where would a developer implementing ANY paper in this area find the implementation of pattern X?"
 For each match, extract the actual code, write brief docs, and list imports.
 
-Reusable patterns from the cookbook:
-{reusable_patterns}
-
-Code index for this file:
-{code_index}
-
-Code for file {file_path}:
-{code_chunk}
 
 Output format: For each (pattern, hypernode), output a JSON block:
 {{"pattern": "...", "hypernode": {{"code": "...", "documentation": "...", "imports": [...]}}}}
@@ -217,6 +217,35 @@ Output format: For each (pattern, hypernode), output a JSON block:
 Only output for REUSABLE patterns. Skip paper-specific implementations.
 If this file does not implement any reusable pattern, output nothing.
 Output one JSON block per pattern, or nothing if no matches.'''
+
+
+# =============================================================================
+# PHASE 2 (alt): SYMBOL INDEX + STRUCTURED LINKS (triplet_id → file:line)
+# =============================================================================
+
+prompt_code_linking_symbol_index = '''You map numbered knowledge-graph triplets to concrete code locations in a repository.
+
+Paper excerpt (context):
+{observation}
+
+Numbered triplets (reference by index only — use field triplet_id matching the number before each parenthesis):
+{numbered_triplets}
+
+Repository symbol index (files, classes, methods; line numbers are 1-based):
+{symbol_index}
+
+Task: For each triplet that is implemented in this codebase, output ONE link object with:
+- triplet_id: integer — must match a number from the numbered list above
+- code_location: string — MUST be "relative/path/from/repo.py:LINE" where LINE is the start line of the defining symbol (class, method, or function) that best implements the triplet
+- confidence: float between 0 and 1
+
+Rules:
+- Use only paths that appear in the symbol index. Prefer the smallest enclosing symbol (method vs whole class) when appropriate.
+- Do not invent file paths or line numbers.
+- If a triplet has no clear implementation in the repo, omit it.
+- Output a single JSON object with key "links" whose value is an array of objects. Example:
+{{"links": [{{"triplet_id": 1, "code_location": "src/model.py:42", "confidence": 0.85}}]}}
+- If nothing matches, return {{"links": []}}.'''
 
 
 # =============================================================================
@@ -286,27 +315,23 @@ echo "r count for word 'strawberry' saved to output.csv"
 - Result: inspecting the output.csv **produced by reproduce.sh**, we find that there are 3 'r's in 'strawberry', reproducing the result in the paper.
 '''
 
-prompt_coding_agent_paper_mem_graph = '''You are a coding agent implementing a research paper. You have access to TWO knowledge graphs:
+prompt_coding_agent_paper_mem_graph = '''You are a coding agent implementing a research paper. You have access to:
 
-1) **PAPER GRAPH** — implementation details extracted from the target paper (algorithms, hyperparameters, setup, procedures).
-2) **EXPERT GRAPH** — reusable patterns and code snippets from similar papers (pipelines, code, documentation, imports). Use these as drop-in templates.
+1) **PAPER TRIPLETS** — triplets extracted from the target paper containing implementation details (algorithms, hyperparameters, setup, procedures).
+2) **EXPERT KNOWLEDGE** — reusable reproduction pattern triplets and code snippets from similar papers related to given paper triplets (pipelines, code, documentation, imports). Use these as drop-in templates.
 
 Your strategy:
-1) USE THE EXPERT GRAPH for general pipeline: data loading, training loop, config, evaluation. For each pattern, use the hypernode (code + docs + imports) as a template.
-2) FOCUS on what the PAPER GRAPH specifies: the method, architecture, hyperparameters, and procedure unique to this paper.
-3) COMBINE: wire the paper-specific parts into the common pipeline from the expert graph.
+1) USE EXPERT KNOWLEDGE as a starting point for your implementation. Use patterns as a guidance for the code applicability areas. Use the code snippets as building block templates for your implementation.
+2) Use PAPER TRIPLETS to understand the paper's context, method details and requirements.
+3) FOCUS on what the PAPER TRIPETS specify: the method, architecture, hyperparameters, and procedure unique to this paper.
+4) COMBINE: wire the paper-specific parts into the expert knowledge code.
 
 {BENCHMARK_RULES}
 
 {TOY_EXAMPLE}
 
 ---
-PAPER GRAPH (implementation details from the paper):
-{paper_graph}
-
----
-EXPERT GRAPH (patterns with code from similar papers):
-{expert_graph}
+{expert_knowledge}
 
 ---
 Generate a complete, runnable repository. Include reproduce.sh, README.md, and all source code. Use expert graph patterns where applicable. Implement paper-specific parts from the paper graph. Output format:

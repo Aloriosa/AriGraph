@@ -20,6 +20,7 @@ from openai.types.chat.chat_completion_message_param import ChatCompletionMessag
 from preparedness_turn_completer.oai_completions_turn_completer import (
     OpenAICompletionsTurnCompleter, QwenOpenAICompletionsTurnCompleter
 )
+from transformers import AutoTokenizer
 from preparedness_turn_completer.turn_completer import TurnCompleter
 from pydantic import BaseModel
 from typing_extensions import override
@@ -98,7 +99,10 @@ class SimpleJudge(Judge):
 
         self.completer_config = completer_config
         self.completer = completer_config.build()
-        self.token_encoder = tiktoken.get_encoding(self.completer.encoding_name)
+        self.token_encoder = AutoTokenizer.from_pretrained(
+            pretrained_model_name_or_path=self.completer.encoding_name,
+            trust_remote_code=True)
+        #tiktoken.get_encoding(self.completer.encoding_name)
 
         self.float_completer_conf, self.float_completer = self._init_structured_completer(
             float_completer_config, ParsedJudgeResponseFloat
