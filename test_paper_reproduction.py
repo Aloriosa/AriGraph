@@ -13,7 +13,7 @@ import datetime
 
 from graphs.contriever_graph import ContrieverGraph
 from utils.retriever_search_drafts import graph_retr_search
-from utils.utils import Logger
+from utils.utils import Logger, clear_triplet
 
 from openai import OpenAI
 from dotenv import load_dotenv # you'll need to pip install python-dotenv
@@ -29,6 +29,54 @@ from topology_pipeline.graph_materialization import materialize_typed_graph
 from topology_pipeline.prompt_packing import PromptBudget, build_generation_prompt
 from topology_pipeline.retrieval import RetrievalConfig, retrieve_memory_cards
 from topology_pipeline.symbol_assets import build_symbol_assets_from_triplet_links
+
+
+def _load_triplet_embeddings(json_path: str, log) -> dict:
+    """Load a `{triplet_str: np.ndarray}` cache produced by save_triplet_embeddings.
+
+    Returns {} if the sidecar is missing or unreadable. We never raise — a missing or
+    corrupt cache just means we fall back to re-embedding.
+    """
+    side = _emb_sidecar_path(json_path)
+    if not os.path.isfile(side):
+        return {}
+    try:
+        npz = np.load(side, allow_pickle=True)
+        keys = npz["keys"]
+        embs = npz["embs"]
+        if len(keys) != len(embs):
+            return {}
+        cache = {str(k): embs[i] for i, k in enumerate(keys)}
+        log(f"T4: restored {len(cache)} cached triplet embeddings from {side}")
+        return cache
+    except Exception as e:
+        log(f"T4: failed to read embedding cache at {side}: {e}; will re-embed.")
+        return {}
+
+
+def save_triplet_embeddings(json_path: str, triplets_emb: dict, log) -> None:
+    """Atomically persist the embedding cache next to the cumulative JSON."""
+    if not triplets_emb:
+        return
+    side = _emb_sidecar_path(json_path)
+    keys = list(triplets_emb.keys())
+    arrs = []
+    for k in keys:
+        v = triplets_emb[k]
+        if hasattr(v, "cpu"):
+            v = v.cpu().detach().numpy()
+        arrs.append(np.asarray(v))
+    try:
+        embs = np.stack(arrs)
+    except ValueError as e:
+        log(f"T4: heterogeneous embedding shapes, skipping save: {e}")
+        return
+    tmp = side + ".tmp"
+    # Use a file-object so numpy doesn't auto-append ".npz" to our ".tmp" suffix.
+    with open(tmp, "wb") as f:
+        np.savez_compressed(f, embs=embs, keys=np.array(keys, dtype=object))
+    os.replace(tmp, side)
+    log(f"T4: saved {len(keys)} triplet embeddings to {side}")
 
 
 class ReproductionGraph(ContrieverGraph):
@@ -56,6 +104,37 @@ class ReproductionGraph(ContrieverGraph):
         self.prompt_tokens  = 0
         self.triplet2code = {}
 
+    
+    def _add_triplets_with_cached_embeddings(self, triplets, cached_emb):
+        """Like `add_triplets` but uses pre-computed triplet embeddings when available.
+
+        Items (subject/object label embeddings) are still recomputed because they are
+        keyed on entity labels, not full triplet strings, and the count is bounded by
+        unique entities (small relative to triplet count).
+        """
+        re_embed_count = 0
+        for triplet in triplets:
+            if not isinstance(triplet, (list, tuple)) or len(triplet) < 3:
+                continue
+            t = clear_triplet(triplet)
+            if t[2].get("label") == "free":
+                continue
+            if t in self.triplets:
+                continue
+            self.triplets.append(t)
+            key = self.str(t)
+            if key in cached_emb:
+                self.triplets_emb[key] = cached_emb[key]
+            else:
+                self.triplets_emb[key] = self.get_embedding_local(key)
+                re_embed_count += 1
+            if t[0] not in self.items_emb:
+                self.items_emb[t[0]] = self.get_embedding_local(t[0])
+            if t[1] not in self.items_emb:
+                self.items_emb[t[1]] = self.get_embedding_local(t[1])
+        if re_embed_count:
+            self._log(f"T4: {re_embed_count} triplets were not in cache; re-embedded those only.")
+    
     def add_triplets(self, triplets, ontology_validation=False):
         """Override to enforce ontology validation before adding."""
         validated = []
@@ -124,7 +203,13 @@ class ReproductionGraph(ContrieverGraph):
         else:
             if clear_first:
                 self.clear()
-            self.add_triplets(triplets)
+            
+            # T4: if a sidecar embedding cache exists, hydrate directly (skip re-embed).
+            cached_emb = _load_triplet_embeddings(path, self._log)
+            if cached_emb:
+                self._add_triplets_with_cached_embeddings(triplets, cached_emb)
+            else:
+                self.add_triplets(triplets)
             n = len(self.triplets)
             obs_episodic = data.get("obs_episodic", [])               
             if not obs_episodic:
@@ -273,6 +358,7 @@ def run_linking_pass_hypernodes(graph, code_files, log,
                         "path": snip.get("path", ""),
                         "documentation": "",
                         "imports": [],
+                        "paper": paper_path,
                     }
                     seen_pattern_location_pairs.add(pl_key)
                     log(f"  Obs {obs_idx}, sym_start {sym_start}: Linked triplet [{tid}] -> {code_loc} (confidence={round(conf_f, 3)})")
@@ -642,6 +728,12 @@ max_paper_queries=25, code_snippet_len=5000):
         {"assets": [asset.to_dict() for asset in symbol_assets], "triplet_to_asset": triplet_to_asset},
     )
 
+
+    # Use the Contriever encoder we already built for the graph as the dense retriever.
+    # Falls back to lexical Jaccard automatically if embedding fails.
+    def _mem_embedder(texts):
+        return mem_graph.retriever.embed(list(texts))
+
     selected = retrieve_memory_cards(
         paper_cards,
         memory_cards,
@@ -649,6 +741,7 @@ max_paper_queries=25, code_snippet_len=5000):
             per_paper_card=max(1, min(4, retrieval_topk)),
             total_budget=max(8, max_paper_queries),
             min_score=max(0.01, min(0.3, retrieval_threshold / 3.0)),
+            embedder=_mem_embedder,
         ),
     )
     reprutil._write_json_to_path(
