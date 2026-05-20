@@ -11,6 +11,7 @@ from pathlib import Path
 from time import time, sleep
 import datetime
 
+import numpy as np
 from graphs.contriever_graph import ContrieverGraph
 from utils.retriever_search_drafts import graph_retr_search
 from utils.utils import Logger, clear_triplet
@@ -29,6 +30,13 @@ from topology_pipeline.graph_materialization import materialize_typed_graph
 from topology_pipeline.prompt_packing import PromptBudget, build_generation_prompt
 from topology_pipeline.retrieval import RetrievalConfig, retrieve_memory_cards
 from topology_pipeline.symbol_assets import build_symbol_assets_from_triplet_links
+
+
+def _emb_sidecar_path(json_path: str) -> str:
+    """Return the on-disk path for a JSON file's triplet-embedding cache sidecar."""
+    if json_path.endswith(".json"):
+        return json_path[:-5] + "_emb.npz"
+    return json_path + "_emb.npz"
 
 
 def _load_triplet_embeddings(json_path: str, log) -> dict:

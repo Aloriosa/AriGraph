@@ -62,7 +62,7 @@ def parse_linking_json_response(response_text: str) -> list:
     try:
         obj = json.loads(response_text.strip())
     except json.JSONDecodeError:
-        blocks = reprutil._extract_json_blocks(response_text)
+        blocks = _extract_json_blocks(response_text)
         for b in blocks:
             if isinstance(b, dict) and "links" in b:
                 return b.get("links", [])
