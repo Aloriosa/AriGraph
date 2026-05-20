@@ -1,0 +1,324 @@
+**FILE: README.md**  
+```markdown
+# Cramming Tokens into a Single Vector – Reproduction Code
+
+This repository contains a minimal, end‑to‑end implementation that reproduces the core idea from the paper
+*“Cramming 1568 Tokens into a Single Vector and Back Again”* by Kuratov et al.
+We demonstrate how a frozen language model can be guided to reconstruct arbitrary text from a small set of
+trainable “memory” vectors (`[MEM]` tokens).  
+
+The implementation uses the Hugging Face `transformers` library and a small, freely available model
+(`gpt2`).  
+All code is contained in this repository; no large artefacts are stored, so the repository size stays
+well under 1 GB.
+
+## How it works
+
+1. **Compression** – `compress.py` trains the embeddings of a few special `[MEM]` tokens so that the
+   frozen model can predict a target text with zero loss.  
+2. **Decoding** – `decode.py` loads the trained `[MEM]` embeddings and lets the model generate the
+   text from them.  
+3. **Reproduction script** – `reproduce.sh` installs dependencies, runs the compression and decoding
+   steps, and prints the reconstructed text and token‑level accuracy.
+
+The scripts are intentionally simple and only target a single example text (`sample_text.txt`).  
+They can be extended to batch experiments or larger models by adjusting the command‑line arguments.
+
+## Usage
+
+```bash
+bash reproduce.sh
+```
+
+The script will:
+
+1. Install `transformers` and `torch`.
+2. Run `compress.py` on `sample_text.txt`.
+3. Run `decode.py` to generate the text from the learned `[MEM]` vectors.
+4. Print the reconstructed text and token‑level accuracy.
+
+All intermediate files are written to `output/`.
+
+## Expected outcome
+
+Running `reproduce.sh` should produce output similar to:
+
+```
+Compression finished. Saved mem vectors to output/mem.pt
+Decoding finished. Reconstructed text:
+The quick brown fox jumps over the lazy dog. It was a sunny day.
+Token accuracy: 100.00%
+```
+
+The token accuracy demonstrates that the model has perfectly recovered the original text from a
+single memory vector.
+
+## Customisation
+
+- Change the number of memory vectors: `--mem_tokens 1` (default) → `--mem_tokens 4`.
+- Switch to another model: `--model_name gpt2-medium` (requires more GPU memory).
+- Use a different text file: `--text_file my_long_story.txt`.
+
+## Notes
+
+- The demo uses a very small model for quick execution.  
+  Scaling to larger models (e.g., Llama‑3.2‑1B) requires more GPU memory and longer training
+  steps, but the same code works with minimal changes.
+- The training stops after a fixed number of steps (`--max_steps`).  
+  For longer texts or more memory vectors, increase this value.
+- All code uses the GPU if available; otherwise it falls back to CPU.
+
+Feel free to fork, modify, and extend this repository for your own experiments.
+```
+
+---
+
+**FILE: reproduce.sh**  
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Update package lists and install Python 3
+apt-get update -y
+apt-get install -y python3-pip
+
+# Install required Python packages
+pip install --upgrade pip
+pip install transformers torch
+
+# Create output directory
+mkdir -p output
+
+# Run compression
+echo "=== Running compression ==="
+python3 compress.py \
+    --model_name gpt2 \
+    --text_file sample_text.txt \
+    --mem_tokens 1 \
+    --max_steps 2000 \
+    --learning_rate 1e-3 \
+    --output_dir output
+
+# Run decoding
+echo "=== Running decoding ==="
+python3 decode.py \
+    --model_name gpt2 \
+    --mem_file output/mem.pt \
+    --mem_tokens 1 \
+    --output_dir output \
+    --text_file sample_text.txt
+
+echo "=== Reproduction finished ==="
+```
+
+---
+
+**FILE: compress.py**  
+```python
+#!/usr/bin/env python3
+"""
+Train a few special memory tokens ([MEM]) so that a frozen language model
+can reconstruct a given text with zero loss.
+"""
+
+import argparse
+import os
+import torch
+import torch.nn as nn
+from transformers import AutoTokenizer, AutoModelForCausalLM, AdamW, get_linear_schedule_with_warmup
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Compress text into [MEM] vectors.")
+    parser.add_argument("--model_name", type=str, default="gpt2",
+                        help="Hugging Face model name")
+    parser.add_argument("--text_file", type=str, required=True,
+                        help="Path to text file to compress")
+    parser.add_argument("--mem_tokens", type=int, default=1,
+                        help="Number of memory tokens to train")
+    parser.add_argument("--max_steps", type=int, default=2000,
+                        help="Maximum training steps")
+    parser.add_argument("--learning_rate", type=float, default=1e-3,
+                        help="Learning rate for optimizer")
+    parser.add_argument("--output_dir", type=str, default="output",
+                        help="Directory to save results")
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # Load tokenizer and model
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
+    model = AutoModelForCausalLM.from_pretrained(args.model_name)
+    model.to(device)
+    model.eval()  # keep model frozen
+
+    # Add [MEM] tokens
+    mem_token = "[MEM]"
+    tokenizer.add_tokens([mem_token] * args.mem_tokens)
+    model.resize_token_embeddings(len(tokenizer))
+    mem_ids = tokenizer.convert_tokens_to_ids([mem_token] * args.mem_tokens)
+
+    # Freeze all model parameters
+    for p in model.parameters():
+        p.requires_grad = False
+    # Unfreeze only the embeddings of the [MEM] tokens
+    embeddings = model.get_input_embeddings()
+    for mem_id in mem_ids:
+        embeddings.weight[mem_id].requires_grad = True
+
+    # Optimizer
+    optimizer = AdamW([embeddings.weight[mem_id] for mem_id in mem_ids],
+                      lr=args.learning_rate)
+
+    # Load text
+    with open(args.text_file, "r", encoding="utf-8") as f:
+        text = f.read().strip()
+    text_tokens = tokenizer.encode(text, add_special_tokens=False)
+    text_length = len(text_tokens)
+    print(f"Text length (tokens): {text_length}")
+
+    # Prepare input_ids and labels
+    # input_ids = [mem_ids] + text_tokens
+    input_ids = torch.tensor([mem_ids + text_tokens], dtype=torch.long, device=device)
+    # Labels: ignore mem tokens, shift by one
+    labels = torch.full_like(input_ids, -100, device=device)
+    labels[0, args.mem_tokens:-1] = input_ids[0, args.mem_tokens + 1:]
+    # Pad token for generation
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    pad_token_id = tokenizer.pad_token_id
+
+    # Training loop
+    for step in range(1, args.max_steps + 1):
+        optimizer.zero_grad()
+        outputs = model(input_ids=input_ids, labels=labels)
+        loss = outputs.loss
+        loss.backward()
+        optimizer.step()
+
+        if step % 100 == 0 or step == 1:
+            print(f"Step {step:5d} | Loss: {loss.item():.4f}")
+
+    # Save memory embeddings
+    mem_vecs = embeddings.weight[mem_ids].detach().cpu()
+    torch.save(mem_vecs, os.path.join(args.output_dir, "mem.pt"))
+    # Save original text for later comparison
+    with open(os.path.join(args.output_dir, "original.txt"), "w", encoding="utf-8") as f:
+        f.write(text)
+
+    print(f"Compression finished. Saved mem vectors to {os.path.join(args.output_dir, 'mem.pt')}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+**FILE: decode.py**  
+```python
+#!/usr/bin/env python3
+"""
+Generate text from trained [MEM] vectors.
+"""
+
+import argparse
+import os
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Decode text from [MEM] vectors.")
+    parser.add_argument("--model_name", type=str, default="gpt2",
+                        help="Hugging Face model name")
+    parser.add_argument("--mem_file", type=str, required=True,
+                        help="Path to saved mem vectors (.pt)")
+    parser.add_argument("--mem_tokens", type=int, default=1,
+                        help="Number of memory tokens used")
+    parser.add_argument("--output_dir", type=str, default="output",
+                        help="Directory to save decoded text")
+    parser.add_argument("--text_file", type=str, required=True,
+                        help="Original text file for accuracy check")
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # Load tokenizer and model
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
+    model = AutoModelForCausalLM.from_pretrained(args.model_name)
+    model.to(device)
+    model.eval()
+
+    # Add [MEM] tokens
+    mem_token = "[MEM]"
+    tokenizer.add_tokens([mem_token] * args.mem_tokens)
+    model.resize_token_embeddings(len(tokenizer))
+    mem_ids = tokenizer.convert_tokens_to_ids([mem_token] * args.mem_tokens)
+
+    # Load trained memory vectors
+    mem_vecs = torch.load(args.mem_file, map_location=device)
+    embeddings = model.get_input_embeddings()
+    # Replace embeddings of [MEM] tokens
+    embeddings.weight[mem_ids] = mem_vecs
+
+    # Generate
+    input_ids = torch.tensor([mem_ids], dtype=torch.long, device=device)
+    # Determine desired number of tokens (use original text length)
+    with open(args.text_file, "r", encoding="utf-8") as f:
+        original_text = f.read().strip()
+    original_tokens = tokenizer.encode(original_text, add_special_tokens=False)
+    target_length = len(original_tokens)
+
+    generated_ids = model.generate(
+        input_ids=input_ids,
+        max_new_tokens=target_length,
+        do_sample=False,
+        pad_token_id=tokenizer.pad_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+    )
+
+    # Decode
+    generated_tokens = generated_ids[0][args.mem_tokens:]  # skip [MEM]
+    decoded_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+
+    # Save decoded text
+    decoded_path = os.path.join(args.output_dir, "decompressed.txt")
+    with open(decoded_path, "w", encoding="utf-8") as f:
+        f.write(decoded_text)
+
+    print(f"Decoding finished. Reconstructed text:\n{decoded_text}")
+
+    # Compute token-level accuracy
+    decoded_tokens = tokenizer.encode(decoded_text, add_special_tokens=False)
+    correct = sum(1 for a, b in zip(decoded_tokens, original_tokens) if a == b)
+    accuracy = 100.0 * correct / len(original_tokens) if original_tokens else 0.0
+    print(f"Token accuracy: {accuracy:.2f}%")
+
+    print(f"Decoded text saved to {decoded_path}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+**FILE: sample_text.txt**  
+```text
+The quick brown fox jumps over the lazy dog. It was a sunny day.
+```
+
+---

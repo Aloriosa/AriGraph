@@ -1,0 +1,86 @@
+2026-03-14 16:37:49.412912 ======================================================================
+2026-03-14 16:37:49.413059 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 16:37:49.413120 ======================================================================
+2026-03-14 16:37:49.413158 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/all-in-one/paper.md
+2026-03-14 16:37:49.413192 Log path: paper2code_react5_Gpt-oss-20b_trial3/all-in-one
+2026-03-14 16:37:49.413224 Model: Openai/Gpt-oss-20b
+2026-03-14 16:37:49.413256 Max iterations: 5
+2026-03-14 16:37:49.413289 Run reproduce.sh: False
+2026-03-14 16:37:49.413324 Run LLM paper check: True
+2026-03-14 16:37:49.413371 
+2026-03-14 16:37:49.413401 Loading paper...
+2026-03-14 16:37:49.413739 Paper length: 108777 chars (using 108777 for prompt)
+2026-03-14 16:37:49.413809 
+2026-03-14 16:37:49.433862 --- Iteration 0: Initial generation ---
+2026-03-14 16:38:16.580063   Created: generated_reproduction.txt
+2026-03-14 16:38:16.580163 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial3/all-in-one/submission (1 files)
+2026-03-14 16:38:16.580204 
+2026-03-14 16:38:16.580239 --- Iteration 1: Observe & Refine ---
+2026-03-14 16:38:25.362916 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incorrect / Partial Requirements**
+
+| Status | Requirement from the paper | Comment |
+|--------|----------------------------|---------|
+| **MISSING** | Simformer architecture (transformer‑based diffusion model) | The repo contains only an `sbi` NPE, not the Simformer network. |
+| **MISSING** | Tokenizer that encodes each variable as (identifier, value, condition state) | No tokenization logic is present. |
+| **MISSING** | Attention mask to encode simulator dependencies | No mask handling or graph‑structured attention. |
+| **MISSING** | Guided diffusion for arbitrary conditioning | No guided sampling or conditioning logic. |
+| **MISSING** | Training on the joint distribution \(p(\theta,x)\) with random condition masks | The code trains a standard NPE on \((\theta,x)\) pairs, not the joint diffusion model. |
+| **MISSING** | Ability to sample arbitrary conditionals (posterior, likelihood, parameter conditionals) | Only posterior predictive samples are produced. |
+| **MISSING** | Support for function‑valued (infinite‑dimensional) parameters | No handling of functional parameters. |
+| **MISSING** | Handling of missing or unstructured data | No missing‑data logic or irregular time‑series support. |
+| **MISSING** | Experiments on the ecology, epidemiology, and neuroscience simulators described in the paper | Only the Gaussian‑Linear benchmark is used. |
+| **MISSING** | Evaluation protocol (metrics, baseline comparisons, simulation budget) | No comparison to other SBI methods or reporting of simulation counts. |
+| **MISSING** | Hyperparameter settings that match the paper (learning rate, batch size, diffusion schedule, etc.) | Default `sbi` hyperparameters are used; no evidence they match the paper. |
+| **MISSING** | GPU / hardware configuration and training steps (number of epochs, checkpoints) | The script runs on CPU by default and does not expose training steps. |
+| **PARTIAL** | Simulation → training → inference pipeline | The script does simulate data, train a model, and generate samples, but it does not implement the Simformer or its key components. |
+| **INCORRECT** | Core method claim | The README states “Simformer – All‑in‑One Simulation‑Based Inference” but the implementation is a plain NPE, not the Simformer. |
+
+**Conclusion**
+
+All critical aspects of the Simformer paper (architecture, training, tokenization, conditioning, diffusion, evaluation, and experimental breadth) are missing from the provided code. The repository only implements a baseline NPE on a single benchmark, which does not reproduce the paper’s contributions. 
+
+**ALL_OK**: *No – reproduction is incomplete.*
+2026-03-14 16:38:25.363103 
+2026-03-14 16:38:25.363359 Generating refined code...
+2026-03-14 16:40:01.259544   Updated: generated_reproduction.txt
+2026-03-14 16:40:01.259649 
+2026-03-14 16:40:01.259688 --- Iteration 2: Observe & Refine ---
+2026-03-14 16:40:10.213922 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Support for *function‑valued* (infinite‑dimensional) parameters – the tokenizer only handles finite‑dimensional vectors.  
+- Handling of *missing or unstructured data* – no mechanism to mask or impute missing entries.  
+- Ability to work with *observation intervals* instead of point observations.  
+- Explicit *structured attention masks* that encode known simulator dependencies (e.g., conditional independencies).  
+- Extensive *guidance* beyond the simple interval‑based classifier‑free example.  
+- Comparison to baseline SBI methods (NPE, NLE, etc.) as reported in the paper.  
+- Quantitative *evaluation metrics* (e.g., KL‑divergence, RMSE, coverage) used in the paper’s experiments.  
+- Real‑world benchmark datasets (ecology, epidemiology, neuroscience) – only synthetic Gaussian‑Linear and Two‑Moons are provided.  
+- Detailed *hyperparameter settings* (learning rate, batch size, number of diffusion steps, etc.) that match the paper.  
+- Explicit *training schedule* (number of epochs, checkpointing, early stopping) and hardware requirements.  
+
+**INCORRECT**  
+- None identified – the existing components (tokenizer, transformer, VESDE, joint training, conditioning, guided diffusion) are conceptually correct, but they do not cover the full scope of the paper.
+
+**PARTIAL**  
+- **Joint training with random condition masks** – implemented, but the mask distribution is not configurable to match the paper’s random sampling of joint, posterior, likelihood, or two random masks.  
+- **Arbitrary conditioning** – the code can fix tokens during reverse diffusion, but it does not support conditioning on arbitrary subsets of parameters or data beyond the simple posterior/likelihood cases.  
+- **Guided diffusion** – only a minimal interval‑based classifier‑free guidance is shown; the paper discusses more elaborate guidance strategies.  
+- **Attention mask support** – the transformer accepts an optional mask, but the repository does not provide utilities to construct masks that reflect simulator dependency graphs.  
+- **Tokenizer for function‑valued parameters** – the tokenizer can embed a shared identifier and a random Fourier embedding, but this is not fully integrated or demonstrated.  
+
+**Conclusion**  
+The repository implements the core idea of a transformer‑based diffusion model trained on the joint distribution with random conditioning, but it lacks many of the key features and experimental details presented in the paper.  
+
+**ALL_OK**: *No – reproduction is incomplete.*
+2026-03-14 16:40:10.214119 
+2026-03-14 16:40:10.214242 Generating refined code...
+2026-03-14 16:41:42.093039   Updated: generated_reproduction.txt
+2026-03-14 16:41:42.093154 
+2026-03-14 16:41:42.093199 --- Iteration 3: Observe & Refine ---

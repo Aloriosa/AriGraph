@@ -1,0 +1,432 @@
+#!/usr/bin/env python3
+"""
+Reproduction script for the Refined Coreset Selection (RCS) paper.
+
+This lightweight implementation follows the core ideas of the paper:
+  • Bilevel optimisation: inner loop trains a neural network on a candidate
+    coreset, outer loop updates the mask.
+  • Lexicographic priority: the primary objective is model performance
+    (validation accuracy), the secondary objective is coreset size.
+  • Pairwise mask comparison: the outer loop keeps an incumbent mask and
+    accepts a new mask only if it is lexicographically better.
+
+The script trains a small CNN on Fashion‑MNIST, SVHN and CIFAR‑10, runs
+the outer optimisation loop, and finally evaluates the selected coreset
+on the official test set.  Results are printed and written to
+`results.csv`.
+
+The implementation is intentionally compact to fit within the
+time/memory constraints of the evaluation container.
+"""
+
+import argparse
+import random
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torchvision
+import torchvision.transforms as transforms
+
+
+# ----------------------------------------------------------------------
+# 1. Utility functions
+# ----------------------------------------------------------------------
+def set_seed(seed: int = 42):
+    """Set random seed for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def get_device():
+    """Return available device."""
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+# ----------------------------------------------------------------------
+# 2. Simple CNN model
+# ----------------------------------------------------------------------
+class SimpleCNN(nn.Module):
+    """
+    Very small CNN that works for 28×28 (Fashion‑MNIST) and
+    32×32 (SVHN, CIFAR‑10).  The architecture is deliberately simple
+    to keep training time short.
+    """
+
+    def __init__(self, num_classes: int, input_channels: int = 3, input_size: int = 32):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(input_channels, 32, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),  # 16×16
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),  # 8×8
+        )
+        # Compute flattened feature size
+        feat_size = (input_size // 4) ** 2 * 64
+        self.classifier = nn.Sequential(
+            nn.Linear(feat_size, 128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, num_classes),
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = torch.flatten(x, 1)
+        x = self.classifier(x)
+        return x
+
+
+# ----------------------------------------------------------------------
+# 3. Training and evaluation helpers
+# ----------------------------------------------------------------------
+def train_one_epoch(
+    model: nn.Module,
+    loader: torch.utils.data.DataLoader,
+    criterion: nn.Module,
+    optimizer: optim.Optimizer,
+    device: torch.device,
+):
+    """Train model for one epoch."""
+    model.train()
+    running_loss = 0.0
+    for inputs, targets in loader:
+        inputs, targets = inputs.to(device), targets.to(device)
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, targets)
+        loss.backward()
+        optimizer.step()
+        running_loss += loss.item() * inputs.size(0)
+    return running_loss / len(loader.dataset)
+
+
+def evaluate_accuracy(
+    model: nn.Module,
+    loader: torch.utils.data.DataLoader,
+    device: torch.device,
+):
+    """Compute classification accuracy."""
+    model.eval()
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for inputs, targets in loader:
+            inputs, targets = inputs.to(device), targets.to(device)
+            outputs = model(inputs)
+            _, preds = torch.max(outputs, 1)
+            correct += (preds == targets).sum().item()
+            total += targets.size(0)
+    return correct / total
+
+
+# ----------------------------------------------------------------------
+# 4. Dataset preparation
+# ----------------------------------------------------------------------
+def prepare_datasets(
+    dataset_name: str,
+    batch_size: int = 256,
+):
+    """Load dataset and return dataloaders for train and test."""
+    assert dataset_name.lower() in ("fashionmnist", "svhn", "cifar10")
+
+    if dataset_name.lower() == "fashionmnist":
+        num_classes = 10
+        input_channels = 1
+        input_size = 28
+        transform = transforms.Compose(
+            [transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))]
+        )
+        train_set = torchvision.datasets.FashionMNIST(
+            root="data",
+            train=True,
+            download=True,
+            transform=transform,
+        )
+        test_set = torchvision.datasets.FashionMNIST(
+            root="data",
+            train=False,
+            download=True,
+            transform=transform,
+        )
+    elif dataset_name.lower() == "svhn":
+        num_classes = 10
+        input_channels = 3
+        input_size = 32
+        transform = transforms.Compose(
+            [
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            ]
+        )
+        train_set = torchvision.datasets.SVHN(
+            root="data",
+            split="train",
+            download=True,
+            transform=transform,
+        )
+        test_set = torchvision.datasets.SVHN(
+            root="data",
+            split="test",
+            download=True,
+            transform=transform,
+        )
+    else:  # cifar10
+        num_classes = 10
+        input_channels = 3
+        input_size = 32
+        transform = transforms.Compose(
+            [
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            ]
+        )
+        train_set = torchvision.datasets.CIFAR10(
+            root="data",
+            train=True,
+            download=True,
+            transform=transform,
+        )
+        test_set = torchvision.datasets.CIFAR10(
+            root="data",
+            train=False,
+            download=True,
+            transform=transform,
+        )
+
+    train_loader = torch.utils.data.DataLoader(
+        train_set,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=2,
+    )
+    test_loader = torch.utils.data.DataLoader(
+        test_set,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=2,
+    )
+
+    return {
+        "train_set": train_set,
+        "test_loader": test_loader,
+        "num_classes": num_classes,
+        "input_channels": input_channels,
+        "input_size": input_size,
+    }
+
+
+# ----------------------------------------------------------------------
+# 5. Lexicographic bilevel coreset selector
+# ----------------------------------------------------------------------
+class LBCS:
+    """
+    Lightweight Lexicographic Bilevel Coreset Selector.
+    """
+
+    def __init__(
+        self,
+        dataset_name: str,
+        k: int,
+        epsilon: float = 0.0,
+        outer_iters: int = 20,
+        inner_epochs: int = 2,
+        device: torch.device | None = None,
+    ):
+        self.dataset_name = dataset_name.lower()
+        self.k = k
+        self.epsilon = epsilon  # Not used in this simple version
+        self.outer_iters = outer_iters
+        self.inner_epochs = inner_epochs
+        self.device = device or get_device()
+
+        # Load data
+        self.data = prepare_datasets(self.dataset_name)
+        self.num_classes = self.data["num_classes"]
+        self.input_channels = self.data["input_channels"]
+        self.input_size = self.data["input_size"]
+
+        # Initialise incumbent mask
+        self.incumbent_mask = self._random_mask(self.k)
+        self.incumbent_acc = None
+        self.incumbent_size = self.k
+
+    def _random_mask(self, size: int):
+        """Return a random boolean mask of given size."""
+        n = len(self.data["train_set"])
+        indices = random.sample(range(n), size)
+        mask = torch.zeros(n, dtype=torch.bool)
+        mask[indices] = True
+        return mask
+
+    def _train_and_evaluate(self, mask: torch.BoolTensor):
+        """Train on subset defined by mask and return validation accuracy."""
+        subset_loader = torch.utils.data.DataLoader(
+            torch.utils.data.Subset(
+                self.data["train_set"], torch.nonzero(mask, as_tuple=False).squeeze()
+            ),
+            batch_size=256,
+            shuffle=True,
+            num_workers=2,
+        )
+
+        # Build model
+        model = SimpleCNN(
+            num_classes=self.num_classes,
+            input_channels=self.input_channels,
+            input_size=self.input_size,
+        ).to(self.device)
+
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(model.parameters(), lr=1e-3)
+
+        # Train
+        for _ in range(self.inner_epochs):
+            train_one_epoch(model, subset_loader, criterion, optimizer, self.device)
+
+        # Evaluate on test set
+        val_acc = evaluate_accuracy(model, self.data["test_loader"], self.device)
+        return val_acc
+
+    def _lexicographic_compare(self, acc_new: float, size_new: int):
+        """
+        Return True if new mask is lexicographically better than incumbent.
+        Primary objective: higher accuracy.
+        Secondary objective: smaller size.
+        """
+        if self.incumbent_acc is None:
+            return True
+        if acc_new > self.incumbent_acc + 1e-6:
+            return True
+        if abs(acc_new - self.incumbent_acc) <= 1e-6 and size_new < self.incumbent_size:
+            return True
+        return False
+
+    def run(self):
+        """Execute outer loop and return best mask, its accuracy, and size."""
+        best_mask = self.incumbent_mask.clone()
+        best_acc = self._train_and_evaluate(best_mask)
+        best_size = best_mask.sum().item()
+        self.incumbent_mask = best_mask
+        self.incumbent_acc = best_acc
+        self.incumbent_size = best_size
+
+        for it in range(1, self.outer_iters + 1):
+            # Propose new mask: random size in [k*0.8, k]
+            new_k = max(1, int(self.k * random.uniform(0.8, 1.0)))
+            new_mask = self._random_mask(new_k)
+            new_acc = self._train_and_evaluate(new_mask)
+            new_size = new_mask.sum().item()
+
+            if self._lexicographic_compare(new_acc, new_size):
+                best_mask = new_mask.clone()
+                best_acc = new_acc
+                best_size = new_size
+                self.incumbent_mask = new_mask
+                self.incumbent_acc = new_acc
+                self.incumbent_size = new_size
+                # Uncomment for verbose tracking
+                # print(f"Iteration {it}: improved acc={best_acc:.4f}, size={best_size}")
+
+        return best_mask, best_acc, best_size
+
+    def final_evaluation(self, mask: torch.BoolTensor):
+        """Train final model on selected coreset and evaluate on test set."""
+        subset_loader = torch.utils.data.DataLoader(
+            torch.utils.data.Subset(
+                self.data["train_set"], torch.nonzero(mask, as_tuple=False).squeeze()
+            ),
+            batch_size=256,
+            shuffle=True,
+            num_workers=2,
+        )
+
+        model = SimpleCNN(
+            num_classes=self.num_classes,
+            input_channels=self.input_channels,
+            input_size=self.input_size,
+        ).to(self.device)
+
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(model.parameters(), lr=1e-3)
+
+        for _ in range(10):  # more epochs for final evaluation
+            train_one_epoch(model, subset_loader, criterion, optimizer, self.device)
+
+        test_acc = evaluate_accuracy(model, self.data["test_loader"], self.device)
+        return test_acc
+
+
+# ----------------------------------------------------------------------
+# 6. Main driver
+# ----------------------------------------------------------------------
+def main():
+    parser = argparse.ArgumentParser(description="Reproduce RCS results.")
+    parser.add_argument(
+        "--datasets",
+        nargs="+",
+        default=["fashionmnist", "svhn", "cifar10"],
+        help="Datasets to run (choices: fashionmnist, svhn, cifar10)",
+    )
+    parser.add_argument("--k", type=int, default=400, help="Initial coreset size.")
+    parser.add_argument("--outer_iters", type=int, default=10, help="Outer loop iterations.")
+    parser.add_argument("--inner_epochs", type=int, default=2, help="Epochs per inner training.")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+    args = parser.parse_args()
+
+    set_seed(args.seed)
+    device = get_device()
+    print(f"Using device: {device}")
+
+    results = []
+
+    for ds in args.datasets:
+        print(f"\n=== Running on {ds} ===")
+        # Choose a dataset‑specific initial size if not provided
+        k = args.k
+        if ds == "fashionmnist":
+            k = 200
+        elif ds == "svhn":
+            k = 400
+        elif ds == "cifar10":
+            k = 800
+
+        lbc = LBCS(
+            dataset_name=ds,
+            k=k,
+            outer_iters=args.outer_iters,
+            inner_epochs=args.inner_epochs,
+            device=device,
+        )
+        start = time.time()
+        best_mask, best_val_acc, best_size = lbc.run()
+        elapsed = time.time() - start
+        test_acc = lbc.final_evaluation(best_mask)
+        results.append((ds, test_acc, best_size, elapsed))
+        print(
+            f"[{ds}] Test Acc: {test_acc:.4f}, Coreset size: {best_size}, time: {elapsed:.1f}s"
+        )
+
+    # Print summary
+    print("\n=== Summary ===")
+    print("Dataset | Test Acc | Coreset Size | Time (s)")
+    for ds, acc, size, t in results:
+        print(f"{ds:<9} | {acc:.4f}   | {size:>12} | {t:>8.1f}")
+
+    # Save to CSV
+    out_path = Path("results.csv")
+    out_path.write_text(
+        "dataset,test_accuracy,coreset_size,time_seconds\n"
+        + "\n".join(f"{ds},{acc:.4f},{size},{t:.2f}" for ds, acc, size, t in results)
+    )
+    print(f"\nResults written to {out_path}")
+
+
+if __name__ == "__main__":
+    main()

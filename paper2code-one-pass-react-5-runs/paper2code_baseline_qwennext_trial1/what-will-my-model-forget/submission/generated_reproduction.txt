@@ -1,0 +1,33 @@
+# Forecasting Forgotten Examples in Language Model Refinement (Reproduction)
+
+This repository contains a minimal, self‑contained implementation that
+demonstrates the core ideas of the paper
+*“What Will My Model Forget? Forecasting Forgotten Examples in Language Model Refinement”*.
+It implements three forecasting strategies:
+
+1. **Threshold** – predicts forgetting based on the empirical forgetting
+   frequency of each upstream example.
+2. **Logit‑based** – learns a linear mapping from the change of logits of
+   an online example to the logits of an upstream example.
+3. **Representation‑based** – learns a small MLP that predicts forgetting
+   from the inner product of learned representations of the two examples.
+
+The code uses a **tiny** pre‑trained language model (`facebook/bart-base`) and
+a toy dataset of 100 sentence pairs.  The training loop simulates a
+refinement step by randomly changing the target of an online example
+and then checks whether the upstream example is forgotten (i.e.,
+its prediction changes from correct to incorrect).
+
+Running `./reproduce.sh` will:
+
+1. Install the required Python packages (`torch`, `transformers`,
+   `sklearn`, `datasets`).
+2. Download the toy dataset and the tiny BART model.
+3. Train the three forecasting models.
+4. Evaluate them on a held‑out test set and print the F1 score.
+
+All code is written in pure Python and requires a single NVIDIA GPU
+(though CPU execution is also supported).  The repository size is
+well below 1 GB and contains only source code and a small dataset.
+
+## Project Structure

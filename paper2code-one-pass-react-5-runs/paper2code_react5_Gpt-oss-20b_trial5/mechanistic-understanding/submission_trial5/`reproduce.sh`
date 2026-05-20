@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Ensure reproducibility
+export PYTHONUNBUFFERED=1
+export PYTHONHASHSEED=42
+export PYTHONPATH=$PWD/src
+
+# Install packages
+pip install -q -r requirements.txt
+
+# 1. Train linear toxicity probe
+python src/train_probe.py
+
+# 2. Extract toxic value vectors
+python src/extract_vectors.py
+
+# 3. Generate pairwise toxic/non‑toxic dataset
+python src/generate_pairs.py
+
+# 4. Fine‑tune with DPO
+python src/train_dpo.py
+
+# 5. Evaluate aligned model
+python src/evaluate.py --mode aligned
+
+# 6. Re‑align (un‑align) by scaling key vectors
+python src/unalign.py
+
+# 7. Final evaluation of un‑aligned model
+python src/evaluate.py --mode unaligned
+
+echo "Reproduction finished. Results saved to results.json"

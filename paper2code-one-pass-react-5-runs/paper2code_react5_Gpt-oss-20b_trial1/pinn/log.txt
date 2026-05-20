@@ -1,0 +1,223 @@
+2026-03-14 12:02:29.039849 ======================================================================
+2026-03-14 12:02:29.039986 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 12:02:29.040049 ======================================================================
+2026-03-14 12:02:29.040113 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/pinn/paper.md
+2026-03-14 12:02:29.040150 Log path: paper2code_react5_Gpt-oss-20b_trial1/pinn
+2026-03-14 12:02:29.040185 Model: Openai/Gpt-oss-20b
+2026-03-14 12:02:29.040221 Max iterations: 5
+2026-03-14 12:02:29.040289 Run reproduce.sh: False
+2026-03-14 12:02:29.040326 Run LLM paper check: True
+2026-03-14 12:02:29.040358 
+2026-03-14 12:02:29.040389 Loading paper...
+2026-03-14 12:02:29.040823 Paper length: 124168 chars (using 124168 for prompt)
+2026-03-14 12:02:29.040897 
+2026-03-14 12:02:29.061093 --- Iteration 0: Initial generation ---
+2026-03-14 12:03:23.351346   Created: README.md
+2026-03-14 12:03:23.351473   Created: reproduce.sh
+2026-03-14 12:03:23.351556   Created: src/pinn_convex.py
+2026-03-14 12:03:23.351597 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial1/pinn/submission (3 files)
+2026-03-14 12:03:23.351633 
+2026-03-14 12:03:23.351668 --- Iteration 1: Observe & Refine ---
+2026-03-14 12:04:03.622108 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Implementation of the novel NysNewton‑CG optimizer.  
+- Experiments on the wave PDE and the reaction ODE (only the convection PDE is implemented).  
+- Experiments with the other MLP widths (50, 200, 400).  
+- Baseline comparisons with Adam alone and L‑BFGS alone.  
+- Hyper‑parameter tuning for the Adam learning rate (grid search over \{10⁻⁵,…,10⁻¹\}).  
+- Experiments with the other Adam→L‑BFGS switch points (11 k and 31 k iterations).  
+- Running the training with 5 random seeds (currently only a single seed is used).  
+- Running the full 41 000 iterations (currently only 3 000 iterations are performed).  
+- Setting the L‑BFGS memory size to 100 (default memory is used).  
+
+**INCORRECT**  
+- Adam learning rate is fixed at 1e‑3 instead of being tuned from the paper’s grid.  
+- The Adam→L‑BFGS switch occurs only after 1 000 iterations, whereas the paper tests 1 k, 11 k, and 31 k.  
+- L‑BFGS memory size is left at the default (≈10) instead of 100.  
+- Total training iterations are 3 000 (1 000 Adam + 2 000 L‑BFGS) instead of the paper’s 41 000.  
+
+**PARTIAL**  
+- The core training pipeline (Adam followed by L‑BFGS) is present, but only for a single PDE, a single network width, and a single seed.  
+
+**OK**  
+- Data generation: 10 000 residual points, 257 IC points, 101 BC points.  
+- Loss components (residual, boundary, initial) are correctly implemented.  
+- L2 relative error is computed on a 255 × 100 dense grid.  
+- 3‑layer tanh MLP architecture is used.  
+- PyTorch 2.0 and CUDA are employed.  
+- Results are written to CSV and text files.  
+
+**Conclusion**  
+The repository reproduces only a very small subset of the experiments described in the paper. Significant portions of the experimental protocol, hyper‑parameter settings, and the novel optimizer are missing or incorrectly implemented.
+2026-03-14 12:04:03.622289 
+2026-03-14 12:04:03.622542 Generating refined code...
+2026-03-14 12:05:51.487715   Updated: generated_reproduction.txt
+2026-03-14 12:05:51.487825 
+2026-03-14 12:05:51.487865 --- Iteration 2: Observe & Refine ---
+2026-03-14 12:06:23.615443 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incorrect / Partial Requirements**
+
+| Status | Requirement | Notes |
+|--------|-------------|-------|
+| **MISSING** | Wave PDE experiment | Code only trains the convection PDE. |
+| **MISSING** | Reaction ODE experiment | Code does not implement the reaction PDE. |
+| **MISSING** | NysNewton‑CG (NNCG) optimizer | No implementation or call to NNCG after Adam+L‑BFGS. |
+| **MISSING** | 5 random seeds per configuration | Code uses a single fixed seed. |
+| **MISSING** | 4 MLP widths (50, 100, 200, 400) | Code uses only width 100. |
+| **MISSING** | Adam+L‑BFGS switch at 11 k and 31 k iterations | Code switches only at 1 k. |
+| **MISSING** | Total of 41 k iterations (1 k Adam + 40 k L‑BFGS) | Code runs 1 k Adam + 2 k L‑BFGS (≈3 k). |
+| **MISSING** | L‑BFGS memory size 100 | Code does not set `history_size`. |
+| **MISSING** | Hyperparameter grid search for Adam learning rate | Code uses a fixed 1e‑3. |
+| **MISSING** | Full experimental pipeline (all PDEs, widths, seeds, optimizers) | `reproduce.sh` runs only one script. |
+| **INCORRECT** | L‑BFGS `max_iter` usage | `max_iter=2000` is per LBFGS call, not total iterations. |
+| **INCORRECT** | L‑BFGS line‑search function | `line_search_fn="strong_wolfe"` is correct, but memory size is missing. |
+| **PARTIAL** | Data generation (residual, BC, IC points) | Matches paper counts but only for convection PDE. |
+| **PARTIAL** | Loss formulation | Uses 0.5 mean of squared terms, equivalent to paper’s 1/(2 n) sum. |
+| **PARTIAL** | Evaluation metric (L2RE on dense grid) | Correct, but only for convection PDE. |
+| **OK** | Network architecture (tanh MLP, 3 hidden layers) | Matches paper’s description. |
+| **OK** | Residual, boundary, and initial‑condition loss components | Implemented correctly. |
+| **OK** | Use of PyTorch 2.0, CUDA, deterministic seeds | Matches paper’s environment. |
+| **OK** | Saving loss history to CSV and final L2RE to file | Implemented. |
+
+**Conclusion**
+
+The current code reproduces only a *subset* of the experiments described in the paper (convection PDE, single width, single seed, Adam+L‑BFGS only). It does **not** implement the wave and reaction PDEs, the NNCG optimizer, the full range of hyperparameters, multiple seeds, or the full training schedule. Therefore, the reproduction is incomplete.
+
+**Recommendation**
+
+Implement the missing PDEs, NNCG optimizer, multiple widths, seeds, and the full Adam+L‑BFGS schedule (including 11 k and 31 k switches). Add hyperparameter tuning for Adam learning rate and set L‑BFGS memory size to 100. Update `reproduce.sh` to run all experiments and aggregate results. Once these changes are made, the reproduction will be complete.
+2026-03-14 12:06:23.615665 
+2026-03-14 12:06:23.615797 Generating refined code...
+2026-03-14 12:07:49.171850   Updated: generated_reproduction.txt
+2026-03-14 12:07:49.171934 
+2026-03-14 12:07:49.171985 --- Iteration 3: Observe & Refine ---
+2026-03-14 12:08:06.441693 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Experiments on the wave PDE and the reaction ODE (paper trains on all three).  
+- Five random seeds per configuration (paper reports 5 seeds).  
+- Four network widths `{50, 100, 200, 400}` (paper evaluates all four).  
+- Adam + L‑BFGS switch points at 1 k, 11 k, and 31 k iterations (paper compares all three).  
+- The NysNewton‑CG optimizer run after Adam+L‑BFGS (paper introduces and evaluates it).  
+- Total training budget of 41 k iterations (paper runs 41 k).  
+- L‑BFGS memory size set to 100 (paper specifies memory = 100).  
+- Learning‑rate grid search for Adam over `{1e‑5, 1e‑4, 1e‑3, 1e‑2, 1e‑1}` (paper tunes LR).  
+- Full evaluation pipeline that records loss and L2RE for every seed, width, and switch point.  
+- Output of results for all configurations (paper’s plots/figures).  
+
+**INCORRECT**  
+- Adam learning rate fixed at `1e‑3` instead of being searched.  
+- L‑BFGS memory defaults to 10 in PyTorch; paper requires 100.  
+- L‑BFGS `max_iter` set to 2000; paper uses the remaining iterations of a 41 k budget.  
+- Only 1 k Adam iterations are run; paper tests 1 k, 11 k, and 31 k.  
+- Only one seed is used; paper uses five.  
+- Only one network width (100) is trained; paper trains all four.  
+- Only the convection PDE is implemented; wave and reaction are omitted.  
+- NysNewton‑CG optimizer is not implemented.  
+
+**PARTIAL**  
+- The residual, boundary, and initial‑condition loss terms are correctly defined.  
+- Data generation matches the paper’s point counts (10 k residual, 257 IC, 101 BC).  
+- L2 relative error is computed on a 255 × 100 grid as in the paper.  
+- The training loop uses Adam followed by L‑BFGS with a closure, matching the two‑phase schedule.  
+- The script writes a CSV of iteration‑loss and a text file of final L2RE.  
+- GPU usage is enabled if available.  
+
+**OK**  
+- Three hidden layers with tanh activations.  
+- Use of PyTorch 2.0 and CUDA.  
+- Deterministic seeding for reproducibility (within a single run).  
+- Correct implementation of the convection PDE’s analytical solution.  
+
+**Conclusion**  
+The current code reproduces only a very small subset of the experiments described in the paper. Significant additions and corrections are required to match the paper’s methodology and results.
+2026-03-14 12:08:06.441909 
+2026-03-14 12:08:06.442187 Generating refined code...
+2026-03-14 12:09:42.377036   Updated: generated_reproduction.txt
+2026-03-14 12:09:42.377152 
+2026-03-14 12:09:42.377189 --- Iteration 4: Observe & Refine ---
+2026-03-14 12:09:57.875295 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Experiments on the wave PDE and the reaction ODE (paper trains on all three).  
+- The Adam + L‑BFGS combined optimizer (paper compares Adam, L‑BFGS, and Adam+L‑BFGS).  
+- The novel NysNewton‑CG (NNCG) optimizer introduced in the paper.  
+- Hyper‑parameter sweep over the five Adam learning rates \(\{10^{-5},10^{-4},10^{-3},10^{-2},10^{-1}\}\).  
+- Multiple random seeds (paper uses 5 seeds per setting).  
+- Multiple network widths \(\{50,100,200,400\}\).  
+- Multiple Adam→L‑BFGS switch points (1 k, 11 k, 31 k iterations).  
+- Full training schedule of 41 000 iterations (paper runs all optimizers for 41 000 steps).  
+- Logging of all experiment results (loss curves, L2RE, best learning‑rate selection) to a single CSV.  
+- Baseline runs for Adam alone and L‑BFGS alone (paper reports all three).  
+- The full grid‑based sampling of residual points from a \(255\times100\) interior grid (paper specifies this).  
+
+**INCORRECT**  
+- The residual, boundary, and initial loss terms are computed with a factor 0.5 × mean, which is equivalent to the paper’s \(\frac{1}{2n}\sum\) but the code does not explicitly divide by the number of points; this is fine numerically but the implementation does not match the paper’s notation.  
+- The code uses a fixed Adam learning rate of \(10^{-3}\) and a fixed L‑BFGS max‑iter of 2000, whereas the paper uses a learning‑rate grid and runs L‑BFGS for the remaining iterations after the Adam phase.  
+- The code runs only 1 000 Adam iterations followed by 2 000 L‑BFGS iterations (total 3 000), whereas the paper runs 41 000 iterations in total.  
+
+**PARTIAL**  
+- **Data generation**: Residual points are sampled uniformly from \([0,1]\times[0,2\pi]\) rather than from the specified \(255\times100\) interior grid.  
+- **Network architecture**: Only a single width (100) and a single depth (3 hidden layers) are used; the paper varies widths 50, 100, 200, 400.  
+- **Training pipeline**: Only the Adam → L‑BFGS sequence is implemented; the Adam‑only and L‑BFGS‑only baselines are missing.  
+- **Evaluation**: L2 relative error is computed on a dense \(255\times100\) grid, which matches the paper, but the code does not report the error for each epoch or for each optimizer variant.  
+- **reproduce.sh**: The script only runs `src/pinn_convex.py`, which trains a single experiment; it does not iterate over PDEs, widths, seeds, learning rates, or switch points, nor does it invoke the NysNewton‑CG optimizer.  
+
+**Conclusion**  
+The current repository reproduces only a single, simplified experiment (convection PDE, fixed width, fixed learning rate, Adam → L‑BFGS). It does not cover the full experimental protocol described in the paper.  
+
+**ALL_OK**: *No – the reproduction is incomplete.*
+2026-03-14 12:09:57.875487 
+2026-03-14 12:09:57.875625 Generating refined code...
+2026-03-14 12:11:30.636156   Updated: generated_reproduction.txt
+2026-03-14 12:11:30.636244 
+2026-03-14 12:11:30.636281 --- Iteration 5: Observe & Refine ---
+2026-03-14 12:11:46.654220 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Multiple PDEs (convection, wave, reaction) – the code only implements the convection PDE.  
+- Multiple network widths `{50, 100, 200, 400}` – the code uses a single width of 100.  
+- Multiple random seeds `{0,…,4}` – the code runs a single seed (42).  
+- Grid search over Adam learning rates `{1e‑5, 1e‑4, 1e‑3, 1e‑2, 1e‑1}` – the code uses a fixed `1e‑3`.  
+- Adam→L‑BFGS switch points `{1 k, 11 k, 31 k}` – the code uses a fixed 1 k switch and no alternative schedules.  
+- Full 41 000‑iteration training schedule (Adam + L‑BFGS) – the code uses 1 000 Adam iterations + 2 000 L‑BFGS iterations.  
+- NysNewton‑CG optimizer – not implemented.  
+- Evaluation of L²‑relative error across all seeds and all network widths – the code writes only a single `output.csv` and `l2re.txt`.  
+- Explicit recording of results in a `results.csv` as described in the paper – missing.  
+- Reproducibility script that runs all experiments (different PDEs, widths, seeds, hyper‑parameter sweeps) – `reproduce.sh` only runs one script.  
+- Explicit use of 10 000 residual points sampled from a `255×100` grid (paper) – the code samples residual points uniformly at random in the domain.  
+- Explicit use of 257 IC points and 101 BC points per boundary (paper) – the code uses the same counts but does not sample from the grid; the paper’s grid‑based sampling is not reproduced.  
+- Hardware specification (Titan V GPU, CUDA 11.8) – not mentioned in the code or script.  
+
+**INCORRECT**  
+- None of the implemented components are logically wrong; the main issue is that the implementation does not match the experimental protocol described in the paper.  
+
+**PARTIAL**  
+- The L²‑relative error computation is correct (mean‑based implementation is equivalent to the paper’s formula).  
+- The residual, boundary, and initial loss terms are implemented with the correct structure and weighting.  
+- The evaluation grid (`255×100`) matches the paper.  
+
+**Conclusion**  
+The current repository reproduces only a very small subset of the experiments described in the paper. To achieve full reproducibility, the missing components above must be added.
+2026-03-14 12:11:46.654442 
+2026-03-14 12:11:46.654704 Generating refined code...
+2026-03-14 12:13:18.336719   Updated: generated_reproduction.txt
+2026-03-14 12:13:18.336810 
+2026-03-14 12:13:18.336845 ======================================================================
+2026-03-14 12:13:18.336874 REACT BASELINE COMPLETE
+2026-03-14 12:13:18.336901 ======================================================================
+2026-03-14 12:13:18.336943 Total iterations: 6
+2026-03-14 12:13:18.336970 API tokens: 60095 completion, 299154 prompt
+2026-03-14 12:13:18.336999 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial1/pinn/generated_code_response.txt

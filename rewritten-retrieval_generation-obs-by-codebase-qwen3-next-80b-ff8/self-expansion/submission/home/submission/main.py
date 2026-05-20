@@ -1,0 +1,711 @@
+import os
+import random
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, Subset
+from torchvision import datasets, transforms
+from torchvision.models import vit_b_16, ViT_B_16_Weights
+import pytorch_lightning as pl
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
+from pytorch_lightning.loggers import TensorBoardLogger
+import argparse
+import json
+import csv
+from typing import List, Dict, Tuple
+import logging
+from collections import defaultdict
+from tqdm import tqdm
+import copy
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Set random seeds for reproducibility
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+class RepresentationDescriptor(nn.Module):
+    """
+    Autoencoder-based representation descriptor that detects distribution shifts.
+    Implements the density estimation component from paper_card_0002 and paper_card_0018.
+    """
+    def __init__(self, input_dim, hidden_dim=128, dropout=0.1):
+        super(RepresentationDescriptor, self).__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim//2),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(hidden_dim//2, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, input_dim)
+        )
+        self.register_buffer('mean', torch.zeros(input_dim))
+        self.register_buffer('std', torch.ones(input_dim))
+        self.is_trained = False
+        
+    def forward(self, x):
+        # Normalize input
+        x_norm = (x - self.mean) / (self.std + 1e-8)
+        
+        # Encode and decode
+        encoded = self.encoder(x_norm)
+        decoded = self.decoder(encoded)
+        
+        # Calculate reconstruction error (shift score)
+        reconstruction_error = F.mse_loss(decoded, x_norm, reduction='none').mean(dim=1)
+        
+        return reconstruction_error, encoded
+    
+    def fit(self, data_loader, device, epochs=20, lr=0.001):
+        """Train the autoencoder on feature representations"""
+        optimizer = optim.Adam(self.parameters(), lr=lr)
+        criterion = nn.MSELoss()
+        
+        self.train()
+        for epoch in range(epochs):
+            total_loss = 0
+            for batch in data_loader:
+                # Extract features (we assume this is the output of a transformer layer)
+                if isinstance(batch, tuple):
+                    x, _ = batch
+                else:
+                    x = batch
+                
+                # Move to device
+                x = x.to(device)
+                
+                # Flatten for autoencoder
+                x_flat = x.view(x.size(0), -1)
+                
+                # Normalize using running statistics
+                if not self.is_trained:
+                    self.mean.data = x_flat.mean(dim=0)
+                    self.std.data = x_flat.std(dim=0) + 1e-8
+                
+                x_norm = (x_flat - self.mean) / (self.std + 1e-8)
+                
+                optimizer.zero_grad()
+                encoded = self.encoder(x_norm)
+                decoded = self.decoder(encoded)
+                loss = criterion(decoded, x_norm)
+                loss.backward()
+                optimizer.step()
+                
+                total_loss += loss.item()
+            
+            if epoch % 5 == 0:
+                logger.info(f"RepresentationDescriptor Epoch {epoch+1}/{epochs}, Loss: {total_loss/len(data_loader):.4f}")
+        
+        self.is_trained = True
+        logger.info("RepresentationDescriptor training completed")
+
+class FunctionalAdapter(nn.Module):
+    """
+    Lightweight adapter module for parameter-efficient fine-tuning.
+    Implements the adapter architecture from paper_card_0006 and memory_card_0001.
+    """
+    def __init__(self, input_dim, adapter_dim=64, dropout=0.1):
+        super(FunctionalAdapter, self).__init__()
+        self.down_proj = nn.Linear(input_dim, adapter_dim)
+        self.up_proj = nn.Linear(adapter_dim, input_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.activation = nn.GELU()
+        
+        # Initialize weights (zero initialization for adapter)
+        nn.init.zeros_(self.up_proj.weight)
+        nn.init.zeros_(self.up_proj.bias)
+        nn.init.normal_(self.down_proj.weight, std=0.02)
+        nn.init.zeros_(self.down_proj.bias)
+        
+    def forward(self, x):
+        residual = x
+        x = self.down_proj(x)
+        x = self.activation(x)
+        x = self.dropout(x)
+        x = self.up_proj(x)
+        return x + residual  # Residual connection
+
+class ExpandableWeightingRouter(nn.Module):
+    """
+    Dynamic weighting router that combines adapter outputs.
+    Implements the weighted mixture router from paper_card_0004 and memory_card_0085.
+    """
+    def __init__(self, input_dim, max_adapters=5):
+        super(ExpandableWeightingRouter, self).__init__()
+        self.input_dim = input_dim
+        self.max_adapters = max_adapters
+        self.adapter_weights = nn.Parameter(torch.ones(max_adapters) / max_adapters)
+        self.adapter_mask = torch.ones(max_adapters, dtype=torch.bool)
+        
+    def forward(self, adapter_outputs, adapter_indices=None):
+        """
+        adapter_outputs: List of tensors from different adapters
+        adapter_indices: List of adapter indices to use (for dynamic selection)
+        """
+        if adapter_indices is None:
+            # Use all adapters
+            adapter_indices = list(range(len(adapter_outputs)))
+        
+        # Filter valid adapters
+        valid_outputs = []
+        for idx in adapter_indices:
+            if idx < len(adapter_outputs) and self.adapter_mask[idx]:
+                valid_outputs.append(adapter_outputs[idx])
+        
+        if len(valid_outputs) == 0:
+            return torch.zeros_like(adapter_outputs[0]) if adapter_outputs else torch.zeros(1)
+        
+        # Apply softmax weights to combine outputs
+        weights = F.softmax(self.adapter_weights[adapter_indices], dim=0)
+        
+        # Weighted combination
+        weighted_sum = torch.zeros_like(valid_outputs[0])
+        for i, output in enumerate(valid_outputs):
+            weighted_sum += weights[i] * output
+            
+        return weighted_sum
+    
+    def add_adapter(self):
+        """Add a new adapter slot"""
+        if self.adapter_mask.sum() < self.max_adapters:
+            # Find first empty slot
+            for i in range(self.max_adapters):
+                if not self.adapter_mask[i]:
+                    self.adapter_mask[i] = True
+                    self.adapter_weights.data[i] = 1.0 / (self.adapter_mask.sum())
+                    return i
+        return -1  # No space available
+
+class SEMAModel(nn.Module):
+    """
+    Main SEMA model implementing the self-expanding modular adaptation.
+    Combines pre-trained ViT with modular adapters, representation descriptors, and routing.
+    """
+    def __init__(self, num_classes=100, adapter_dim=64, expansion_threshold=0.5, 
+                 reuse_threshold=0.8, max_adapters_per_layer=3, model_name="vit_b/16"):
+        super(SEMAModel, self).__init__()
+        
+        self.num_classes = num_classes
+        self.adapter_dim = adapter_dim
+        self.expansion_threshold = expansion_threshold
+        self.reuse_threshold = reuse_threshold
+        self.max_adapters_per_layer = max_adapters_per_layer
+        self.model_name = model_name
+        
+        # Load pre-trained ViT
+        if model_name == "vit_b/16":
+            self.vit = vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1)
+        else:
+            raise ValueError(f"Unsupported model: {model_name}")
+        
+        # Remove the classification head
+        self.vit.heads = nn.Identity()
+        
+        # Get ViT layer structure
+        self.transformer_layers = len(self.vit.encoder.layers)
+        
+        # Initialize adapter and representation descriptor structures
+        # Each transformer layer will have its own adapter and representation descriptor
+        self.adapters = nn.ModuleList()  # List of lists: [layer][adapter_idx]
+        self.representation_descriptors = nn.ModuleList()  # List of representation descriptors per layer
+        self.routers = nn.ModuleList()  # List of routers per layer
+        self.adapter_tasks = []  # Track which task each adapter was created for
+        self.adapter_similarity_cache = {}  # Cache of adapter similarities
+        
+        # Initialize for each transformer layer
+        for layer_idx in range(self.transformer_layers):
+            # Get the MLP hidden dimension from the ViT
+            mlp_dim = self.vit.encoder.layers[layer_idx].mlp[0].in_features
+            
+            # Create adapter list for this layer
+            self.adapters.append(nn.ModuleList())
+            
+            # Create representation descriptor for this layer
+            self.representation_descriptors.append(
+                RepresentationDescriptor(input_dim=mlp_dim, hidden_dim=128)
+            )
+            
+            # Create router for this layer
+            self.routers.append(
+                ExpandableWeightingRouter(input_dim=mlp_dim, max_adapters=max_adapters_per_layer)
+            )
+        
+        # Add task-specific classification head
+        self.classifier = nn.Linear(self.vit.encoder.layers[0].mlp[0].in_features, num_classes)
+        
+        # Freeze ViT parameters
+        for param in self.vit.parameters():
+            param.requires_grad = False
+            
+        # Initialize adapter and representation descriptor parameters
+        self._initialize_adapters()
+        
+    def _initialize_adapters(self):
+        """Initialize the first adapter for each layer"""
+        for layer_idx in range(self.transformer_layers):
+            adapter = FunctionalAdapter(
+                input_dim=self.vit.encoder.layers[layer_idx].mlp[0].in_features,
+                adapter_dim=self.adapter_dim
+            )
+            self.adapters[layer_idx].append(adapter)
+            self.adapter_tasks.append(0)  # First adapter is for task 0
+            
+    def forward(self, x, task_id=None):
+        # Extract features using ViT
+        x = self.vit._process_input(x)
+        n = x.shape[0]
+        
+        # Expand the class token
+        batch_class_token = self.vit.class_token.expand(n, -1, -1)
+        x = torch.cat([batch_class_token, x], dim=1)
+        
+        # Add positional encoding
+        x = x + self.vit.encoder.pos_embedding
+        
+        # Process through transformer layers
+        for layer_idx in range(self.transformer_layers):
+            # Get the transformer layer
+            transformer_layer = self.vit.encoder.layers[layer_idx]
+            
+            # Extract the output before MLP (for representation descriptor)
+            # This is the output of the attention mechanism
+            x_norm1 = transformer_layer.norm1(x)
+            x_attn = transformer_layer.attention(x_norm1, x_norm1, x_norm1)[0]
+            x = x + x_attn
+            
+            # Use representation descriptor to detect distribution shift
+            # We'll use the output of the attention layer as the feature representation
+            feature_representation = x.mean(dim=1)  # Global average pooling
+            
+            # Calculate representation descriptor score
+            shift_score, _ = self.representation_descriptors[layer_idx](feature_representation)
+            avg_shift_score = shift_score.mean().item()
+            
+            # Check if we need to add a new adapter
+            # We only add adapters during training (task_id is not None)
+            # and if we're at the beginning of a new task
+            if task_id is not None and avg_shift_score > self.expansion_threshold:
+                # Check if we already have max adapters
+                if len(self.adapters[layer_idx]) < self.max_adapters_per_layer:
+                    # Create new adapter
+                    new_adapter = FunctionalAdapter(
+                        input_dim=self.vit.encoder.layers[layer_idx].mlp[0].in_features,
+                        adapter_dim=self.adapter_dim
+                    )
+                    self.adapters[layer_idx].append(new_adapter)
+                    self.adapter_tasks.append(task_id)
+                    logger.info(f"Added new adapter at layer {layer_idx} for task {task_id}")
+                    
+                    # Expand the router
+                    self.routers[layer_idx].add_adapter()
+            
+            # Get adapter outputs
+            adapter_outputs = []
+            adapter_indices = []
+            
+            # For each adapter in this layer, compute output
+            for adapter_idx, adapter in enumerate(self.adapters[layer_idx]):
+                # Apply adapter
+                adapter_output = adapter(x)
+                adapter_outputs.append(adapter_output)
+                adapter_indices.append(adapter_idx)
+            
+            # Use router to combine adapter outputs
+            if len(adapter_outputs) > 0:
+                x = self.routers[layer_idx](adapter_outputs, adapter_indices)
+            
+            # Pass through MLP
+            x_norm2 = transformer_layer.norm2(x)
+            x_mlp = transformer_layer.mlp(x_norm2)
+            x = x + x_mlp
+        
+        # Extract class token
+        x = x[:, 0]
+        
+        # Apply classifier
+        logits = self.classifier(x)
+        return logits
+    
+    def get_adapter_similarity(self, layer_idx, adapter_idx, task_id):
+        """Calculate similarity between adapter and task representation"""
+        if (layer_idx, adapter_idx, task_id) in self.adapter_similarity_cache:
+            return self.adapter_similarity_cache[(layer_idx, adapter_idx, task_id)]
+        
+        # For simplicity, we'll use a placeholder similarity calculation
+        # In practice, this would be based on feature distribution similarity
+        # Here we'll use a simple heuristic: adapters created for similar tasks have higher similarity
+        adapter_task = self.adapter_tasks[adapter_idx]
+        similarity = 1.0 if adapter_task == task_id else 0.5
+        
+        self.adapter_similarity_cache[(layer_idx, adapter_idx, task_id)] = similarity
+        return similarity
+    
+    def get_adapter_reuse_decision(self, layer_idx, task_id):
+        """Decide whether to reuse existing adapters or create new ones"""
+        # Check if any existing adapter has high similarity to current task
+        for adapter_idx in range(len(self.adapters[layer_idx])):
+            similarity = self.get_adapter_similarity(layer_idx, adapter_idx, task_id)
+            if similarity > self.reuse_threshold:
+                return adapter_idx  # Return index of adapter to reuse
+        return -1  # No suitable adapter found, need to create new one
+    
+    def update_representation_descriptors(self, data_loader, device, task_id):
+        """Update representation descriptors for all layers"""
+        logger.info(f"Updating representation descriptors for task {task_id}")
+        
+        # Collect features from each layer
+        layer_features = [[] for _ in range(self.transformer_layers)]
+        
+        self.eval()
+        with torch.no_grad():
+            for batch in tqdm(data_loader, desc="Collecting features"):
+                if isinstance(batch, tuple):
+                    x, _ = batch
+                else:
+                    x = batch
+                
+                x = x.to(device)
+                
+                # Forward pass to get features
+                x = self.vit._process_input(x)
+                n = x.shape[0]
+                batch_class_token = self.vit.class_token.expand(n, -1, -1)
+                x = torch.cat([batch_class_token, x], dim=1)
+                x = x + self.vit.encoder.pos_embedding
+                
+                for layer_idx in range(self.transformer_layers):
+                    transformer_layer = self.vit.encoder.layers[layer_idx]
+                    
+                    # Attention
+                    x_norm1 = transformer_layer.norm1(x)
+                    x_attn = transformer_layer.attention(x_norm1, x_norm1, x_norm1)[0]
+                    x = x + x_attn
+                    
+                    # Extract features for representation descriptor
+                    feature_representation = x.mean(dim=1)  # Global average pooling
+                    layer_features[layer_idx].append(feature_representation.cpu())
+                    
+                    # MLP
+                    x_norm2 = transformer_layer.norm2(x)
+                    x_mlp = transformer_layer.mlp(x_norm2)
+                    x = x + x_mlp
+                
+                # Clear cache to avoid memory issues
+                del x, x_attn, x_mlp
+        
+        # Train representation descriptors
+        for layer_idx in range(self.transformer_layers):
+            if len(layer_features[layer_idx]) > 0:
+                # Concatenate all features
+                all_features = torch.cat(layer_features[layer_idx], dim=0)
+                
+                # Create a simple data loader
+                dataset = torch.utils.data.TensorDataset(all_features)
+                loader = DataLoader(dataset, batch_size=64, shuffle=True)
+                
+                # Train the representation descriptor
+                self.representation_descriptors[layer_idx].fit(loader, device, epochs=20)
+    
+    def get_total_parameters(self):
+        """Calculate total trainable parameters"""
+        total_params = 0
+        for name, param in self.named_parameters():
+            if param.requires_grad:
+                total_params += param.numel()
+        return total_params
+    
+    def get_adapter_count(self):
+        """Get total number of adapters"""
+        return sum(len(adapter_list) for adapter_list in self.adapters)
+    
+    def get_expansion_count(self):
+        """Get number of adapter expansions"""
+        return sum(len(adapter_list) - 1 for adapter_list in self.adapters)  # Subtract 1 for initial adapter
+
+def create_split_cifar100_datasets(num_tasks=10, seed=42):
+    """Create Split CIFAR-100 datasets for continual learning"""
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))
+    ])
+    
+    # Load full CIFAR-100 dataset
+    train_dataset = datasets.CIFAR100(root='data', train=True, download=True, transform=transform)
+    test_dataset = datasets.CIFAR100(root='data', train=False, download=True, transform=transform)
+    
+    # Get class labels
+    class_labels = train_dataset.targets
+    unique_classes = list(set(class_labels))
+    
+    # Shuffle classes for fair splitting
+    np.random.seed(seed)
+    np.random.shuffle(unique_classes)
+    
+    # Split classes into tasks
+    classes_per_task = len(unique_classes) // num_tasks
+    task_classes = []
+    
+    for i in range(num_tasks):
+        start_idx = i * classes_per_task
+        end_idx = start_idx + classes_per_task
+        task_classes.append(unique_classes[start_idx:end_idx])
+    
+    # Create task-specific datasets
+    train_task_datasets = []
+    test_task_datasets = []
+    
+    for task_idx, classes in enumerate(task_classes):
+        # Create masks for training data
+        train_mask = np.isin(class_labels, classes)
+        train_indices = np.where(train_mask)[0]
+        
+        # Create masks for test data
+        test_mask = np.isin(test_dataset.targets, classes)
+        test_indices = np.where(test_mask)[0]
+        
+        # Create subsets
+        train_subset = Subset(train_dataset, train_indices)
+        test_subset = Subset(test_dataset, test_indices)
+        
+        train_task_datasets.append(train_subset)
+        test_task_datasets.append(test_subset)
+    
+    return train_task_datasets, test_task_datasets, task_classes
+
+def train_sema_model(model, train_datasets, test_datasets, num_tasks, device, 
+                    learning_rate=0.001, batch_size=64, num_epochs=20, weight_decay=0.01):
+    """Train SEMA model on sequential tasks"""
+    
+    # Create optimizer for adapter parameters only
+    adapter_params = []
+    rd_params = []
+    router_params = []
+    
+    for name, param in model.named_parameters():
+        if 'adapters' in name or 'adapter' in name:
+            adapter_params.append(param)
+        elif 'representation_descriptors' in name:
+            rd_params.append(param)
+        elif 'routers' in name:
+            router_params.append(param)
+    
+    # Create optimizer with different learning rates for different components
+    optimizer = optim.Adam([
+        {'params': adapter_params, 'lr': learning_rate},
+        {'params': rd_params, 'lr': learning_rate},
+        {'params': router_params, 'lr': learning_rate}
+    ], weight_decay=weight_decay, betas=(0.9, 0.999))
+    
+    criterion = nn.CrossEntropyLoss()
+    
+    # Track metrics
+    metrics = {
+        'task_accuracy': [],
+        'forgetting': [],
+        'total_parameters': [],
+        'expansion_count': [],
+        'average_accuracy': []
+    }
+    
+    # Training loop over tasks
+    for task_id in range(num_tasks):
+        logger.info(f"=== Training on Task {task_id + 1}/{num_tasks} ===")
+        
+        # Get data for current task
+        train_loader = DataLoader(train_datasets[task_id], batch_size=batch_size, shuffle=True, num_workers=4)
+        test_loader = DataLoader(test_datasets[task_id], batch_size=batch_size, shuffle=False, num_workers=4)
+        
+        # Update representation descriptors before training
+        model.update_representation_descriptors(train_loader, device, task_id)
+        
+        # Training for current task
+        model.train()
+        for epoch in range(num_epochs):
+            total_loss = 0
+            correct = 0
+            total = 0
+            
+            for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}"):
+                x, y = batch
+                x, y = x.to(device), y.to(device)
+                
+                optimizer.zero_grad()
+                
+                # Forward pass
+                logits = model(x, task_id=task_id)
+                loss = criterion(logits, y)
+                
+                # Backward pass
+                loss.backward()
+                
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
+                optimizer.step()
+                
+                total_loss += loss.item()
+                _, predicted = torch.max(logits.data, 1)
+                total += y.size(0)
+                correct += (predicted == y).sum().item()
+            
+            avg_loss = total_loss / len(train_loader)
+            accuracy = 100 * correct / total
+            logger.info(f"Task {task_id+1}, Epoch {epoch+1}/{num_epochs}, Loss: {avg_loss:.4f}, Accuracy: {accuracy:.2f}%")
+        
+        # Evaluate on all tasks so far
+        task_accuracies = []
+        for eval_task_id in range(task_id + 1):
+            test_loader = DataLoader(test_datasets[eval_task_id], batch_size=batch_size, shuffle=False, num_workers=4)
+            model.eval()
+            correct = 0
+            total = 0
+            
+            with torch.no_grad():
+                for batch in test_loader:
+                    x, y = batch
+                    x, y = x.to(device), y.to(device)
+                    logits = model(x, task_id=eval_task_id)
+                    _, predicted = torch.max(logits.data, 1)
+                    total += y.size(0)
+                    correct += (predicted == y).sum().item()
+            
+            accuracy = 100 * correct / total
+            task_accuracies.append(accuracy)
+            logger.info(f"  Task {eval_task_id+1} accuracy: {accuracy:.2f}%")
+        
+        # Calculate forgetting (difference between current accuracy and peak accuracy)
+        if len(metrics['task_accuracy']) > 0:
+            # Get previous peak accuracy for this task
+            prev_peak = max([acc[task_id] for acc in metrics['task_accuracy']])
+            forgetting = prev_peak - task_accuracies[task_id]
+        else:
+            forgetting = 0.0
+        
+        # Calculate average accuracy
+        avg_accuracy = np.mean(task_accuracies)
+        
+        # Record metrics
+        metrics['task_accuracy'].append(task_accuracies)
+        metrics['forgetting'].append(forgetting)
+        metrics['total_parameters'].append(model.get_total_parameters())
+        metrics['expansion_count'].append(model.get_expansion_count())
+        metrics['average_accuracy'].append(avg_accuracy)
+        
+        logger.info(f"Task {task_id+1} - Avg Accuracy: {avg_accuracy:.2f}%, Forgetting: {forgetting:.2f}%, "
+                   f"Params: {model.get_total_parameters()/1e6:.2f}M, Expansions: {model.get_expansion_count()}")
+    
+    return metrics
+
+def main():
+    parser = argparse.ArgumentParser(description='SEMA: Self-Expanding Modular Adaptation')
+    parser.add_argument('--dataset', type=str, default='split_cifar', help='Dataset to use')
+    parser.add_argument('--num_tasks', type=int, default=10, help='Number of tasks')
+    parser.add_argument('--model_type', type=str, default='vit_b/16', help='Model type')
+    parser.add_argument('--adapter_dim', type=int, default=64, help='Adapter dimension')
+    parser.add_argument('--expansion_threshold', type=float, default=0.5, help='Expansion threshold')
+    parser.add_argument('--reuse_threshold', type=float, default=0.8, help='Reuse threshold')
+    parser.add_argument('--max_adapters_per_layer', type=int, default=3, help='Max adapters per layer')
+    parser.add_argument('--learning_rate', type=float, default=0.001, help='Learning rate')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
+    parser.add_argument('--num_epochs', type=int, default=20, help='Number of epochs per task')
+    parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    parser.add_argument('--output_dir', type=str, default='results', help='Output directory')
+    
+    args = parser.parse_args()
+    
+    # Set seed
+    set_seed(args.seed)
+    
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Set device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    logger.info(f"Using device: {device}")
+    
+    # Create datasets
+    if args.dataset == 'split_cifar':
+        train_datasets, test_datasets, task_classes = create_split_cifar100_datasets(
+            num_tasks=args.num_tasks, seed=args.seed
+        )
+        num_classes = 100  # CIFAR-100 has 100 classes total
+    else:
+        raise ValueError(f"Dataset {args.dataset} not supported")
+    
+    # Initialize model
+    model = SEMAModel(
+        num_classes=num_classes,
+        adapter_dim=args.adapter_dim,
+        expansion_threshold=args.expansion_threshold,
+        reuse_threshold=args.reuse_threshold,
+        max_adapters_per_layer=args.max_adapters_per_layer,
+        model_name=args.model_type
+    )
+    
+    model.to(device)
+    
+    # Train model
+    logger.info("Starting SEMA training...")
+    metrics = train_sema_model(
+        model=model,
+        train_datasets=train_datasets,
+        test_datasets=test_datasets,
+        num_tasks=args.num_tasks,
+        device=device,
+        learning_rate=args.learning_rate,
+        batch_size=args.batch_size,
+        num_epochs=args.num_epochs,
+        weight_decay=args.weight_decay
+    )
+    
+    # Save model
+    model_path = os.path.join(args.output_dir, 'sema_model.pth')
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'adapter_tasks': model.adapter_tasks,
+        'metrics': metrics,
+        'args': vars(args)
+    }, model_path)
+    
+    # Save metrics to CSV
+    csv_path = os.path.join(args.output_dir, 'evaluation_results.csv')
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        # Write header
+        header = ['task_id', 'average_accuracy', 'final_accuracy', 'forgetting', 
+                 'total_parameters', 'expansion_count']
+        writer.writerow(header)
+        
+        # Write data
+        for task_id in range(args.num_tasks):
+            row = [
+                task_id + 1,
+                metrics['average_accuracy'][task_id],
+                metrics['task_accuracy'][task_id][task_id],  # Final accuracy for this task
+                metrics['forgetting'][task_id],
+                metrics['total_parameters'][task_id],
+                metrics['expansion_count'][task_id]
+            ]
+            writer.writerow(row)
+    
+    logger.info(f"Training completed. Results saved to {args.output_dir}")
+
+if __name__ == "__main__":
+    main()

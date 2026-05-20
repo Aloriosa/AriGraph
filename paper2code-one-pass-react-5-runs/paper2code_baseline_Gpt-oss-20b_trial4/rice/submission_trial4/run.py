@@ -1,0 +1,313 @@
+#!/usr/bin/env python
+"""
+Minimal implementation of RICE for reproduction purposes.
+Trains a baseline PPO, a mask network (explanation), and refines the policy with RND and mixed initial states.
+"""
+
+import os
+import random
+import numpy as np
+import torch
+import gymnasium
+from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.evaluation import evaluate_policy
+from torch import nn, optim
+from tqdm import tqdm
+
+# --------------------------------------------------------------------------- #
+# Utility functions
+# --------------------------------------------------------------------------- #
+def set_seed(seed: int = 42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+def discounted_returns(rewards, gamma=0.99):
+    """Compute discounted returns for a single episode."""
+    returns = []
+    R = 0.0
+    for r in reversed(rewards):
+        R = r + gamma * R
+        returns.insert(0, R)
+    return returns
+
+# --------------------------------------------------------------------------- #
+# Mask network (explanation)
+# --------------------------------------------------------------------------- #
+class MaskNetwork(nn.Module):
+    """Simple MLP that outputs a probability of masking the action."""
+    def __init__(self, state_dim, hidden_dim=64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+# --------------------------------------------------------------------------- #
+# RND components
+# --------------------------------------------------------------------------- #
+class MLP(nn.Module):
+    """Generic MLP used for target and predictor networks in RND."""
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+class RNDWrapper(gymnasium.Wrapper):
+    """Gym wrapper that adds an intrinsic RND bonus to the reward."""
+    def __init__(self, env, target_net, predictor_net, lam, device=None):
+        super().__init__(env)
+        self.target_net = target_net
+        self.predictor_net = predictor_net
+        self.lam = lam
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.optimizer = optim.Adam(self.predictor_net.parameters(), lr=1e-3)
+        self.target_net.to(self.device)
+        self.predictor_net.to(self.device)
+
+    def step(self, action):
+        next_state, reward, done, info = self.env.step(action)
+        state_tensor = torch.tensor(next_state, dtype=torch.float32).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            target = self.target_net(state_tensor)
+        pred = self.predictor_net(state_tensor)
+        bonus = torch.mean((target - pred) ** 2).item()
+        # Train predictor
+        loss = torch.mean((target - pred) ** 2)
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+        return next_state, reward + self.lam * bonus, done, info
+
+# --------------------------------------------------------------------------- #
+# Environment wrappers
+# --------------------------------------------------------------------------- #
+class MixedInitialStateWrapper(gymnasium.Wrapper):
+    """
+    Wrapper that, with probability p, resets the environment to a state
+    sampled from a buffer of critical states.
+    """
+    def __init__(self, env, buffer, p):
+        super().__init__(env)
+        self.buffer = buffer
+        self.p = p
+
+    def reset(self, seed=None, options=None):
+        if self.buffer and random.random() < self.p:
+            state = random.choice(self.buffer)
+            # Try to set the underlying environment state
+            try:
+                self.env.unwrapped.state = state
+            except Exception:
+                # Some envs expose state differently; ignore if not possible
+                pass
+        return super().reset(seed=seed, options=options)
+
+# --------------------------------------------------------------------------- #
+# Callback for collecting critical states
+# --------------------------------------------------------------------------- #
+class BufferCallback(BaseCallback):
+    """
+    Callback that records the state with the highest mask probability
+    in each episode and stores it in a buffer.
+    """
+    def __init__(self, buffer, mask_net, device=None, verbose=0):
+        super().__init__(verbose)
+        self.buffer = buffer
+        self.mask_net = mask_net
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.episode_states = []
+        self.episode_mask_probs = []
+
+    def _on_step(self):
+        obs = self.locals["obs"]
+        if isinstance(obs, np.ndarray):
+            state = torch.tensor(obs, dtype=torch.float32).to(self.device)
+        else:
+            state = torch.tensor(obs.data.numpy(), dtype=torch.float32).to(self.device)
+        with torch.no_grad():
+            mask_prob = self.mask_net(state).item()
+        self.episode_states.append(obs)
+        self.episode_mask_probs.append(mask_prob)
+        return True
+
+    def _on_rollout_end(self):
+        if self.episode_states:
+            idx = int(np.argmax(self.episode_mask_probs))
+            self.buffer.append(self.episode_states[idx])
+        self.episode_states = []
+        self.episode_mask_probs = []
+
+# --------------------------------------------------------------------------- #
+# Training functions
+# --------------------------------------------------------------------------- #
+def train_base_policy(env_id: str, timesteps: int, seed: int = 42):
+    set_seed(seed)
+    env = DummyVecEnv([lambda: gymnasium.make(env_id)])
+    model = PPO(
+        "MlpPolicy",
+        env,
+        verbose=0,
+        seed=seed,
+        learning_rate=3e-4,
+        n_steps=2048,
+        batch_size=64,
+        n_epochs=10,
+        gamma=0.99,
+    )
+    model.learn(total_timesteps=timesteps)
+    os.makedirs("models", exist_ok=True)
+    model_path = os.path.join("models", "base_policy.zip")
+    model.save(model_path)
+    print(f"Base policy saved to {model_path}")
+    return model_path
+
+def train_mask_network(base_policy_path: str, env_id: str, timesteps: int, alpha: float = 1e-4, seed: int = 42):
+    set_seed(seed)
+    # Load base policy
+    base_policy = PPO.load(base_policy_path)
+    env = gymnasium.make(env_id)
+    state_dim = env.observation_space.shape[0]
+    mask_net = MaskNetwork(state_dim).to("cuda" if torch.cuda.is_available() else "cpu")
+    optimizer = optim.Adam(mask_net.parameters(), lr=1e-3)
+    gamma = 0.99
+
+    steps_done = 0
+    epoch = 0
+    pbar = tqdm(total=timesteps, desc="Mask training")
+    while steps_done < timesteps:
+        obs, _ = env.reset()
+        done = False
+        episode = []
+        rewards = []
+        mask_probs = []
+        while not done and steps_done < timesteps:
+            state = torch.tensor(obs, dtype=torch.float32).to(mask_net.device)
+            mask_prob = mask_net(state).item()
+            mask = torch.bernoulli(torch.tensor(mask_prob)).item()
+            if mask == 0:
+                action, _ = base_policy.predict(obs, deterministic=True)
+            else:
+                action = env.action_space.sample()
+            next_obs, reward, done, info = env.step(action)
+            reward_prime = reward + alpha * mask
+            episode.append((state, mask_prob, mask, reward_prime))
+            rewards.append(reward_prime)
+            mask_probs.append(mask_prob)
+            obs = next_obs
+            steps_done += 1
+            pbar.update(1)
+
+        # Compute returns
+        returns = discounted_returns(rewards, gamma=gamma)
+        # Update mask network
+        loss = 0.0
+        for (state, mask_prob, mask, R) in episode:
+            logp = torch.log(torch.tensor(mask_prob + 1e-8, device=mask_net.device)) if mask == 1 else torch.log(torch.tensor(1 - mask_prob + 1e-8, device=mask_net.device))
+            loss -= logp * R
+        loss = loss / len(episode)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        epoch += 1
+
+    pbar.close()
+    os.makedirs("models", exist_ok=True)
+    mask_path = os.path.join("models", "mask_net.pt")
+    torch.save(mask_net.state_dict(), mask_path)
+    print(f"Mask network saved to {mask_path}")
+    return mask_path
+
+def refine_policy(base_policy_path: str, mask_path: str, env_id: str,
+                  timesteps: int, p: float = 0.25, lam: float = 0.01,
+                  seed: int = 42):
+    set_seed(seed)
+    base_policy = PPO.load(base_policy_path)
+    mask_net = MaskNetwork(gymnasium.make(env_id).observation_space.shape[0]).to("cuda" if torch.cuda.is_available() else "cpu")
+    mask_net.load_state_dict(torch.load(mask_path, map_location=mask_net.device))
+    mask_net.eval()
+
+    # Buffer for critical states
+    buffer = []
+
+    # Build environment with RND and mixed initial states
+    env = gymnasium.make(env_id)
+    state_dim = env.observation_space.shape[0]
+    target_net = MLP(state_dim, 64, 32).to("cuda" if torch.cuda.is_available() else "cpu")
+    predictor_net = MLP(state_dim, 64, 32).to("cuda" if torch.cuda.is_available() else "cpu")
+    rnd_env = RNDWrapper(env, target_net, predictor_net, lam)
+    mixed_env = MixedInitialStateWrapper(rnd_env, buffer, p)
+
+    env_vec = DummyVecEnv([lambda: mixed_env])
+
+    # Callback to collect critical states
+    callback = BufferCallback(buffer, mask_net)
+
+    # Train refined policy
+    model = PPO(
+        "MlpPolicy",
+        env_vec,
+        verbose=0,
+        seed=seed,
+        learning_rate=3e-4,
+        n_steps=2048,
+        batch_size=64,
+        n_epochs=10,
+        gamma=0.99,
+    )
+    model.learn(total_timesteps=timesteps, callback=callback)
+    os.makedirs("models", exist_ok=True)
+    refined_path = os.path.join("models", "refined_policy.zip")
+    model.save(refined_path)
+    print(f"Refined policy saved to {refined_path}")
+    return refined_path
+
+def evaluate_policy_path(policy_path: str, env_id: str, episodes: int = 20, seed: int = 42):
+    set_seed(seed)
+    env = gymnasium.make(env_id)
+    model = PPO.load(policy_path)
+    mean_reward, std_reward = evaluate_policy(
+        model, env, n_eval_episodes=episodes, deterministic=True, return_episode_rewards=False
+    )
+    print(f"Mean reward: {mean_reward:.2f} ± {std_reward:.2f}")
+    return mean_reward, std_reward
+
+# --------------------------------------------------------------------------- #
+# Main execution
+# --------------------------------------------------------------------------- #
+if __name__ == "__main__":
+    ENV_ID = "HalfCheetah-v3"      # Change to any Gymnasium env you like
+    BASE_TIMESTEPS = 200_000
+    MASK_TIMESTEPS = 50_000
+    REFINE_TIMESTEPS = 200_000
+    ALPHA = 1e-4
+    P = 0.25          # Probability of resetting to a critical state
+    LAMBDA = 0.01     # Intrinsic reward weight
+
+    print("=== Training base policy ===")
+    base_path = train_base_policy(ENV_ID, BASE_TIMESTEPS)
+
+    print("\n=== Training mask network ===")
+    mask_path = train_mask_network(base_path, ENV_ID, MASK_TIMESTEPS, alpha=ALPHA)
+
+    print("\n=== Refining policy ===")
+    refined_path = refine_policy(base_path, mask_path, ENV_ID, REFINE_TIMESTEPS, p=P, lam=LAMBDA)
+
+    print("\n=== Evaluation ===")
+    evaluate_policy_path(refined_path, ENV_ID)

@@ -1,0 +1,181 @@
+2026-03-14 19:32:32.121794 ======================================================================
+2026-03-14 19:32:32.121976 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 19:32:32.122021 ======================================================================
+2026-03-14 19:32:32.122055 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/cram/paper.md
+2026-03-14 19:32:32.122085 Log path: paper2code_react5_Gpt-oss-20b_trial5/cram
+2026-03-14 19:32:32.122114 Model: Openai/Gpt-oss-20b
+2026-03-14 19:32:32.122142 Max iterations: 5
+2026-03-14 19:32:32.122174 Run reproduce.sh: False
+2026-03-14 19:32:32.122206 Run LLM paper check: True
+2026-03-14 19:32:32.122234 
+2026-03-14 19:32:32.122275 Loading paper...
+2026-03-14 19:32:32.122469 Paper length: 59824 chars (using 59824 for prompt)
+2026-03-14 19:32:32.122506 
+2026-03-14 19:32:32.142064 --- Iteration 0: Initial generation ---
+2026-03-16 23:38:55.686505 Trial number: 5
+2026-03-16 23:38:55.686646 ======================================================================
+2026-03-16 23:38:55.686694 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-16 23:38:55.686749 ======================================================================
+2026-03-16 23:38:55.686788 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/cram/paper.md
+2026-03-16 23:38:55.686826 Log path: paper2code_react5_Gpt-oss-20b_trial5/cram
+2026-03-16 23:38:55.686860 Model: Openai/Gpt-oss-20b
+2026-03-16 23:38:55.686896 Max iterations: 5
+2026-03-16 23:38:55.686949 Run reproduce.sh: False
+2026-03-16 23:38:55.687001 Run LLM paper check: True
+2026-03-16 23:38:55.687035 
+2026-03-16 23:38:55.687069 Loading paper...
+2026-03-16 23:38:55.687280 Paper length: 59824 chars (using 59824 for prompt)
+2026-03-16 23:38:55.687336 
+2026-03-16 23:38:55.706516 --- Iteration 0: Initial generation ---
+2026-03-16 23:39:53.443079   Created: README.md
+2026-03-16 23:39:53.443214   Created: requirements.txt
+2026-03-16 23:39:53.443300   Created: compress.py
+2026-03-16 23:39:53.443366   Created: reproduce.sh
+2026-03-16 23:39:53.443410 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial5/cram/submission_trial5 (4 files)
+2026-03-16 23:39:53.443481 
+2026-03-16 23:39:53.443522 --- Iteration 1: Observe & Refine ---
+2026-03-16 23:40:58.128492 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing from the paper’s reproduction**
+
+- **Multiple memory vectors** – the code only supports a single `[mem]` vector (`k=1`).  
+- **Decoding Capacity metric** – no implementation of the longest length `L` for which accuracy > threshold.  
+- **Token‑Gain metric** – the paper defines it as the difference in *correctly predicted tokens*, not the product of accuracy and length.  
+- **Baseline evaluation** – the baseline should be the LM generating from scratch (no `[mem]`), but the code starts from the first token of the original sequence.  
+- **Cross‑entropy bits per token** – the paper reports bits‑per‑token; the code only reports raw loss difference.  
+- **Scaling experiments** – no experiments across different model sizes or numbers of `[mem]` vectors.  
+- **Dataset usage** – the paper evaluates on many texts; the code uses a single hard‑coded sentence.  
+
+**Partially implemented / incorrect**
+
+- **Token‑Gain calculation** – computed as `len(rec_tokens)*acc - len(base_tokens)*base_acc`, which is not the definition in the paper.  
+- **Info‑Gain calculation** – uses loss difference but does not convert to bits per token.  
+- **Baseline logic** – starts from the first token of the original text, not from an empty context.  
+- **Reconstruction sampling** – uses stochastic top‑k sampling; the paper uses teacher‑forcing for evaluation.  
+- **Dummy token id** – uses `mem_id = 0`; if token 0 is a real token this corrupts the sequence.  
+- **No checkpointing or saving of the learned `[mem]` vectors**.  
+
+**Correct / OK**
+
+- Core method: per‑sample optimization of a trainable memory vector with a frozen LLM.  
+- Cross‑entropy loss and teacher‑forcing during training.  
+- Frozen model parameters.  
+- GPU detection and usage.  
+- Seed setting for reproducibility.  
+- Basic token‑level accuracy metric.  
+- Basic baseline generation (though incorrect).  
+- Basic info‑gain (loss difference).  
+- Basic script to run experiments for multiple lengths.  
+- Basic CSV output of results.  
+- Installation and environment setup via `reproduce.sh`.  
+
+**Summary**
+
+The code implements the high‑level idea of the paper but omits several key metrics, baseline definitions, and scaling experiments. It also contains incorrect implementations of token‑gain, info‑gain, and baseline evaluation. To fully reproduce the paper’s results, the above missing items and incorrect parts need to be addressed.
+2026-03-16 23:40:58.128752 
+2026-03-16 23:40:58.129039 Generating refined code...
+2026-03-16 23:41:50.299298   Updated: README.md
+2026-03-16 23:41:50.299425   Updated: data/snippets.txt
+2026-03-16 23:41:50.299514   Updated: compress.py
+2026-03-16 23:41:50.299594   Updated: reproduce.sh
+2026-03-16 23:41:50.299693   Updated: requirements.txt
+2026-03-16 23:41:50.299786   Updated: .gitignore
+2026-03-16 23:41:50.299845 
+2026-03-16 23:41:50.299886 --- Iteration 2: Observe & Refine ---
+2026-03-16 23:42:31.319597 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incorrect / Partial items**
+
+| Status | Requirement from paper | Reason |
+|--------|------------------------|--------|
+| **MISSING** | **Decoding Capacity metric** (max tokens `L` with accuracy > threshold) | Code never computes or reports a decoding‑capacity value. |
+| **MISSING** | **Accuracy threshold** (e.g., 0.99) used to define decoding capacity | No threshold is defined or used. |
+| **MISSING** | **Scaling with number of memory vectors (`k`)** | `mem_k` is accepted as an argument but experiments only use `k=1`; no systematic scaling study is performed. |
+| **PARTIAL** | **Token‑level accuracy baseline** | Baseline accuracy is computed, but the paper’s definition of “token gain” is the *difference in correctly predicted tokens*, not the *difference in accuracy*. The code computes `token_gain` as the difference in *accuracy* multiplied by `(length-1)`, which is equivalent but not explicitly stated. |
+| **PARTIAL** | **Cross‑entropy on the sequence without conditioning** | The baseline cross‑entropy is computed, but the paper emphasizes the *cross‑entropy loss on the sequence without any conditioning* as a key metric. The code uses the standard next‑token loss, which is the same, but the terminology and explicit reporting are missing. |
+| **PARTIAL** | **Teacher‑forcing evaluation** | The code performs teacher‑forcing for both baseline and memory‑conditioned runs, but the paper also discusses decoding with the memory vectors only (no teacher‑forcing). This is not implemented. |
+| **INCORRECT** | **Token gain definition** | The paper defines token gain as the *additional number of tokens correctly decoded* due to the memory vector. The code calculates it as `acc_mem * (length-1) - acc_base * (length-1)`, which is mathematically equivalent but not the most direct implementation; it may mislead readers. |
+| **INCORRECT** | **Cross‑entropy units** | The code converts the loss to bits per token (`loss / log(2)`), which is correct, but the paper’s metric is “bits per token” for the *sequence without conditioning*. The code reports this as `info_gain_bits_per_token`, but the baseline loss is not explicitly labeled as “without conditioning.” |
+| **MISSING** | **Evaluation on multiple domains / random word sequences** | The paper claims consistency across natural text and random word sequences, but the code only uses a small synthetic dataset of five English sentences. |
+| **MISSING** | **Hardware / training steps** | The paper mentions experiments on large models (e.g., Llama‑3.2‑1B) and a large number of optimization steps per sample. The reproduction uses GPT‑2 small, 200–300 epochs per sample, which is not comparable. |
+| **MISSING** | **Reproducibility script** | `reproduce.sh` runs only a few lengths with a single memory vector and does not reproduce the full experimental protocol (e.g., varying `k`, different models, longer sequences). |
+
+**Conclusion**
+
+The reproduction implements the core idea of per‑sample optimization of trainable memory vectors and basic metrics (accuracy, cross‑entropy). However, it lacks several key aspects required to fully reproduce the paper’s results:
+
+1. Decoding capacity and threshold definition.
+2. Systematic scaling with the number of memory vectors.
+3. Evaluation on diverse domains and longer sequences.
+4. Full teacher‑forcing vs. free‑generation comparison.
+5. Use of a large‑scale LLM as in the paper.
+
+**Recommendation**
+
+Add the missing metrics, run experiments with varying `k`, use a larger model (or at least a larger GPT‑2 variant), and evaluate on both natural and random text to match the paper’s claims. Once these are addressed, the reproduction will be complete.
+2026-03-16 23:42:31.319804 
+2026-03-16 23:42:31.319949 Generating refined code...
+2026-03-16 23:43:19.427628   Updated: compress.py
+2026-03-16 23:43:19.427773   Updated: reproduce.sh
+2026-03-16 23:43:19.427879   Updated: requirements.txt
+2026-03-16 23:43:19.427949   Updated: data/snippets.txt
+2026-03-16 23:43:19.428031   Updated: README.md
+2026-03-16 23:43:19.428077 
+2026-03-16 23:43:19.428120 --- Iteration 3: Observe & Refine ---
+2026-03-16 23:44:22.067577 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incomplete / Incorrect Elements**
+
+| Category | Requirement from Paper | Status in Code | Notes |
+|----------|------------------------|----------------|-------|
+| **MISSING** | Decoding Capacity metric (max tokens with teacher‑forcing accuracy > threshold, e.g., 0.99) | Not implemented | The paper defines this as a key metric; the script never computes it. |
+| **MISSING** | Threshold for decoding capacity (e.g., 0.99 accuracy) | Not implemented | Needed to determine capacity. |
+| **MISSING** | Dataset of random word sequences (in addition to natural text) | Not included | Paper claims consistency across natural and random sequences. |
+| **MISSING** | Use of a large LLM (Llama‑3.2‑1B or similar) | Uses GPT‑2‑medium | The reproduction uses a much smaller model; results will not match the paper’s compression ratios. |
+| **MISSING** | Baseline comparison with other compression methods (e.g., AutoCompressors, 500xCompressor) | Not implemented | Paper contrasts its method against existing approaches. |
+| **PARTIAL** | Cross‑entropy loss on the sequence without conditioning | Implemented as `loss_base` | OK, but the code does not explicitly report it as “cross‑entropy loss on the sequence without any conditioning” in the output. |
+| **PARTIAL** | Token Gain metric | Implemented (`token_gain = correct_mem - correct_base`) | OK, but not used to compute decoding capacity. |
+| **PARTIAL** | Information Gain (reduction in cross‑entropy bits per token) | Implemented (`info_gain = loss_base - loss_mem`) | OK. |
+| **PARTIAL** | Free‑generation accuracy | Implemented (`free_acc`) | OK. |
+| **PARTIAL** | Hyperparameters (learning rate, epochs) | Present but not tied to paper’s reported values | The paper does not specify exact hyperparameters; the chosen values are arbitrary. |
+| **PARTIAL** | Data preprocessing (tokenization, truncation) | Implemented | OK. |
+| **PARTIAL** | Evaluation protocol (teacher‑forcing vs. free generation) | Implemented | OK. |
+| **PARTIAL** | Experimental setup (hardware, training steps, checkpoints) | Not fully documented | `reproduce.sh` installs dependencies and runs experiments, but does not specify GPU count or checkpoint saving. |
+| **OK** | Core method: per‑sample optimization of trainable `[mem]` vectors with a frozen LLM | Implemented | The main algorithm is faithfully reproduced. |
+| **OK** | Training procedure (cross‑entropy loss, Adam optimizer) | Implemented | Matches the paper’s description. |
+| **OK** | Teacher‑forcing accuracy calculation | Implemented | Uses the same logic as the paper. |
+| **OK** | Free‑generation accuracy calculation | Implemented | Uses greedy sampling with top‑k. |
+| **OK** | Token gain and information gain metrics | Implemented | Computed and logged. |
+| **OK** | Data loading from file or fallback text | Implemented | Simple dataset of 5 sentences. |
+| **OK** | Hyperparameter defaults (lr, epochs) | Implemented | Though arbitrary, they are present. |
+| **OK** | Reproducibility script (`reproduce.sh`) | Implemented | Installs dependencies and runs experiments. |
+
+**Summary**
+
+The reproduction code implements the core per‑sample optimization and the main metrics (teacher‑forcing accuracy, free‑generation accuracy, token gain, information gain). However, it **does not** compute the *decoding capacity* metric or apply the 0.99 accuracy threshold, nor does it use the large LLMs or random‑sequence datasets referenced in the paper. Consequently, the reproduction cannot verify the paper’s reported compression limits or compare against other methods.
+
+**Recommendation**
+
+Add a routine to compute decoding capacity (search over increasing lengths until accuracy falls below the threshold), include random‑sequence data, and optionally run the experiments on a larger LLM (e.g., Llama‑3.2‑1B) to match the paper’s experimental conditions. Once these are added, the reproduction will be complete.
+2026-03-16 23:44:22.067802 
+2026-03-16 23:44:22.067937 Generating refined code...
+2026-03-16 23:45:33.103094   Updated: README.md
+2026-03-16 23:45:33.103286   Updated: compress.py
+2026-03-16 23:45:33.103377   Updated: reproduce.sh
+2026-03-16 23:45:33.103449   Updated: requirements.txt
+2026-03-16 23:45:33.103517   Updated: data/snippets.txt
+2026-03-16 23:45:33.103578 
+2026-03-16 23:45:33.103633 --- Iteration 4: Observe & Refine ---
+2026-03-16 23:47:57.452627 All checks passed. Stopping refinement.
+2026-03-16 23:47:57.452803 ======================================================================
+2026-03-16 23:47:57.452852 REACT BASELINE COMPLETE
+2026-03-16 23:47:57.452892 ======================================================================
+2026-03-16 23:47:57.452931 Total iterations: 5
+2026-03-16 23:47:57.452968 API tokens: 63160 completion, 103271 prompt
+2026-03-16 23:47:57.453020 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial5/cram/generated_code_response.txt

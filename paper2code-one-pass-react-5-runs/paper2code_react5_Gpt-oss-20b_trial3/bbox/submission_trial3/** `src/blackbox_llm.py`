@@ -1,0 +1,38 @@
+"""
+Black‑box language model wrapper.
+Uses GPT‑2 (medium) as the proposal generator.
+"""
+
+import torch
+from transformers import GPT2LMHeadModel, GPT2TokenizerFast
+
+class BlackBoxLLM:
+    def __init__(self, model_name="gpt2-medium", device="cuda"):
+        self.device = device
+        self.tokenizer = GPT2TokenizerFast.from_pretrained(model_name)
+        self.model = GPT2LMHeadModel.from_pretrained(model_name).to(device)
+        self.model.eval()
+
+    def generate(self, prompt, k=3, max_length=64, temperature=1.0, top_k=50):
+        """
+        Generate `k` candidate completions for the given prompt.
+        Returns a list of strings.
+        """
+        input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.device)
+        with torch.no_grad():
+            outputs = self.model.generate(
+                input_ids,
+                max_new_tokens=max_length,
+                temperature=temperature,
+                top_k=top_k,
+                do_sample=True,
+                num_return_sequences=k,
+                pad_token_id=self.tokenizer.eos_token_id,
+            )
+        # decode and strip prompt
+        completions = []
+        for out in outputs:
+            text = self.tokenizer.decode(out, skip_special_tokens=True)
+            # remove the prompt part
+            completions.append(text[len(prompt):].strip())
+        return completions

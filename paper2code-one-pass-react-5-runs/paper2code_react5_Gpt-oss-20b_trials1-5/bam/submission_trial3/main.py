@@ -1,0 +1,474 @@
+#!/usr/bin/env python3
+"""
+BaM implementation and reproduction script.
+
+This script implements:
+
+* The Batch‑and‑Match (BaM) algorithm from the paper.
+* A baseline ADVI implementation (Adam + ELBO).
+* A baseline Gaussian Score‑Matching (GSM) implementation.
+* A small synthetic Gaussian target experiment.
+
+All iterations and metrics are written to a CSV file.
+"""
+
+import argparse
+import csv
+import os
+import sys
+from typing import Tuple
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import optax
+from tqdm import tqdm
+
+
+# --------------------------------------------------------------------------- #
+# Utility helpers
+# --------------------------------------------------------------------------- #
+def _sqrtm_symm(mat: jnp.ndarray) -> jnp.ndarray:
+    """Square root of a symmetric positive‑definite matrix."""
+    eigvals, eigvecs = jnp.linalg.eigh(mat)
+    # Numerical stability: clip small negative eigenvalues
+    eigvals = jnp.maximum(eigvals, 0.0)
+    return eigvecs @ jnp.diag(jnp.sqrt(eigvals)) @ eigvecs.T
+
+
+def _logdet_symm(mat: jnp.ndarray) -> float:
+    """Log determinant of a symmetric positive‑definite matrix."""
+    return float(jnp.sum(jnp.log(jnp.linalg.eigvalsh(mat))))
+
+
+def _gaussian_logpdf(x: jnp.ndarray, mean: jnp.ndarray, cov: jnp.ndarray) -> jnp.ndarray:
+    """Unnormalised log‑density of a multivariate Gaussian."""
+    inv_cov = jnp.linalg.inv(cov)
+    diff = x - mean
+    return -0.5 * jnp.sum(diff @ inv_cov * diff, axis=-1)
+
+
+def _gaussian_score(x: jnp.ndarray, mean: jnp.ndarray, cov: jnp.ndarray) -> jnp.ndarray:
+    """Score (gradient of log‑density) of a Gaussian."""
+    inv_cov = jnp.linalg.inv(cov)
+    # (mean - x) @ inv_cov → (B, D)
+    return (mean - x) @ inv_cov
+
+
+def kl_forward(q_mu, q_cov, p_mu, p_cov):
+    """KL(q || p) for Gaussians."""
+    inv_p = jnp.linalg.inv(p_cov)
+    diff = q_mu - p_mu
+    term1 = jnp.trace(inv_p @ q_cov)
+    term2 = diff @ inv_p @ diff
+    term3 = _logdet_symm(p_cov) - _logdet_symm(q_cov)
+    D = q_mu.shape[0]
+    return 0.5 * (term1 + term2 - D + term3)
+
+
+def kl_reverse(p_mu, p_cov, q_mu, q_cov):
+    """KL(p || q) for Gaussians."""
+    inv_q = jnp.linalg.inv(q_cov)
+    diff = p_mu - q_mu
+    term1 = jnp.trace(inv_q @ p_cov)
+    term2 = diff @ inv_q @ diff
+    term3 = _logdet_symm(q_cov) - _logdet_symm(p_cov)
+    D = p_mu.shape[0]
+    return 0.5 * (term1 + term2 - D + term3)
+
+
+# --------------------------------------------------------------------------- #
+# BaM algorithm
+# --------------------------------------------------------------------------- #
+def baM_step(
+    key: jax.random.PRNGKey,
+    mu: jnp.ndarray,
+    cov: jnp.ndarray,
+    B: int,
+    lam: float,
+    target_mu: jnp.ndarray,
+    target_cov: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    One BaM iteration (batch + match step).
+
+    Parameters
+    ----------
+    key : jax.random.PRNGKey
+        Random key for sampling.
+    mu, cov : jnp.ndarray
+        Current mean and covariance (D,).
+    B : int
+        Batch size.
+    lam : float
+        Inverse regularisation parameter λ_t.
+    target_mu, target_cov : jnp.ndarray
+        Parameters of the (unnormalised) target Gaussian.
+
+    Returns
+    -------
+    mu_next, cov_next : jnp.ndarray
+        Updated mean and covariance.
+    """
+    # 1. Sample B points from current Gaussian (reparameterisation)
+    L = jnp.linalg.cholesky(cov)
+    eps = jax.random.normal(key, shape=(B, mu.shape[0]))
+    z = mu + eps @ L.T  # shape (B, D)
+
+    # 2. Compute target scores
+    g = _gaussian_score(z, target_mu, target_cov)  # (B, D)
+
+    # 3. Batch statistics
+    bar_z = jnp.mean(z, axis=0)  # (D,)
+    diff_z = z - bar_z
+    C = (diff_z.T @ diff_z) / B  # (D, D)
+
+    bar_g = jnp.mean(g, axis=0)  # (D,)
+    diff_g = g - bar_g
+    Gamma = (diff_g.T @ diff_g) / B  # (D, D)
+
+    # 4. Quadratic matrix equation components
+    U = lam * Gamma + (lam / (1 + lam)) * jnp.outer(bar_g, bar_g)
+    V = cov + lam * C + (lam / (1 + lam)) * jnp.outer(mu - bar_z, mu - bar_z)
+
+    # 5. Closed‑form solution for Σ_{t+1}
+    sqrt_term = _sqrtm_symm(jnp.eye(cov.shape[0]) + 4 * U @ V)
+    inv_term = jnp.linalg.inv(jnp.eye(cov.shape[0]) + sqrt_term)
+    cov_next = 2 * V @ inv_term
+
+    # 6. Update mean
+    mu_next = (1 / (1 + lam)) * mu + (lam / (1 + lam)) * (cov_next @ bar_g + bar_z)
+
+    return mu_next, cov_next
+
+
+# --------------------------------------------------------------------------- #
+# GSM algorithm (Modi et al., 2023)
+# --------------------------------------------------------------------------- #
+def gsm_step(
+    key: jax.random.PRNGKey,
+    mu: jnp.ndarray,
+    cov: jnp.ndarray,
+    B: int,
+    target_mu: jnp.ndarray,
+    target_cov: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    One GSM iteration (single‑sample updates averaged over a batch).
+
+    Parameters
+    ----------
+    key : jax.random.PRNGKey
+    mu, cov : jnp.ndarray
+    B : int
+    target_mu, target_cov : jnp.ndarray
+
+    Returns
+    -------
+    mu_next, cov_next : jnp.ndarray
+    """
+    L = jnp.linalg.cholesky(cov)
+    eps = jax.random.normal(key, shape=(B, mu.shape[0]))
+    z = mu + eps @ L.T
+
+    def body(i, acc):
+        zi = z[i]
+        si = _gaussian_score(zi[None], target_mu, target_cov)[0]  # (D,)
+        eps_b = cov @ si - mu + zi
+        rhs = si @ cov @ si + ((mu - zi) @ si) ** 2
+        rho = (-1 + jnp.sqrt(1 + 4 * rhs)) / 2
+        denom = 1 + rho + (mu - zi) @ si
+        Q = jnp.eye(mu.shape[0]) - jnp.outer(mu - zi, si) / denom
+        delta_mu = Q @ eps_b / (1 + rho)
+        mu_new = mu + delta_mu
+        delta_cov = jnp.outer(mu - zi, mu - zi) - jnp.outer(mu_new - zi, mu_new - zi)
+
+        mu_acc, cov_acc = acc
+        return (mu_acc + delta_mu, cov_acc + delta_cov)
+
+    init = (jnp.zeros_like(mu), jnp.zeros_like(cov))
+    mu_acc, cov_acc = jax.lax.fori_loop(0, B, body, init)
+    mu_next = mu + mu_acc / B
+    cov_next = cov + cov_acc / B
+    return mu_next, cov_next
+
+
+# --------------------------------------------------------------------------- #
+# ADVI baseline
+# --------------------------------------------------------------------------- #
+def svi_advi(
+    key: jax.random.PRNGKey,
+    mu: jnp.ndarray,
+    L: jnp.ndarray,
+    B: int,
+    lr: float,
+    target_mu: jnp.ndarray,
+    target_cov: jnp.ndarray,
+    num_iter: int,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    Simple ADVI implementation (Adam + ELBO).
+    """
+    params = {"mu": mu, "L": L}  # L is lower‑triangular Cholesky
+    opt_state = optax.adam(lr).init(params)
+
+    @jax.jit
+    def loss_fn(params, rng):
+        mu_p = params["mu"]
+        L_p = params["L"]
+        eps = jax.random.normal(rng, shape=(B, mu_p.shape[0]))
+        z = mu_p + eps @ L_p.T
+
+        logp = _gaussian_logpdf(z, target_mu, target_cov).mean()
+        # log q: -0.5*sum(eps^2) + logdet(L)
+        logdetL = jnp.sum(jnp.log(jnp.diag(L_p)))
+        logq = -0.5 * jnp.sum(eps ** 2, axis=1).mean() + logdetL
+        elbo = logp - logq
+        return -elbo  # minimise negative ELBO
+
+    @jax.jit
+    def update(params, opt_state, rng):
+        grads = jax.grad(loss_fn)(params, rng)
+        updates, opt_state = optax.adam(lr).update(grads, opt_state, params)
+        params = optax.apply_updates(params, updates)
+        return params, opt_state
+
+    for _ in tqdm(range(num_iter), desc="ADVI", leave=False):
+        key, subkey = jax.random.split(key)
+        params, opt_state = update(params, opt_state, subkey)
+
+    mu_final = params["mu"]
+    cov_final = params["L"] @ params["L"].T
+    return mu_final, cov_final
+
+
+# --------------------------------------------------------------------------- #
+# Experiment driver
+# --------------------------------------------------------------------------- #
+def run_experiment(
+    seed: int,
+    dim: int,
+    target_mu: np.ndarray,
+    target_cov: np.ndarray,
+    iterations: int,
+    batch_size: int,
+    lam: float,
+    advi_iter: int,
+    gsm_iter: int,
+    output: str,
+):
+    """
+    Run BaM, ADVI and GSM on a synthetic Gaussian target.
+    Results are written to *output* CSV.
+    """
+    np.random.seed(seed)
+    key = jax.random.PRNGKey(seed)
+
+    # Initialise variational parameters
+    mu0 = jnp.zeros(dim)
+    cov0 = jnp.eye(dim)
+
+    # Convert target parameters to JAX arrays
+    target_mu = jnp.array(target_mu)
+    target_cov = jnp.array(target_cov)
+
+    rows = []
+
+    # ---------- BaM ----------
+    mu_bam = mu0
+    cov_bam = cov0
+    for t in tqdm(range(iterations), desc="BaM", leave=False):
+        key, subkey = jax.random.split(key)
+        mu_bam, cov_bam = baM_step(
+            subkey,
+            mu_bam,
+            cov_bam,
+            batch_size,
+            lam,
+            target_mu,
+            target_cov,
+        )
+        kl_fwd = kl_forward(mu_bam, cov_bam, target_mu, target_cov)
+        kl_rev = kl_reverse(target_mu, target_cov, mu_bam, cov_bam)
+
+        # Empirical score‑based divergence
+        key, subkey = jax.random.split(key)
+        eps = jax.random.normal(subkey, shape=(100, dim))
+        z = mu_bam + eps @ cov_bam
+        s = _gaussian_score(z, target_mu, target_cov)  # (100, D)
+        inv_cov_bam = jnp.linalg.inv(cov_bam)
+        diff = z - mu_bam
+        grad_q = -diff @ inv_cov_bam.T
+        v = grad_q - s
+        score_div = jnp.mean(jnp.einsum("ik,kl,il->i", v, cov_bam, v))
+
+        rows.append(
+            {
+                "method": "BaM",
+                "iter": t,
+                "kl_forward": float(kl_fwd),
+                "kl_reverse": float(kl_rev),
+                "score_div": float(score_div),
+            }
+        )
+
+    # ---------- ADVI ----------
+    mu_advi, cov_advi = svi_advi(
+        key,
+        mu0,
+        jnp.eye(dim),
+        batch_size,
+        lr=0.01,
+        target_mu=target_mu,
+        target_cov=target_cov,
+        num_iter=advi_iter,
+    )
+    kl_fwd = kl_forward(mu_advi, cov_advi, target_mu, target_cov)
+    kl_rev = kl_reverse(target_mu, target_cov, mu_advi, cov_advi)
+
+    key, subkey = jax.random.split(key)
+    eps = jax.random.normal(subkey, shape=(100, dim))
+    z = mu_advi + eps @ cov_advi
+    s = _gaussian_score(z, target_mu, target_cov)
+    inv_cov_advi = jnp.linalg.inv(cov_advi)
+    diff = z - mu_advi
+    grad_q = -diff @ inv_cov_advi.T
+    v = grad_q - s
+    score_div = jnp.mean(jnp.einsum("ik,kl,il->i", v, cov_advi, v))
+
+    rows.append(
+        {
+            "method": "ADVI",
+            "iter": advi_iter,
+            "kl_forward": float(kl_fwd),
+            "kl_reverse": float(kl_rev),
+            "score_div": float(score_div),
+        }
+    )
+
+    # ---------- GSM ----------
+    mu_gsm = mu0
+    cov_gsm = cov0
+    for t in tqdm(range(gsm_iter), desc="GSM", leave=False):
+        key, subkey = jax.random.split(key)
+        mu_gsm, cov_gsm = gsm_step(
+            subkey,
+            mu_gsm,
+            cov_gsm,
+            batch_size,
+            target_mu,
+            target_cov,
+        )
+        kl_fwd = kl_forward(mu_gsm, cov_gsm, target_mu, target_cov)
+        kl_rev = kl_reverse(target_mu, target_cov, mu_gsm, cov_gsm)
+
+        key, subkey = jax.random.split(key)
+        eps = jax.random.normal(subkey, shape=(100, dim))
+        z = mu_gsm + eps @ cov_gsm
+        s = _gaussian_score(z, target_mu, target_cov)
+        inv_cov_gsm = jnp.linalg.inv(cov_gsm)
+        diff = z - mu_gsm
+        grad_q = -diff @ inv_cov_gsm.T
+        v = grad_q - s
+        score_div = jnp.mean(jnp.einsum("ik,kl,il->i", v, cov_gsm, v))
+
+        rows.append(
+            {
+                "method": "GSM",
+                "iter": t,
+                "kl_forward": float(kl_fwd),
+                "kl_reverse": float(kl_rev),
+                "score_div": float(score_div),
+            }
+        )
+
+    # Write CSV
+    os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
+    with open(output, "w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "method",
+                "iter",
+                "kl_forward",
+                "kl_reverse",
+                "score_div",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"Results written to {output}")
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Reproduce BaM experiments.")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+    parser.add_argument(
+        "--dim",
+        type=int,
+        default=16,
+        help="Dimensionality of the synthetic Gaussian target.",
+    )
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=200,
+        help="Number of BaM iterations.",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=256,
+        help="Batch size for BaM and baselines.",
+    )
+    parser.add_argument(
+        "--lambda_reg",
+        type=float,
+        default=1.0,
+        help="Regularisation parameter λ in BaM.",
+    )
+    parser.add_argument(
+        "--advi_iter",
+        type=int,
+        default=200,
+        help="Number of ADVI iterations.",
+    )
+    parser.add_argument(
+        "--gsm_iter",
+        type=int,
+        default=200,
+        help="Number of GSM iterations.",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default="results.csv",
+        help="Output CSV file.",
+    )
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    # Random synthetic Gaussian target
+    rng = np.random.default_rng(args.seed)
+    target_mu = rng.normal(size=args.dim)
+    A = rng.normal(size=(args.dim, args.dim))
+    target_cov = A @ A.T + np.eye(args.dim) * 0.1  # ensure PD
+
+    run_experiment(
+        seed=args.seed,
+        dim=args.dim,
+        target_mu=target_mu,
+        target_cov=target_cov,
+        iterations=args.iterations,
+        batch_size=args.batch_size,
+        lam=args.lambda_reg,
+        advi_iter=args.advi_iter,
+        gsm_iter=args.gsm_iter,
+        output=args.output,
+    )

@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 1. Install system dependencies
+apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    git \
+    ffmpeg \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# 3. Install Python dependencies
+python3 -m pip install --upgrade pip
+pip install -r requirements.txt
+
+# 4. Create output directories
+mkdir -p outputs/generations outputs/eval
+
+# 5. Download a minimal 10‑shot target dataset (subset of FFHQ)
+#    We use the HuggingFace `datasets` library to load a tiny subset.
+python - <<'PYCODE'
+from datasets import load_dataset
+
+# Load the first 10 images from the FFHQ dataset
+ds = load_dataset("huggingface/ffhq-dataset", split="train[:10%]")  # small subset
+ds.save_to_disk("datasets/ffhq_10shot")
+print("Target 10‑shot dataset saved.")
+PYCODE
+
+# 6. Train the LoRA adapter with similarity‑guided + adversarial noise
+python src/train.py \
+    --source_model "CompVis/stable-diffusion-v1-5" \
+    --target_dataset "datasets/ffhq_10shot" \
+    --output_dir "outputs" \
+    --train_steps 300 \
+    --batch_size 4 \
+    --learning_rate 5e-5 \
+    --gamma 5.0 \
+    --pgd_steps 10 \
+    --pgd_lr 0.02
+
+# 7. Generate images
+python src/eval.py \
+    --model_path "outputs/model_adapter.bin" \
+    --output_dir "outputs/generations" \
+    --num_samples 200
+
+# 8. Compute metrics
+python - <<'PYCODE'
+from PIL import Image
+import torch
+import lpips
+import os
+import numpy as np
+from torch_fidelity import calculate_metrics
+
+# Load generated images
+gen_dir = "outputs/generations"
+gen_images = [os.path.join(gen_dir, f) for f in os.listdir(gen_dir) if f.endswith('.png')]
+gen_tensors = torch.stack([torch.from_numpy(
+    np.array(Image.open(p).convert('RGB')).transpose(2,0,1))/255.0 for p in gen_images])
+
+# Load target images
+target_dir = "datasets/ffhq_10shot"
+from datasets import load_from_disk
+ds = load_from_disk(target_dir)
+target_images = torch.stack([torch.from_numpy(
+    np.array(img).transpose(2,0,1))/255.0 for img in ds['image']])
+
+# LPIPS
+loss_fn = lpips.LPIPS(net='vgg')
+lpips_val = loss_fn(gen_tensors, target_images, normalize=True).mean().item()
+with open("outputs/eval/lpips.txt","w") as f:
+    f.write(f"LPIPS: {lpips_val:.4f}\\n")
+
+# FID
+metrics = calculate_metrics(
+    input1=gen_dir,
+    input2=target_dir,
+    cuda=True,
+    models=['inception'],
+    device='cuda',
+    verbose=False)
+fid = metrics['frechet_inception_distance']
+with open("outputs/eval/fid.txt","w") as f:
+    f.write(f"FID: {fid:.2f}\\n")
+print("Evaluation finished. LPIPS and FID written.")
+PYCODE
+
+echo "Reproduction complete. Generated images are in outputs/generations/, metrics in outputs/eval/"

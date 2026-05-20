@@ -96,6 +96,16 @@ Canonicalization and Token-Efficiency Rules:
 - Keep subject/object atomic, normalized, and consistent across chunks.
 - Prefer canonical names (e.g., learning rate -> learning_rate) to avoid duplicate entities.
 - Reuse existing entities from prior triplets whenever possible.
+- Use canonical relation families whenever possible:
+  - structure: part_of, has_component
+  - dependency: uses, requires, depends_on
+  - configuration: configured_by, has_config, value
+  - procedure: precedes, executes
+  - data/eval: trained_on, evaluated_by, achieves
+  - diagnostics: fails_on, caused_by, fixed_by, solved_by
+  - mapping: implemented_in, implemented_by, defined_in
+- Favor typed entities to make graph topology useful. Suggested entity classes:
+  module, algorithm_step, hyperparameter, schedule, metric, dataset, artifact, script, failure_mode, fix, symbol.
 - If uncertain, encode uncertainty explicitly in relation (e.g., might improve, hypothesis).
 - Avoid generic background knowledge not needed for implementation.
 - Skip facts already present in previous triplets unless adding more specific detail.
@@ -171,12 +181,14 @@ INCLUDE (only if reusable):
 2) REUSABLE ALGORITHMS: Patterns and building blocks (e.g. Transformer blocks, attention, loss types) — use generic names.
 3) TYPICAL CONFIG: Common hyperparameters and their typical ranges/values (e.g. learning_rate, batch_size, warmup_steps).
 4) EVALUATION PROTOCOL: Standard metrics and setups (e.g. perplexity, BLEU, train/val split).
+5) CODE-ALIGNED CONCEPTS: entities that can be linked to symbols/classes/functions in a typical repo.
 
 Ask: "Would an implementer of a DIFFERENT paper in this area benefit from this?" If no, skip.
 
 Format as triplets: "subject, relation, object".
 Use generic/canonical names, not paper-specific ones.
-Use only these relations: step_1, step_2, step_3, requires, typically_uses, has_config, evaluated_by.
+Use topology-friendly relations: part_of, uses, requires, configured_by, has_config, precedes, trained_on, evaluated_by, implemented_by.
+Prefer canonical names for entity aliases: learning_rate, batch_size, val_split, top_k, mixture_of_experts.
 
 Example of triplets you have extracted before: {example}
 
@@ -332,6 +344,12 @@ Your strategy:
 
 ---
 {expert_knowledge}
+
+The expert knowledge is structured in three blocks:
+1) paper implementation cards (requirements),
+2) retrieved reusable memory cards (patterns),
+3) linked code assets (selected snippets).
+Respect this order: satisfy paper requirements first, then adapt reusable patterns, then use code assets.
 
 ---
 Generate a complete, runnable repository. Include reproduce.sh, README.md, and all source code. Use expert graph patterns where applicable. Implement paper-specific parts from the paper graph. Output format:

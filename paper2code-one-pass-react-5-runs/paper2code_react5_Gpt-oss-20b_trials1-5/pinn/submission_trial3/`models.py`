@@ -1,0 +1,30 @@
+import torch
+import torch.nn as nn
+
+class PINN(nn.Module):
+    """
+    3‑layer tanh MLP with widths [input, hidden1, hidden2, hidden3, output].
+    Input: (x, t)  → 2D tensor
+    Output: scalar u(x, t)
+    """
+    def __init__(self, width: int, hidden_layers: int = 3):
+        super().__init__()
+        layers = [nn.Linear(2, width), nn.Tanh()]
+        for _ in range(hidden_layers - 1):
+            layers.append(nn.Linear(width, width))
+            layers.append(nn.Tanh())
+        layers.append(nn.Linear(width, 1))
+        self.net = nn.Sequential(*layers)
+
+        # Xavier normal init, biases zero
+        for m in self.net:
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_normal_(m.weight)
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: shape (N, 2) – columns are (x, t)
+        Returns: shape (N, 1)
+        """
+        return self.net(x)

@@ -1,0 +1,31 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import Tuple
+
+class DiffusionModel(nn.Module):
+    """
+    Very simple diffusion model: MLP that predicts noise ε_t given
+    the noised sample x_t and timestep t (embedded).
+    """
+    def __init__(self, dim: int = 2, hidden_dim: int = 64):
+        super().__init__()
+        self.input_proj = nn.Linear(dim + 1, hidden_dim)
+        self.net = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, dim),
+        )
+
+    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """
+        x: [B, dim]
+        t: [B]   (timestep indices)
+        """
+        # embed t to [B,1]
+        t_embed = t.unsqueeze(-1).float() / (self.input_proj.out_features - 1)
+        inp = torch.cat([x, t_embed], dim=-1)
+        h = self.input_proj(inp)
+        eps = self.net(h)
+        return eps

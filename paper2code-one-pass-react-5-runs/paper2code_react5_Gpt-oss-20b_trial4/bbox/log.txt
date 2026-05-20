@@ -1,0 +1,225 @@
+2026-03-14 12:49:13.879334 ======================================================================
+2026-03-14 12:49:13.879462 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 12:49:13.879518 ======================================================================
+2026-03-14 12:49:13.879553 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/bbox/paper.md
+2026-03-14 12:49:13.879602 Log path: paper2code_react5_Gpt-oss-20b_trial4/bbox
+2026-03-14 12:49:13.879634 Model: Openai/Gpt-oss-20b
+2026-03-14 12:49:13.879664 Max iterations: 5
+2026-03-14 12:49:13.879697 Run reproduce.sh: False
+2026-03-14 12:49:13.879730 Run LLM paper check: True
+2026-03-14 12:49:13.879761 
+2026-03-14 12:49:13.879801 Loading paper...
+2026-03-14 12:49:13.880104 Paper length: 93732 chars (using 93732 for prompt)
+2026-03-14 12:49:13.880191 
+2026-03-14 12:49:13.899800 --- Iteration 0: Initial generation ---
+2026-03-14 12:49:50.265815   Created: generated_reproduction.txt
+2026-03-14 12:49:50.265912 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial4/bbox/submission (1 files)
+2026-03-14 12:49:50.266000 
+2026-03-14 12:49:50.266051 --- Iteration 1: Observe & Refine ---
+2026-03-14 12:49:57.774606 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incorrect / Partial Requirements**
+
+| Status | Requirement from the paper | Comment |
+|--------|----------------------------|---------|
+| **MISSING** | Core BBox‑Adapter algorithm (energy‑based model + ranking‑based NCE loss) | The code only mentions a “small BERT encoder” as an adapter; no EBM formulation or NCE loss is implemented. |
+| **MISSING** | Online adaptation loop (sampling from previous inferences, updating adapter with positive/negative samples) | No training loop that iteratively refines the adapter based on new data is present. |
+| **MISSING** | Combination of black‑box LLM and adapter outputs for inference | The code does not show how the GPT‑2 output is fused with the adapter’s predictions. |
+| **MISSING** | Explicit treatment of target data as positive and source data as negative | No logic to label or separate source/target samples is included. |
+| **MISSING** | Ranking‑based Noise Contrastive Estimation (NCE) loss | No loss function or ranking mechanism is defined. |
+| **MISSING** | Hyper‑parameter settings (learning rate, batch size, optimizer, number of epochs, etc.) | No hyper‑parameter configuration is provided. |
+| **MISSING** | Dataset handling (pre‑processing, train/validation splits, tokenization) | No dataset code or reference to the three datasets used in the paper. |
+| **MISSING** | Evaluation protocol (metrics, baselines, statistical tests) | No evaluation script or comparison to baselines is included. |
+| **MISSING** | Reproduce.sh or equivalent pipeline to run the full experiment | No reproducibility script is present. |
+| **INCORRECT** | Adapter architecture | The paper uses a *small language model* (≈0.1–0.3 B params) as the adapter; the code uses a BERT encoder, which is not a generative LM and does not match the paper’s design. |
+| **PARTIAL** | Black‑box LLM stand‑in | The code uses GPT‑2 as a proxy for the black‑box LLM, which is acceptable for a toy demo but does not reflect the paper’s use of GPT‑3.5/Gemini. |
+| **PARTIAL** | Energy‑based framing | The code does not expose any EBM logic; the mention is only in comments. |
+
+**Conclusion**
+
+The current repository does **not** reproduce the essential components of BBox‑Adapter as described in the paper. Significant parts of the algorithm, training loop, loss, and evaluation are missing, and the adapter architecture is incorrect. The code would need a comprehensive rewrite to align with the paper’s methodology.
+2026-03-14 12:49:57.774809 
+2026-03-14 12:49:57.775016 Generating refined code...
+2026-03-14 12:50:47.356229   Updated: generated_reproduction.txt
+2026-03-14 12:50:47.356340 
+2026-03-14 12:50:47.356409 --- Iteration 2: Observe & Refine ---
+2026-03-14 12:51:00.604915 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Full implementation of the *ranking‑based Noise Contrastive Estimation (NCE) loss* as described in §3.2 (no code snippet shows the exact loss).  
+- Explicit use of an *energy‑based model (EBM)* formulation for the adaptation process (no EBM energy function or sampling routine).  
+- Online adaptation logic that incorporates **AI‑feedback** positive samples (only ground‑truth positives appear).  
+- Negative sample construction from *previously adapted inferences* (no code shows a memory of past outputs).  
+- Dataset handling for the three benchmark datasets cited in the paper (no data loader, split, or preprocessing).  
+- Evaluation pipeline: metrics (accuracy, F1, etc.), test‑time inference protocol, and comparison to baselines.  
+- Hyper‑parameter table (learning rate, batch size, number of epochs, beam size, adapter size).  
+- `reproduce.sh` or any script that runs the full training → evaluation pipeline end‑to‑end.  
+- Logging / checkpointing strategy (no checkpoint saving or resumption).  
+
+**INCORRECT**  
+- Using GPT‑2 as the “black‑box” LLM: the paper targets GPT‑3.5/Gemini where token probabilities are unavailable; GPT‑2 exposes them, so the black‑box assumption is violated.  
+- Adapter architecture: the paper mentions a *small LM* (0.1B–0.3B params) but the code uses DistilBERT (≈66M) plus a linear head; while within the size range, the paper’s specific architecture (e.g., a lightweight transformer) is not reproduced.  
+- Loss implementation: if the code uses a plain cross‑entropy or ranking loss without the NCE formulation, it does not match the paper’s objective.  
+
+**PARTIAL**  
+- Online adaptation loop exists but only samples new candidates and updates the adapter; it lacks the full cycle of *positive/negative sampling*, *feedback integration*, and *energy‑based sampling*.  
+- The adapter is trained on GPT‑2 outputs, but the combination of black‑box LLM and adapter outputs during inference is only sketched, not fully implemented.  
+
+**OK**  
+- The repository contains a lightweight adapter (DistilBERT + linear head) that can be trained with a small number of parameters.  
+- A basic ranking‑based loss is present (though not fully aligned with the paper’s NCE).  
+- The code demonstrates an online adaptation loop that iteratively refines the adapter.  
+
+**Recommendation**  
+To achieve a faithful reproduction, the code must be extended to include the exact NCE loss, EBM sampling, AI‑feedback handling, full dataset pipelines, evaluation metrics, and a reproducible script. Once those are added, the implementation will be complete.
+2026-03-14 12:51:00.605115 
+2026-03-14 12:51:00.605223 Generating refined code...
+2026-03-14 12:51:49.537942   Updated: generated_reproduction.txt
+2026-03-14 12:51:49.538076 
+2026-03-14 12:51:49.538120 --- Iteration 3: Observe & Refine ---
+2026-03-14 12:57:26.410717 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incorrect / Partial / OK Checklist**
+
+| Category | Item | Status | Notes |
+|----------|------|--------|-------|
+| **Core Method** | Small‑parameter adapter (0.1–0.3 B params) | **OK** | Uses DistilBERT (~66 M) – within the required size range. |
+| | Black‑box LLM with no token probabilities | **INCORRECT** | Code calls GPT‑2 and uses its logits; the paper’s method must *not* rely on token probabilities. |
+| | Ranking‑based NCE loss | **PARTIAL** | Implementation is present but the exact formulation (ranking of target vs. source samples) is not verified. |
+| | Online adaptation loop (sampling from previous inferences) | **PARTIAL** | Loop exists, but negative sampling from past inferences and positive sampling from AI feedback are not clearly implemented. |
+| | Combination of black‑box LLM and adapter outputs for inference | **MISSING** | No code shows a fused inference strategy. |
+| | EBM perspective (sampling from energy‑based model) | **MISSING** | No explicit EBM formulation or sampling routine. |
+| | Plug‑and‑play ability (adapter reusable across LLMs) | **MISSING** | No interface or documentation for swapping the black‑box LLM. |
+| **Data & Evaluation** | Dataset splits (train/val/test) | **MISSING** | Code uses `datasets` but does not enforce the splits described in the paper. |
+| | Hyperparameters (learning rate, batch size, epochs) | **MISSING** | No values are documented or matched to the paper’s settings. |
+| | Evaluation metrics (accuracy, cost savings) | **MISSING** | Only a placeholder “test accuracy” is printed; no cost or metric comparison to baselines. |
+| | Baseline comparisons (SFT, LoRA, etc.) | **MISSING** | No baseline runs or comparative plots. |
+| | Cost‑efficiency analysis | **MISSING** | No inference or training cost calculations. |
+| **Implementation Details** | Use of GPT‑2 as black‑box LLM | **OK** (but see INCORRECT above) | GPT‑2 is open‑source; however, the paper’s method targets GPT‑3.5/Gemini. |
+| | Adapter architecture (DistilBERT + linear head) | **OK** | Matches the lightweight adapter idea. |
+| | Online adaptation loop script (`reproduce.sh`) | **PARTIAL** | Script runs training but does not reflect the paper’s iterative sampling and adaptation logic. |
+| | Training steps / epochs | **MISSING** | No explicit epoch count or early‑stopping logic. |
+| | Inference steps | **MISSING** | No inference routine that combines LLM and adapter outputs. |
+
+**Summary**
+
+The reproduction captures the high‑level idea of a lightweight adapter for a black‑box LLM, but it falls short on several critical aspects:
+
+- It violates the paper’s black‑box constraint by using token logits.
+- The ranking‑based NCE loss and online adaptation loop are only partially implemented and not verified.
+- Key components such as negative sampling from past inferences, positive AI‑feedback sampling, EBM framing, and fused inference are missing.
+- Dataset handling, hyperparameters, evaluation metrics, baseline comparisons, and cost‑efficiency analysis are not present.
+
+**Recommendation**
+
+To bring the code in line with the paper, the following actions are required:
+
+1. Remove any reliance on token probabilities; use only generated text.
+2. Fully implement the ranking‑based NCE loss as described in §3.2.
+3. Add an online adaptation loop that samples negative examples from previous inferences and positive examples from AI feedback.
+4. Combine the black‑box LLM and adapter outputs during inference.
+5. Include explicit dataset splits, hyperparameter settings, and evaluation metrics.
+6. Add baseline runs and cost‑efficiency calculations.
+
+Once these items are addressed, the reproduction will faithfully reflect the contributions of the BBox‑Adapter paper.
+2026-03-14 12:57:26.410918 
+2026-03-14 12:57:26.411246 Generating refined code...
+2026-03-14 12:58:17.275464   Updated: generated_reproduction.txt
+2026-03-14 12:58:17.275554 
+2026-03-14 12:58:17.275620 --- Iteration 4: Observe & Refine ---
+2026-03-14 12:58:28.912208 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Energy‑based model (EBM) formulation and its use in the training objective.  
+- Explicit ranking‑based Noise‑Contrastive Estimation (NCE) loss implementation details (e.g., temperature, negative sampling strategy).  
+- Online adaptation with AI‑feedback as a positive sample source.  
+- Negative sample construction from *previous* inferences (only a single negative set is mentioned).  
+- Baseline comparisons (SFT, LoRA, kNN‑Adapter, etc.) and their implementation for fair evaluation.  
+- Exact hyper‑parameter settings (learning rate, batch size, number of epochs, optimizer, weight‑decay).  
+- Dataset split definitions (train/validation/test) and preprocessing steps (tokenization, prompt formatting).  
+- Evaluation metrics beyond simple accuracy (e.g., F1, BLEU, exact‑match for QA).  
+- Hardware / training step counts, checkpointing strategy, and reproducibility flags.  
+- Full content of `reproduce.sh` (dependency installation, environment setup, command‑line arguments).  
+
+**INCORRECT**  
+- Using GPT‑2 as the “black‑box” LLM. The paper targets state‑of‑the‑art black‑box LLMs (GPT‑3.5, Gemini) that do not expose token probabilities; GPT‑2 is an open‑source model and not a true black‑box scenario.  
+- The adapter size is not explicitly verified to be within the 0.1–0.3 B parameter range (DistilBERT ≈ 66 M, but the linear head may push it slightly above).  
+
+**PARTIAL**  
+- Ranking‑based NCE loss: present in the code, but the exact formulation (temperature, negative sampling, ranking criterion) is not shown.  
+- Online adaptation loop: implemented, but lacks the AI‑feedback positive sample mechanism and may not reuse previous inferences for negatives as described.  
+- Adapter architecture: DistilBERT + linear head is lightweight, but the paper’s claim of 0.1–0.3 B parameters is not explicitly documented.  
+- Dataset usage: HuggingFace datasets are referenced, but the code does not detail prompt construction, tokenization, or how the target/ source domains are distinguished.  
+
+**OK**  
+- The code includes a lightweight adapter, a ranking‑based NCE loss placeholder, an online adaptation loop, and uses HuggingFace datasets for the four benchmark tasks.  
+
+**Recommendation**  
+To achieve a faithful reproduction, the code must:  
+1. Replace GPT‑2 with a true black‑box LLM interface (e.g., OpenAI API) or clearly document the substitution.  
+2. Implement the full EBM objective and the exact ranking‑based NCE loss as per §3.2.  
+3. Add AI‑feedback as a positive sample source and reuse previous inferences for negatives.  
+4. Provide all hyper‑parameters, dataset splits, and preprocessing steps.  
+5. Include baseline implementations and evaluation scripts.  
+6. Expand `reproduce.sh` to cover environment setup, training, evaluation, and result reporting.  
+
+If these changes are made, the reproduction will be complete.
+2026-03-14 12:58:28.912408 
+2026-03-14 12:58:28.912601 Generating refined code...
+2026-03-14 12:59:27.008214   Updated: generated_reproduction.txt
+2026-03-14 12:59:27.008329 
+2026-03-14 12:59:27.008403 --- Iteration 5: Observe & Refine ---
+2026-03-14 12:59:45.788745 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incomplete / Incorrect Elements**
+
+| Category | Requirement from Paper | Status in Code |
+|----------|------------------------|----------------|
+| **MISSING** | Combine outputs from the black‑box LLM and the adapter during inference (Section 3.3). | Not implemented – the code only uses the adapter’s predictions. |
+| **MISSING** | Use negative samples from *previous* adaptations as part of the online loop (Section 3.4). | No mechanism to store or reuse past inferences as negatives. |
+| **MISSING** | Incorporate positive samples from AI feedback (Section 3.4). | Only ground‑truth positives are used; AI‑generated positives are absent. |
+| **MISSING** | Explicit dataset splits (train/dev/test) and prompt formatting as described in the experiments. | The script pulls raw splits from `datasets` but does not enforce the exact splits or prompt templates used in the paper. |
+| **MISSING** | Baseline comparisons (e.g., SFT, LoRA) to demonstrate relative gains. | No baseline runs are included in the reproduction. |
+| **MISSING** | Exact hyper‑parameter settings (learning rate, batch size, number of epochs, optimizer, etc.) reported in the paper. | Hyper‑parameters are hard‑coded but not matched to the paper’s values. |
+| **PARTIAL** | Ranking‑based NCE loss implementation. | The loss is present but the ranking scheme (e.g., temperature, margin) may differ from the paper’s exact formulation. |
+| **PARTIAL** | Online adaptation loop. | The loop exists but does not fully emulate the paper’s “realtime positive sampling from ground‑truth, human, or AI feedback” and “negative sampling from previous adaptations.” |
+| **PARTIAL** | Adapter architecture size (0.1B–0.3B parameters). | DistilBERT (~66 M) is within range, but the paper’s exact size (e.g., 0.1B) is not verified. |
+| **INCORRECT** | Black‑box LLM choice. | GPT‑2 is used as a stand‑in; the paper targets GPT‑3.5/Gemini. This is acceptable for a reproduction but deviates from the original setting. |
+| **OK** | Use of a lightweight adapter (DistilBERT + linear head). | Correctly implemented. |
+| **OK** | Ranking‑based NCE loss (no token probabilities). | Implemented as per Section 3.2. |
+| **OK** | Online adaptation framework skeleton. | Present, though incomplete. |
+| **OK** | Support for four benchmark datasets via `datasets`. | Implemented. |
+| **OK** | `reproduce.sh` runs training for each dataset and prints test accuracy. | Present. |
+
+**Recommendation**  
+To fully match the paper’s contribution, the code should:
+
+1. Implement the output‑combination strategy (black‑box + adapter).  
+2. Store and reuse past inferences as negative samples.  
+3. Allow AI‑generated positives in the online loop.  
+4. Use the exact dataset splits and prompt templates.  
+5. Include baseline runs for comparison.  
+6. Align hyper‑parameters with the paper’s reported values.  
+7. Verify the adapter size matches the 0.1B–0.3B range.  
+
+Once these items are addressed, the reproduction will be complete.
+2026-03-14 12:59:45.788926 
+2026-03-14 12:59:45.789151 Generating refined code...
+2026-03-14 13:01:08.406171   Updated: generated_reproduction.txt
+2026-03-14 13:01:08.406256 
+2026-03-14 13:01:08.406324 ======================================================================
+2026-03-14 13:01:08.406385 REACT BASELINE COMPLETE
+2026-03-14 13:01:08.406426 ======================================================================
+2026-03-14 13:01:08.406488 Total iterations: 6
+2026-03-14 13:01:08.406521 API tokens: 78809 completion, 186493 prompt
+2026-03-14 13:01:08.406552 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial4/bbox/generated_code_response.txt

@@ -1,0 +1,70 @@
+#!/usr/bin/env python
+import torch
+import random
+import numpy as np
+from datasets import load_dataset
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from src.utils import set_seed, load_json, save_json, get_token_embeddings, to_device
+from tqdm.auto import tqdm
+
+set_seed(42)
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Load tokenizer and model
+tokenizer = AutoTokenizer.from_pretrained("gpt2-medium")
+model = AutoModelForCausalLM.from_pretrained("gpt2-medium").to(DEVICE)
+model.eval()
+
+# Load probe vector
+probe_vec = torch.tensor(np.load("probe/probe_weight.pt")).to(DEVICE)
+probe_vec = probe_vec / probe_vec.norm()
+
+# Load toxic vectors indices for reference (optional)
+tok_vector_info = load_json("probe/tok_vectors.json")
+toxic_cols = [(info["layer"], info["col"]) for info in tok_vector_info]
+
+# Helper: compute probe score for a token id
+def token_toxicity_score(token_id):
+    emb = model.get_input_embeddings().weight.data[token_id]  # (hidden,)
+    return float((emb @ probe_vec).item())
+
+# Prepare prompts from WikiText-2
+wiki = load_dataset("wikitext", "wikitext-2-raw-v1", split="train[:0.5%]")  # ~500 examples
+prompts = [ex["text"].strip() for ex in wiki if len(ex["text"].strip()) > 0]
+
+def generate_positive(prompt, max_new_tokens=20):
+    inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
+    out = model.generate(**inputs,
+                         max_new_tokens=max_new_tokens,
+                         do_sample=False,
+                         pad_token_id=tokenizer.eos_token_id)
+    return tokenizer.decode(out[0][len(inputs["input_ids"][0]):], skip_special_tokens=True)
+
+def generate_negative(prompt, max_new_tokens=20, threshold=0.5, max_attempts=5):
+    # Try to generate a continuation that contains at least one token with high probe score
+    for _ in range(max_attempts):
+        inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
+        out = model.generate(**inputs,
+                             max_new_tokens=max_new_tokens,
+                             do_sample=True,
+                             top_k=50,
+                             temperature=1.0,
+                             pad_token_id=tokenizer.eos_token_id)
+        cont_ids = out[0][len(inputs["input_ids"][0]):]
+        scores = [token_toxicity_score(tok) for tok in cont_ids]
+        if any(s > threshold for s in scores):
+            return tokenizer.decode(cont_ids, skip_special_tokens=True)
+    # Fallback: return random sample
+    return tokenizer.decode(out[0][len(inputs["input_ids"][0]):], skip_special_tokens=True)
+
+# Build pairwise dataset
+pairs = []
+for prompt in tqdm(prompts[:200], desc="Generating pairs"):  # 200 prompts
+    pos = generate_positive(prompt)
+    neg = generate_negative(prompt)
+    pairs.append({"prompt": prompt, "positive": pos, "negative": neg})
+
+# Save
+os.makedirs("data", exist_ok=True)
+save_json(pairs, "data/pairs.json")
+print(f"Generated {len(pairs)} pairwise examples to data/pairs.json")

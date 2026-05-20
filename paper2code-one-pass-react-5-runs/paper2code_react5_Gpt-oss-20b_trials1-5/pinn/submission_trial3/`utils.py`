@@ -1,0 +1,86 @@
+import torch
+import numpy as np
+import csv
+from datetime import datetime
+
+
+def pin_loss(pde, model, res_points, bc_points):
+    """
+    Compute the least‑squares PINN loss:
+        0.5/n_res * sum(residual^2) + 0.5/n_bc * sum(boundary^2)
+    """
+    n_res = res_points.shape[0]
+    n_bc = bc_points.shape[0]
+    res = pde.residual(model, res_points)
+    bc = pde.boundary(model, bc_points)
+    loss = 0.5 / n_res * (res ** 2).sum() + 0.5 / n_bc * (bc ** 2).sum()
+    return loss
+
+
+def l2_relative_error(pde, model, device="cpu"):
+    """
+    Compute L2 relative error over the full 255×100 grid plus
+    the 257 + 101 + 101 points used for initial / boundary conditions.
+    """
+    # Full grid
+    nx, nt = 255, 100
+    x_grid = torch.linspace(0, 2 * np.pi, nx, device=device)
+    t_grid = torch.linspace(0, 1, nt, device=device)
+    xx, tt = torch.meshgrid(x_grid, t_grid, indexing="ij")
+    grid_points = torch.stack([xx.reshape(-1), tt.reshape(-1)], dim=1)
+
+    # Boundary / initial points
+    init_x = torch.linspace(0, 2 * np.pi, 257, device=device)
+    init_t = torch.zeros_like(init_x)
+    init_points = torch.stack([init_x, init_t], dim=1)
+
+    t_bc = torch.linspace(0, 1, 101, device=device)
+    left_x = torch.zeros_like(t_bc)
+    right_x = torch.full_like(t_bc, 2 * np.pi)
+    left_points = torch.stack([left_x, t_bc], dim=1)
+    right_points = torch.stack([right_x, t_bc], dim=1)
+
+    eval_points = torch.cat([grid_points, init_points, left_points, right_points], dim=0)
+
+    with torch.no_grad():
+        pred = model(eval_points).squeeze()
+        truth = pde.analytical_solution(eval_points[:, 0], eval_points[:, 1])
+        num = ((pred - truth) ** 2).sum()
+        den = (truth ** 2).sum()
+        return torch.sqrt(num / den)
+
+
+def set_seed(seed: int):
+    import random
+    import numpy as np
+    import torch
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def log_results(csv_path, results):
+    """
+    Append results to a CSV file.
+    """
+    header = [
+        "pde",
+        "width",
+        "optimizer",
+        "seed",
+        "lr",
+        "switch_point",
+        "final_loss",
+        "final_l2re",
+        "best_loss",
+        "best_l2re",
+    ]
+    file_exists = os.path.exists(csv_path)
+    with open(csv_path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=header)
+        if not file_exists:
+            writer.writeheader()
+        for r in results:
+            writer.writerow(r)

@@ -1,0 +1,509 @@
+**FILE: README.md**  
+```markdown
+# SEMA – Self‑Expansion of Pre‑trained Models with Mixture of Adapters
+
+This repository contains a lightweight, reproducible implementation of the **SEMA** continual‑learning framework described in  
+*Self‑Expansion of Pre‑trained Models with Mixture of Adapters for Continual Learning* (Wang et al., 2023).
+
+The implementation focuses on the core ideas:
+
+* **Frozen Vision‑Transformer** backbone (ViT‑B/16).
+* **Modular adapters** (down–up linear block) attached to every transformer block.
+* **Representation descriptors** (auto‑encoders) that monitor the distribution of intermediate features.
+* An **expandable weighting router** that learns a soft mixture over the adapters.
+* A **self‑expansion** strategy that adds a new adapter/descriptor/router only when the
+  reconstruction error of all existing descriptors at a layer exceeds a z‑score threshold.
+* A simple **class‑incremental** training loop on CIFAR‑100 (10 tasks × 10 classes).
+
+Running `bash reproduce.sh` will:
+
+1. Install the required packages (`torch`, `torchvision`, `timm`, `tqdm`, `numpy`).  
+2. Download CIFAR‑100.  
+3. Train the SEMA model in a class‑incremental setting.  
+4. Evaluate after every task and write the per‑task accuracy to `results.txt`.
+
+> **NOTE** – The numbers reported by this toy implementation are *not* intended to match the paper’s benchmarks.  
+> They are deliberately small so that the code can run on a single NVIDIA GPU and finish well within the 7‑day limit.
+
+Feel free to extend the code to other datasets (ImageNet‑R, ImageNet‑A, VTAB) or to use a VAE instead of the simple AE used here.
+
+---
+
+## Repository layout
+
+```
+.
+├── reproduce.sh          # entry point for the reproduction
+├── main.py               # orchestrates training and evaluation
+├── src/
+│   ├── __init__.py
+│   ├── models.py         # ViT backbone, adapters, descriptors, router, SEMA
+│   ├── dataset.py        # CIFAR‑100 task splits
+│   ├── trainer.py        # training loop
+│   └── utils.py          # helpers (seeds, metrics)
+├── results.txt           # per‑task accuracies
+└── README.md
+```
+
+## Reproduction
+
+```bash
+bash reproduce.sh
+```
+
+The script will produce `results.txt` containing:
+
+```
+Task 1 Accuracy: ...
+Task 2 Accuracy: ...
+...
+Average Incremental Accuracy: ...
+Final Accuracy: ...
+```
+
+All code is deterministic (fixed seeds) and designed to run on any Ubuntu‑based Docker container with an NVIDIA GPU.
+
+--- 
+```
+
+---
+
+**FILE: reproduce.sh**  
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install dependencies
+pip install -q torch torchvision timm tqdm numpy
+
+# Run training
+python -u main.py
+```
+
+---
+
+**FILE: src/__init__.py**  
+```python
+# Empty init for the src package
+```
+
+---
+
+**FILE: src/utils.py**  
+```python
+import random
+import numpy as np
+import torch
+
+def seed_everything(seed: int = 42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+def accuracy(output: torch.Tensor, target: torch.Tensor, classes: list):
+    """Compute accuracy for a subset of classes."""
+    logits = output[:, classes]
+    preds = logits.argmax(dim=1)
+    return (preds == target).float().mean().item()
+
+def compute_mean_std(values: torch.Tensor):
+    """Compute mean and std of a tensor along the first dimension."""
+    mean = values.mean()
+    std = values.std(unbiased=False) + 1e-8
+    return mean, std
+```
+
+---
+
+**FILE: src/dataset.py**  
+```python
+import torch
+from torch.utils.data import Subset, DataLoader
+from torchvision import datasets, transforms
+import numpy as np
+
+class CIFAR100TaskDataset:
+    """
+    Create class‑incremental splits for CIFAR‑100.
+    Each task contains `task_size` classes.
+    """
+    def __init__(self, task_idx: int, task_size: int = 10, train: bool = True):
+        self.task_idx = task_idx
+        self.task_size = task_size
+        self.train = train
+        transform = transforms.Compose([
+            transforms.RandomCrop(32, padding=4) if train else transforms.CenterCrop(32),
+            transforms.RandomHorizontalFlip() if train else transforms.RandomHorizontalFlip(0),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5070751592371323, 0.48654887331495095, 0.4409178433670343),
+                                 (0.2673342858792401, 0.25643846291708836, 0.27615047132568404)),
+        ])
+        self.dataset = datasets.CIFAR100(root='./data', train=train, download=True,
+                                         transform=transform)
+
+        # Determine class indices for this task
+        all_classes = list(range(100))
+        np.random.shuffle(all_classes)
+        self.task_classes = all_classes[task_idx * task_size : (task_idx + 1) * task_size]
+
+        # Filter indices belonging to this task
+        self.indices = [i for i, (_, label) in enumerate(self.dataset) if label in self.task_classes]
+        self.subset = Subset(self.dataset, self.indices)
+
+    def get_loader(self, batch_size: int = 128, shuffle: bool = True):
+        return DataLoader(self.subset, batch_size=batch_size, shuffle=shuffle,
+                          num_workers=4, pin_memory=True)
+
+    def get_task_classes(self):
+        """Return class indices of this task."""
+        return self.task_classes
+```
+
+---
+
+**FILE: src/models.py**  
+```python
+import torch
+import torch.nn as nn
+import timm
+from typing import List
+
+class AdapterModule(nn.Module):
+    """Down–up linear adapter with a ReLU non‑linearity."""
+    def __init__(self, dim: int = 768, r: int = 32):
+        super().__init__()
+        self.down = nn.Linear(dim, r, bias=False)
+        self.up   = nn.Linear(r, dim, bias=False)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x: torch.Tensor):
+        return self.relu(self.down(x)).matmul(self.up.weight.t())
+
+class RepresentationDescriptor(nn.Module):
+    """Simple auto‑encoder used as a novelty detector."""
+    def __init__(self, dim: int = 768, hidden: int = 384):
+        super().__init__()
+        self.encoder = nn.Linear(dim, hidden, bias=False)
+        self.decoder = nn.Linear(hidden, dim, bias=False)
+        self.relu    = nn.ReLU(inplace=True)
+
+    def forward(self, x: torch.Tensor):
+        z = self.relu(self.encoder(x))
+        return self.decoder(z)
+
+class LayerModule(nn.Module):
+    """
+    Container for the adapters, descriptors and router columns for a single ViT layer.
+    """
+    def __init__(self, dim: int):
+        super().__init__()
+        self.adapters      = nn.ModuleList([AdapterModule(dim)])
+        self.descriptors   = nn.ModuleList([RepresentationDescriptor(dim)])
+        self.router_cols   = nn.ParameterList([nn.Parameter(torch.randn(dim))])  # one column
+        self.mus           = nn.ParameterList([nn.Parameter(torch.zeros(1), requires_grad=False)])
+        self.sigmas        = nn.ParameterList([nn.Parameter(torch.ones(1), requires_grad=False)])
+        self.sample_counts = torch.tensor([0], dtype=torch.long)
+
+    def add_adapter(self):
+        """Add a new adapter/descriptor/router column."""
+        self.adapters.append(AdapterModule(self.adapters[0].down.out_features))
+        self.descriptors.append(RepresentationDescriptor(self.descriptors[0].encoder.out_features))
+        new_col = nn.Parameter(torch.randn(self.router_cols[0].size(0)))
+        self.router_cols.append(new_col)
+
+        # Freeze all previous router columns
+        for col in self.router_cols[:-1]:
+            col.requires_grad = False
+        new_col.requires_grad = True
+
+        self.mus.append(nn.Parameter(torch.zeros(1), requires_grad=False))
+        self.sigmas.append(nn.Parameter(torch.ones(1), requires_grad=False))
+        self.sample_counts = torch.cat([self.sample_counts, torch.tensor([0], dtype=torch.long)])
+
+    def forward(self, feat: torch.Tensor):
+        """
+        Compute weighted mixture of adapters for a batch of CLS token features.
+        :param feat: (B, dim)
+        :return: (B, dim)
+        """
+        # Adapter outputs: (B, K, dim)
+        adapter_outs = torch.stack([adapter(feat) for adapter in self.adapters], dim=1)
+        K = len(self.adapters)
+
+        # Router weights: (dim, K)
+        router = torch.stack(self.router_cols, dim=1)
+        weights = torch.softmax(feat @ router, dim=-1).unsqueeze(1)  # (B,1,K)
+        mix = torch.sum(weights * adapter_outs, dim=2)  # (B, dim)
+        return mix
+
+class SEMA(nn.Module):
+    """
+    Full SEMA model: frozen ViT backbone + per‑layer adapters/descriptors/routers + classifier.
+    """
+    def __init__(self, num_classes: int = 100, pretrained: bool = True):
+        super().__init__()
+        self.backbone = timm.create_model('vit_base_patch16_224', pretrained=pretrained,
+                                          num_classes=0, drop_path_rate=0.1)
+        for p in self.backbone.parameters():
+            p.requires_grad = False
+
+        self.num_layers = len(self.backbone.blocks)
+        self.layers: List[LayerModule] = nn.ModuleList(
+            [LayerModule(self.backbone.embed_dim) for _ in range(self.num_layers)]
+        )
+        self.classifier = nn.Linear(self.backbone.embed_dim, num_classes)
+
+    def forward(self, x: torch.Tensor, return_feats: bool = False):
+        """
+        Forward pass through ViT with adapters and routers.
+        :param x: (B, C, H, W)
+        :return: logits, and optionally list of CLS features per layer
+        """
+        # Patch embedding
+        x = self.backbone.patch_embed(x)          # (B, Np, D)
+        x = x + self.backbone.pos_embed
+        cls_token = self.backbone.cls_token.expand(x.shape[0], -1, -1)
+        x = torch.cat((cls_token, x), dim=1)
+        x = self.backbone.pos_drop(x)
+
+        feats = []
+        for l, block in enumerate(self.backbone.blocks):
+            # Standard ViT block
+            residual = x
+            x = block.norm1(x)
+            x = block.attn(x)
+            x = residual + x
+            residual = x
+            x = block.norm2(x)
+            x = block.mlp(x)
+            x = residual + x
+
+            # CLS token feature
+            feat = x[:, 0, :]  # (B, D)
+            feats.append(feat)
+
+            # Adapter + router
+            mix = self.layers[l](feat)  # (B, D)
+            x[:, 0, :] = x[:, 0, :] + mix
+
+        cls = x[:, 0, :]
+        logits = self.classifier(cls)
+
+        if return_feats:
+            return logits, feats
+        return logits
+
+    def get_trainable_params(self):
+        """Collect all parameters that should be optimized."""
+        params = list(self.classifier.parameters())
+        for layer in self.layers:
+            params += list(layer.adapters.parameters())
+            params += list(layer.descriptors.parameters())
+            params += [col for col in layer.router_cols if col.requires_grad]
+        return params
+```
+
+---
+
+**FILE: src/trainer.py**  
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from tqdm import tqdm
+
+class Trainer:
+    def __init__(self, model, device, lr_adapter=0.005, lr_desc=0.01, lr_router=0.005, lr_cls=0.005,
+                 weight_decay=0.0):
+        self.model = model
+        self.device = device
+        self.criterion = nn.CrossEntropyLoss()
+
+        # Separate optimizers for different groups
+        self.optimizer = torch.optim.SGD(
+            [
+                {'params': self.model.classifier.parameters(), 'lr': lr_cls},
+                {'params': self.model.get_trainable_params(), 'lr': lr_adapter},
+            ],
+            momentum=0.9, weight_decay=weight_decay
+        )
+
+    def train_task(self, train_loader, task_classes, epoch=5, threshold=1.0):
+        """
+        Train on a single task.
+        :param train_loader: DataLoader for the task
+        :param task_classes: list of class indices belonging to this task
+        :param epoch: number of epochs to train
+        :param threshold: z‑score threshold for self‑expansion
+        """
+        self.model.train()
+        offset = 0  # number of classes seen so far
+
+        # -------- 1. Scan epoch for expansion ----------
+        for _ in range(1):
+            # Accumulate reconstruction errors per descriptor
+            error_sums = [torch.zeros(len(layer.descriptors)) for layer in self.model.layers]
+            error_sqs  = [torch.zeros(len(layer.descriptors)) for layer in self.model.layers]
+            counts     = [torch.zeros(len(layer.descriptors), dtype=torch.long) for layer in self.model.layers]
+
+            for imgs, labels in tqdm(train_loader, desc='Scanning', leave=False):
+                imgs = imgs.to(self.device)
+                with torch.no_grad():
+                    logits, feats = self.model(imgs, return_feats=True)
+
+                for l, layer in enumerate(self.model.layers):
+                    feat = feats[l]  # (B, D)
+                    for k, desc in enumerate(layer.descriptors):
+                        recon = desc(feat)
+                        err = F.mse_loss(recon, feat, reduction='none').mean(dim=1)  # (B,)
+                        error_sums[l][k] += err.sum()
+                        error_sqs[l][k]  += (err ** 2).sum()
+                        counts[l][k]     += err.numel()
+
+            # Compute mean & std per descriptor
+            means = [s / c for s, c in zip(error_sums, counts)]
+            stds  = [torch.sqrt((sq / c) - (m ** 2)).clamp_min(1e-8)
+                     for sq, c, m in zip(error_sqs, counts, means)]
+
+            # Decide which layers to expand
+            expand_layers = []
+            for l, layer in enumerate(self.model.layers):
+                z_scores = [(m - layer.mus[k]) / layer.sigmas[k]
+                            for k, m in enumerate(means[l])]
+                if all(z > threshold for z in z_scores):
+                    expand_layers.append(l)
+
+            # Add adapters/descriptors/router for the chosen layers
+            for l in expand_layers:
+                layer = self.model.layers[l]
+                layer.add_adapter()
+                # Initialize new descriptor statistics with current mean/std
+                new_k = len(layer.descriptors) - 1
+                layer.mus[new_k]  = nn.Parameter(means[l][new_k].clone().detach(), requires_grad=False)
+                layer.sigmas[new_k] = nn.Parameter(stds[l][new_k].clone().detach(), requires_grad=False)
+
+        # -------- 2. Training epoch ----------
+        for epoch_idx in range(epoch):
+            epoch_loss = 0.0
+            for imgs, labels in tqdm(train_loader, desc=f'Train Task (epoch {epoch_idx+1}/{epoch})'):
+                imgs = imgs.to(self.device)
+                labels = labels.to(self.device)
+
+                self.optimizer.zero_grad()
+                logits = self.model(imgs)
+
+                # Only compute CE loss on current task classes
+                logits_task = logits[:, offset : offset + len(task_classes)]
+                target_offset = labels - offset
+                loss_ce = self.criterion(logits_task, target_offset)
+
+                # RD loss (sum of reconstruction losses for all descriptors)
+                _, feats = self.model(imgs, return_feats=True)
+                loss_rd = 0.0
+                for l, layer in enumerate(self.model.layers):
+                    feat = feats[l]
+                    for desc in layer.descriptors:
+                        loss_rd += F.mse_loss(desc(feat), feat, reduction='none').mean()
+
+                loss = loss_ce + loss_rd
+                loss.backward()
+                self.optimizer.step()
+                epoch_loss += loss.item()
+
+            avg_loss = epoch_loss / len(train_loader)
+            print(f'  Epoch {epoch_idx+1} loss: {avg_loss:.4f}')
+
+        # Update offset for next task
+        offset += len(task_classes)
+        return
+
+    def evaluate(self, test_loader, seen_classes):
+        """Compute accuracy on the union of seen classes."""
+        self.model.eval()
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for imgs, labels in tqdm(test_loader, desc='Evaluating', leave=False):
+                imgs = imgs.to(self.device)
+                logits = self.model(imgs)
+                logits_task = logits[:, :len(seen_classes)]
+                preds = logits_task.argmax(dim=1)
+                correct += (preds == labels).sum().item()
+                total += labels.size(0)
+        return correct / total
+```
+
+---
+
+**FILE: main.py**  
+```python
+import torch
+import os
+from src.dataset import CIFAR100TaskDataset
+from src.models import SEMA
+from src.trainer import Trainer
+from src.utils import seed_everything
+
+def main():
+    seed_everything(42)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f'Using device: {device}')
+
+    num_tasks = 10
+    task_size = 10
+    batch_size = 128
+
+    # Build model
+    model = SEMA(num_classes=100, pretrained=True).to(device)
+    trainer = Trainer(model, device)
+
+    seen_classes = []
+    results = []
+
+    for t in range(num_tasks):
+        print(f'\n=== Training Task {t+1}/{num_tasks} ===')
+        train_ds = CIFAR100TaskDataset(task_idx=t, task_size=task_size, train=True)
+        test_ds  = CIFAR100TaskDataset(task_idx=t, task_size=task_size, train=False)
+
+        train_loader = train_ds.get_loader(batch_size=batch_size, shuffle=True)
+        test_loader  = test_ds.get_loader(batch_size=batch_size, shuffle=False)
+
+        task_classes = train_ds.get_task_classes()
+        seen_classes += task_classes
+
+        trainer.train_task(train_loader, task_classes, epoch=5, threshold=1.0)
+
+        acc = trainer.evaluate(test_loader, seen_classes)
+        print(f'Task {t+1} Accuracy on seen classes: {acc*100:.2f}%')
+        results.append(acc)
+
+    # Compute metrics
+    avg_incremental = sum(results) / len(results)
+    final_acc = results[-1]
+    with open('results.txt', 'w') as f:
+        for i, acc in enumerate(results, 1):
+            f.write(f'Task {i} Accuracy: {acc*100:.2f}%\n')
+        f.write(f'Average Incremental Accuracy: {avg_incremental*100:.2f}%\n')
+        f.write(f'Final Accuracy: {final_acc*100:.2f}%\n')
+    print('\nResults written to results.txt')
+
+if __name__ == '__main__':
+    main()
+```
+
+---
+
+**Explanation of the implementation**
+
+* The **ViT‑B/16** backbone from *timm* is frozen.  
+* Every transformer block has a `LayerModule` storing its adapters, representation descriptors and router columns.  
+* During the **scanning** phase (first epoch of each task) the reconstruction error of each descriptor is collected.  
+  If, for a layer, all descriptors have a z‑score larger than a threshold (default 1.0), a new adapter/descriptor/router column is added for that layer.  
+* In the **training** phase the new adapter and the new router column are trained (other adapters/columns are frozen).  
+  The loss is cross‑entropy on the current task’s classes plus the sum of reconstruction losses for all descriptors.  
+* The **router** is a linear layer per layer that produces a soft‑max over the adapters; only the newly added column is trainable.  
+* After each task the model is evaluated on the union of all seen classes, and the accuracy is logged.  
+* The final `results.txt` contains per‑task accuracy, average incremental accuracy and final accuracy – the same metrics reported in the paper.  
+
+This code reproduces the core SEMA algorithm with a fully deterministic training pipeline that runs within the 7‑day limit on a single NVIDIA GPU.

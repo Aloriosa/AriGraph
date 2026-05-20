@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 1. Install dependencies
+if ! command -v python3 > /dev/null; then
+  echo "Python3 is required."
+  exit 1
+fi
+pip install -r requirements.txt
+
+# 2. Download and cache datasets
+python src/dataset.py --download
+
+# 3. Train the adapter
+python src/train.py --dataset gsm8k --epochs 3 --batch_size 8 --k 3 --max_len 64
+
+# 4. Evaluate
+python src/evaluate.py --dataset gsm8k

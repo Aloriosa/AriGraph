@@ -1,0 +1,50 @@
+2026-03-14 15:33:13.575818 ======================================================================
+2026-03-14 15:33:13.575964 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 15:33:13.576037 ======================================================================
+2026-03-14 15:33:13.576100 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/adaptive-pruning/paper.md
+2026-03-14 15:33:13.576149 Log path: paper2code_react5_Gpt-oss-20b_trial2/adaptive-pruning
+2026-03-14 15:33:13.576208 Model: Openai/Gpt-oss-20b
+2026-03-14 15:33:13.576271 Max iterations: 5
+2026-03-14 15:33:13.576319 Run reproduce.sh: False
+2026-03-14 15:33:13.576368 Run LLM paper check: True
+2026-03-14 15:33:13.576414 
+2026-03-14 15:33:13.576458 Loading paper...
+2026-03-14 15:33:13.577487 Paper length: 91398 chars (using 91398 for prompt)
+2026-03-14 15:33:13.577560 
+2026-03-14 15:33:13.607402 --- Iteration 0: Initial generation ---
+2026-03-14 15:34:03.760833   Created: generated_reproduction.txt
+2026-03-14 15:34:03.760951 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial2/adaptive-pruning/submission (1 files)
+2026-03-14 15:34:03.761007 
+2026-03-14 15:34:03.761043 --- Iteration 1: Observe & Refine ---
+2026-03-14 15:34:11.993305 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Unimplemented Requirements**
+
+| Category | Requirement from the paper | Status in the provided code |
+|----------|----------------------------|-----------------------------|
+| **Core algorithm** | Adaptive pruning and tuning (dynamic adjustment of pruning masks and tuning ranks during fine‑tuning) | **MISSING** – pruning is performed once before training; no dynamic schedule. |
+| | Outlier‑aware salience scoring function for pruning | **MISSING** – code uses a simple L2‑norm of query weights. |
+| | Self‑distillation with shared teacher/student parameters | **MISSING** – no distillation loop. |
+| | Early‑stage pruning to reduce training memory/time | **MISSING** – pruning is static, not early‑stage. |
+| | Adaptive addition of tuning parameters (LoRA rank) during training | **MISSING** – LoRA rank is fixed. |
+| **Hyperparameters** | Target sparsity schedule (γ_t) and tuning‑parameter budget (Δ_t) per step | **MISSING** – no schedule or constraints. |
+| | Learning‑rate schedule tied to pruning/tuning dynamics | **MISSING** – standard fixed LR used. |
+| **Data & Tasks** | Multiple downstream tasks (e.g., GLUE, SQuAD, LLaMA fine‑tuning) | **PARTIAL** – only GLUE SST‑2 is used. |
+| | Pre‑processing and split details matching the paper | **PARTIAL** – standard HuggingFace splits used; no mention of paper’s exact splits. |
+| **Evaluation** | Metrics: task accuracy, inference speedup, memory footprint, training time | **MISSING** – only accuracy reported; no speed/memory measurements. |
+| | Baseline comparisons (LoRA, pruning, APT vs. others) | **MISSING** – no baseline runs. |
+| **Experimental Setup** | Training steps, checkpointing, hardware specs, reproducibility scripts | **PARTIAL** – `reproduce.sh` installs deps and runs a single script, but no detailed training steps, checkpointing, or hardware notes. |
+| | Measurement of inference latency and memory usage | **MISSING** – not implemented. |
+| **Reproduce.sh** | Automates full pipeline to reproduce paper’s reported results | **MISSING** – only installs deps and runs one script; no replication of paper’s extensive experiments. |
+
+**Summary**
+
+- **ALL_OK**: *No.*  
+- The reproduction script implements only a very simplified, static pruning + LoRA fine‑tuning on a small model and dataset. It does **not** capture the core adaptive pruning/tuning dynamics, outlier‑aware scoring, self‑distillation, or the extensive evaluation and baseline comparisons presented in the paper. Significant work is required to bring the code in line with the paper’s contributions.
+2026-03-14 15:34:11.993527 
+2026-03-14 15:34:11.993783 Generating refined code...
+2026-03-14 15:35:36.109993   Updated: generated_reproduction.txt
+2026-03-14 15:35:36.110093 
+2026-03-14 15:35:36.110152 --- Iteration 2: Observe & Refine ---

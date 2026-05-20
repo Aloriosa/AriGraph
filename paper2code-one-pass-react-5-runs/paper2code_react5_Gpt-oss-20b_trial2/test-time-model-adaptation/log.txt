@@ -1,0 +1,190 @@
+2026-03-15 16:01:12.212147 ======================================================================
+2026-03-15 16:01:12.212275 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-15 16:01:12.212335 ======================================================================
+2026-03-15 16:01:12.212372 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/test-time-model-adaptation/paper.md
+2026-03-15 16:01:12.212420 Log path: paper2code_react5_Gpt-oss-20b_trial2/test-time-model-adaptation
+2026-03-15 16:01:12.212453 Model: Openai/Gpt-oss-20b
+2026-03-15 16:01:12.212484 Max iterations: 5
+2026-03-15 16:01:12.212518 Run reproduce.sh: False
+2026-03-15 16:01:12.212552 Run LLM paper check: True
+2026-03-15 16:01:12.212584 
+2026-03-15 16:01:12.212614 Loading paper...
+2026-03-15 16:01:12.212981 Paper length: 95489 chars (using 95489 for prompt)
+2026-03-15 16:01:12.213037 
+2026-03-15 16:01:12.232490 --- Iteration 0: Initial generation ---
+2026-03-15 16:02:12.312381   Created: generated_reproduction.txt
+2026-03-15 16:02:12.312489 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial2/test-time-model-adaptation/submission (1 files)
+2026-03-15 16:02:12.312543 
+2026-03-15 16:02:12.312593 --- Iteration 1: Observe & Refine ---
+2026-03-15 16:02:19.168521 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- **Full FOA pipeline** – The code does not implement the core forward‑only prompt adaptation using CMA‑ES as described in the paper.  
+- **CMA‑ES optimizer** – No derivative‑free CMA‑ES implementation is present; the script only references the idea.  
+- **Unsupervised fitness function** – The paper’s fitness function (combining prediction entropy and CLS‑activation discrepancy) is not coded.  
+- **Activation‑shifting scheme** – The back‑to‑source activation shifting mechanism is absent.  
+- **Quantized ViT support** – The repository uses a full‑precision ViT‑Base from `timm`; no 8‑bit or other quantized models are included.  
+- **ImageNet‑C evaluation** – The code runs on CIFAR‑10, not on the ImageNet‑C benchmark used in the paper.  
+- **Memory‑usage reporting** – No measurement or reporting of run‑time memory consumption (e.g., 5,165 MB vs. 208 MB).  
+- **Baseline comparison** – No implementation of TENT or other gradient‑based TTA baselines for quantitative comparison.  
+- **Hyperparameter settings** – Key hyperparameters (CMA‑ES population size, learning rate, batch size, prompt dimension, number of epochs) are not specified or tuned to match the paper.  
+- **Evaluation protocol** – Accuracy, top‑1/5 metrics, corruption levels, and statistical significance tests are missing.  
+- **Hardware/compatibility notes** – No documentation or scripts for running on edge devices, FPGAs, or quantized models.  
+- **`reproduce.sh`** – No shell script that automates the full training/evaluation pipeline to reproduce the paper’s results.  
+
+**INCORRECT**  
+- **Dataset choice** – The paper evaluates on ImageNet‑C; the code uses CIFAR‑10, which is not comparable.  
+- **Model choice** – The paper focuses on ViT‑Base; the code uses a generic ViT‑Base from `timm` but does not include the prompt insertion or activation shifting logic.  
+
+**PARTIAL**  
+- **Prompt insertion** – The code may include a placeholder for adding a prompt to the ViT input, but it does not actually learn or update it during inference.  
+- **Forward‑only inference** – The script performs only forward passes, but without the CMA‑ES loop or fitness evaluation.  
+
+**OK**  
+- The repository contains a minimal, self‑contained script that demonstrates a forward‑only inference pipeline using a ViT‑Base model from `timm`.  
+- The code is documented and can be executed without GPU (CPU‑only) forward passes.  
+
+**Conclusion**  
+The current codebase does **not** reproduce the key contributions of the paper. Significant additions are required to implement CMA‑ES prompt learning, the unsupervised fitness function, activation shifting, quantized model support, and evaluation on ImageNet‑C with proper baselines and metrics.
+2026-03-15 16:02:19.168728 
+2026-03-15 16:02:19.169000 Generating refined code...
+2026-03-15 16:03:31.148315   Updated: generated_reproduction.txt
+2026-03-15 16:03:31.148418 
+2026-03-15 16:03:31.148458 --- Iteration 2: Observe & Refine ---
+2026-03-15 16:03:36.035620 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Core FOA algorithm (prompt insertion, CMA‑ES optimization, unsupervised fitness, activation shifting) – no implementation of the forward‑only adaptation loop.  
+- CMA‑ES hyper‑parameters (population size, sigma, number of generations, etc.) – not defined.  
+- Prompt dimensionality and initialization strategy – absent.  
+- Source‑domain CLS activation statistics (32 ID samples, mean & std) – not computed.  
+- Unsupervised fitness function combining entropy and activation discrepancy – not coded.  
+- Back‑to‑source activation shifting logic – missing.  
+- ImageNet‑C dataset download, preprocessing, and severity‑5 split – not included.  
+- Evaluation metrics (Top‑1 accuracy, ECE, memory usage) and reporting – not implemented.  
+- `reproduce.sh` script that installs dependencies, downloads data, runs the full pipeline, and writes results – not present.  
+
+**INCORRECT / PARTIAL** – none, because the repository contains only a high‑level README‑style description and no actual code for the above components.  
+
+**Conclusion**  
+ALL critical components from the paper are missing in the current codebase. The repository needs a full implementation of FOA, CMA‑ES, data handling, evaluation, and a reproducibility script before it can be considered a faithful reproduction.
+2026-03-15 16:03:36.035774 
+2026-03-15 16:03:36.035927 Generating refined code...
+2026-03-15 16:05:07.570993   Updated: generated_reproduction.py
+2026-03-15 16:05:07.571092 
+2026-03-15 16:05:07.571131 --- Iteration 3: Observe & Refine ---
+2026-03-15 16:05:40.938528 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incorrect / Partial Items**
+
+| Status | Requirement from Paper | Comment |
+|--------|------------------------|---------|
+| **MISSING** | Quantized 8‑bit ViT support (paper claims 8‑bit outperforms 32‑bit TENT) | Code only uses full‑precision `vit_base_patch16_224`. No quantization logic or 8‑bit model. |
+| **MISSING** | `reproduce.sh` script that installs deps, downloads ImageNet‑C, runs the full pipeline and writes `results.txt` | The repository contains only `generated_reproduction.py` and a description of `reproduce.sh` in the README, but the script itself is not present. |
+| **INCORRECT** | `compute_ece` implementation | It applies `softmax` to class indices (`preds`) instead of logits, yielding wrong ECE values. |
+| **INCORRECT** | Persistence of the best prompt after each batch | `adapt_batch` updates `self.model.prompt` for each candidate but never sets it to the best prompt found by CMA‑ES, so the prompt does not carry over to the next batch. |
+| **INCORRECT** | Activation shifting logic | The paper describes a *dynamic* back‑to‑source shifting scheme; the implementation uses a fixed `gamma` step toward the source mean, which may not match the intended dynamic update. |
+| **PARTIAL** | Hyper‑parameters (population size, lambda, gamma, prompt length) | The code uses default values (popsize=28, lambda=0.0, gamma=1.0, prompt_len=3) that are not explicitly tied to the values reported in the paper. |
+| **PARTIAL** | Fitness function composition | The paper mentions a fitness function combining entropy and *test‑training statistic discrepancy*. The code implements this but the exact weighting (`lambda_`) is set to 0 by default, effectively using only entropy. |
+| **PARTIAL** | Evaluation protocol | The code evaluates on ImageNet‑C severity 5 and reports Top‑1 accuracy and ECE, matching the paper. However, it does not report the memory usage or compare against TENT as in the paper’s tables. |
+| **OK** | Core method (prompt adaptation + CMA‑ES + unsupervised fitness) | The main algorithmic idea is implemented. |
+| **OK** | Use of only forward passes (no gradients) | No backward computation is performed. |
+| **OK** | Source statistics from 32 clean images | The code samples 32 images from ImageNet‑val to compute CLS mean/std. |
+| **OK** | Dataset handling (ImageNet‑C severity 5) | The `ImageNetC` dataset class loads all corruption types at level 5. |
+| **OK** | Overall structure (main script, argument parsing, device handling) | The script can be run on GPU or CPU. |
+
+**Recommendation**
+
+- Add an 8‑bit quantized ViT implementation or at least a placeholder to demonstrate the claimed advantage.
+- Provide a `reproduce.sh` that reproduces the exact experimental pipeline.
+- Fix `compute_ece` to accept logits.
+- After CMA‑ES selection, set `self.model.prompt` to the best prompt.
+- Clarify or implement the dynamic activation shifting as described in the paper.
+- Align hyper‑parameters with the paper’s reported values or document the differences.
+- Optionally add memory‑usage reporting and baseline comparisons to match the paper’s evaluation tables.
+2026-03-15 16:05:40.938778 
+2026-03-15 16:05:40.939057 Generating refined code...
+2026-03-15 16:06:49.268890   Updated: generated_reproduction.sh
+2026-03-15 16:06:49.269006 
+2026-03-15 16:06:49.269074 --- Iteration 4: Observe & Refine ---
+2026-03-15 16:07:30.072701 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incorrect / Partial items**
+
+| Status | Requirement from the paper | Why it’s an issue |
+|--------|----------------------------|-------------------|
+| **MISSING** | Quantized 8‑bit ViT support (paper claims 8‑bit outperforms 32‑bit) | The code never quantizes the model; the `--quantize` flag is ignored. |
+| **MISSING** | Dynamic activation‑shifting direction (paper mentions “dynamically updated shifting direction”) | The implementation uses a fixed shift toward the source mean; no dynamic update per batch. |
+| **MISSING** | Handling of `--quantize` flag in `reproduce.sh` | The script passes `--quantize 8` but `generated_reproduction.py` does not parse this argument, causing a crash. |
+| **MISSING** | Import of `PIL.Image` | `Image.open` is used in both dataset classes but `Image` is never imported, leading to a `NameError`. |
+| **MISSING** | Download of ImageNet‑validation images | The script only downloads the ground‑truth file; the actual validation images (`ILSVRC2012_img_val`) are not fetched, so the source‑statistics computation will fail. |
+| **MISSING** | Correct implementation of Expected Calibration Error (ECE) | `compute_ece` incorrectly applies `softmax` to class indices instead of logits, producing nonsensical ECE values. |
+| **INCORRECT** | `compute_ece` logic | As above – the function mis‑interprets predictions and returns a meaningless metric. |
+| **INCORRECT** | `reproduce.sh` argument parsing | The script passes an unsupported flag (`--quantize`) and does not provide any mechanism to enable quantization. |
+| **PARTIAL** | Prompt length / CMA‑ES hyper‑parameters | The paper does not specify these values; the implementation uses arbitrary defaults (prompt_len = 3, popsize = 28, sigma = 0.05). |
+| **PARTIAL** | Lambda weight for activation discrepancy | The paper does not give a value; the script uses 0.4 but this is not justified or tuned. |
+| **PARTIAL** | Activation‑shifting scheme | The code performs a simple shift toward the source mean; the paper describes a more sophisticated, dynamic shifting strategy. |
+| **OK** | Forward‑only adaptation (no back‑prop) | The code never computes gradients. |
+| **OK** | Prompt adaptation via CMA‑ES | The prompt is updated with a derivative‑free optimizer. |
+| **OK** | Unsupervised fitness (entropy + activation discrepancy) | The fitness function combines these two terms. |
+| **OK** | Source statistics from 32 ID samples | The code collects 32 clean images to compute CLS mean/std. |
+| **OK** | Batch size 64, ImageNet‑C severity 5 evaluation | The script uses the correct dataset and batch size. |
+| **OK** | ViT‑Base model loading (timm) | The base model is correctly instantiated. |
+| **OK** | No model weight updates | Only the prompt is modified. |
+| **OK** | No gradient computation | All operations are forward‑only. |
+
+**Conclusion**
+
+The reproduction code implements the core idea of FOA (prompt adaptation with CMA‑ES and unsupervised fitness) but lacks several critical components from the paper: quantization support, dynamic activation shifting, proper handling of the `--quantize` flag, correct dataset setup, and a valid ECE calculation. Additionally, the script will fail to run due to missing imports and unsupported arguments.
+
+**Recommendation**
+
+Fix the missing imports, add quantization logic, correct the ECE function, and update the script to handle the `--quantize` flag and download the ImageNet‑validation images. Once these issues are addressed, the reproduction will be complete.
+2026-03-15 16:07:30.072912 
+2026-03-15 16:07:30.073120 Generating refined code...
+2026-03-15 16:09:05.746236   Updated: generated_reproduction.py
+2026-03-15 16:09:05.746375   Updated: generated_reproduction.sh
+2026-03-15 16:09:05.746444   Updated: generated_reproduction.txt
+2026-03-15 16:09:05.746509   Updated: README.md
+2026-03-15 16:09:05.746550 
+2026-03-15 16:09:05.746587 --- Iteration 5: Observe & Refine ---
+2026-03-15 16:10:07.373135 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- The `reproduce.sh` script does not actually invoke the Python evaluation script (`generated_reproduction.py`), so the full pipeline never runs.  
+- No explicit baseline comparison (e.g., TENT) is executed or reported, which is required for reproducing the results table in the paper.  
+
+**INCORRECT**  
+- `lambda_` (weight for activation‑discrepancy in the fitness function) defaults to `0.0`. The paper’s method relies on a non‑zero discrepancy term; using `0.0` effectively removes that component.  
+- The ECE calculation in `main()` passes `all_preds` (class indices) to `compute_ece`, which expects logits. This yields an incorrect ECE value.  
+
+**PARTIAL**  
+- The activation‑shifting scheme is implemented only for the CLS token and uses a simple EMA of the target mean. While this captures the spirit of the paper, the exact shifting direction and magnitude described in the manuscript are not fully reproduced.  
+- The CMA‑ES hyper‑parameters (`popsize`, `sigma`) are set to arbitrary values (28, 0.05) rather than the values reported or tuned in the paper.  
+- Quantization is applied only to the base ViT model; the prompt‑augmented model is not re‑quantized, which may affect the exact memory‑usage numbers reported.  
+
+**Conclusion**  
+The core idea (prompt + CMA‑ES + unsupervised fitness + activation shifting) is present, but the script does not fully reproduce the experimental protocol, and key hyper‑parameters and evaluation steps are missing or incorrect.
+2026-03-15 16:10:07.373317 
+2026-03-15 16:10:07.373474 Generating refined code...
+2026-03-15 16:11:26.074540   Updated: README.md
+2026-03-15 16:11:26.074750   Updated: generated_reproduction.py
+2026-03-15 16:11:26.074894   Updated: generated_reproduction.sh
+2026-03-15 16:11:26.075018   Updated: generated_reproduction.txt
+2026-03-15 16:11:26.075099 
+2026-03-15 16:11:26.075188 ======================================================================
+2026-03-15 16:11:26.075274 REACT BASELINE COMPLETE
+2026-03-15 16:11:26.075344 ======================================================================
+2026-03-15 16:11:26.075414 Total iterations: 6
+2026-03-15 16:11:26.075499 API tokens: 64752 completion, 230496 prompt
+2026-03-15 16:11:26.075566 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial2/test-time-model-adaptation/generated_code_response.txt

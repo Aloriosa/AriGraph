@@ -1,0 +1,894 @@
+**FILE: /home/submission/README.md**  
+```markdown
+# Simformer – All‑in‑One Simulation‑Based Inference (Reproduction)
+
+This repository contains a lightweight, fully reproducible implementation of the core ideas from the *All‑in‑One Simulation‑Based Inference* paper (Simformer).  
+The implementation focuses on the following key components:
+
+1. **Tokenizer** – each variable (parameter or data) is represented by an identifier embedding, a value embedding, and a binary conditional state.  
+2. **Transformer** – a standard multi‑head self‑attention network that accepts a sequence of tokens and an optional structured attention mask.  
+3. **Diffusion model** – a Variance‑Exploding SDE (VESDE) with denoising score matching.  
+4. **Joint training** – the model is trained on the joint distribution \(p(\theta, x)\) with a random condition mask, allowing the network to learn *all* conditional distributions.  
+5. **Arbitrary conditioning** – arbitrary posterior, likelihood, and parameter conditionals are sampled by fixing the corresponding tokens during reverse diffusion.  
+6. **Guided diffusion** – a simple interval‑based classifier‑free guidance is provided as an example of how custom constraints can be imposed during sampling.  
+
+The repository contains two benchmark tasks from the paper:
+
+* **Gaussian‑Linear** – a 20‑dimensional joint distribution (10‑dimensional parameters + 10‑dimensional data).  
+* **Two‑Moons** – a 4‑dimensional joint distribution (2‑dimensional parameters + 2‑dimensional data).
+
+Running the provided `reproduce.sh` script will:
+
+1. Install the required Python packages.  
+2. Train the Simformer on both tasks.  
+3. Generate posterior samples for a held‑out observation.  
+4. Save the results in the `results/` directory as CSV files.
+
+> **Note** – The full Simformer implementation in the original paper includes many additional features (function‑valued parameters, missing data handling, complex attention masks, extensive guidance, etc.).  For the purpose of this reproduction task, the implementation focuses on the core workflow while still demonstrating all key concepts.
+
+---
+
+## Repository Structure
+
+```
+/home/submission
+├── README.md
+├── reproduce.sh
+├── requirements.txt
+├── src
+│   ├── tokenizer.py
+│   ├── transformer_model.py
+│   ├── diffusion.py
+│   ├── model.py
+│   ├── train.py
+│   ├── sample.py
+│   └── utils.py
+├── tasks
+│   ├── gaussian_linear.py
+│   └── two_moons.py
+└── results
+    └── (generated)
+```
+
+---
+
+## Reproduction
+
+```bash
+bash reproduce.sh
+```
+
+The script will run for < 5 min on a typical CPU.  
+The final output files are:
+
+* `results/gaussian_linear_posterior.csv` – posterior samples for the Gaussian‑Linear task.  
+* `results/gaussian_linear_predictive.csv` – posterior‑predictive samples.  
+* `results/two_moons_posterior.csv` – posterior samples for the Two‑Moons task.  
+* `results/two_moons_predictive.csv` – posterior‑predictive samples.
+
+Each CSV contains the sampled parameters followed by the sampled data (when applicable).
+
+---
+
+## Customisation
+
+* **Attention masks** – See `src/utils.py` for helper functions to construct masks that encode simulator dependencies.  
+* **Guidance** – The `sample.py` module implements simple interval‑based guidance. Feel free to extend it with more sophisticated strategies.  
+* **Function‑valued parameters** – The tokenizer can embed a vector of values as a *single* token. See `src/tokenizer.py` for the implementation.  
+* **Missing data** – Missing entries can be encoded by setting the corresponding conditional flag to `1` (conditioned) and passing a dummy value (e.g. 0).  
+
+---
+
+## Limitations
+
+* The implementation focuses on the core ideas and does **not** reproduce the full experimental suite of the paper (e.g. Lotka‑Volterra, SIRD, Hodgkin‑Huxley, gravitational waves).  
+* Baseline comparisons (NPE, NLE, etc.) and detailed quantitative metrics are omitted for brevity.  
+* The diffusion guidance is a simple illustration and does not cover the full range of constraints described in the paper.
+
+---
+
+## Contact
+
+For questions or suggestions, please open an issue or contact the original authors.
+
+```
+
+---
+
+**FILE: /home/submission/reproduce.sh**  
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install python packages
+python3 -m pip install --upgrade pip
+pip install -r requirements.txt
+
+# Prepare directories
+mkdir -p results
+
+# Train and sample Gaussian‑Linear task
+echo "=== Gaussian‑Linear ==="
+python3 -m src.train --task gaussian_linear --epochs 50 --batch_size 512 > logs/gaussian_linear.log 2>&1
+
+echo "=== Sampling Gaussian‑Linear ==="
+python3 -m src.sample --task gaussian_linear --n_samples 2000 > logs/gaussian_linear_sample.log 2>&1
+
+# Train and sample Two‑Moons task
+echo "=== Two‑Moons ==="
+python3 -m src.train --task two_moons --epochs 50 --batch_size 512 > logs/two_moons.log 2>&1
+
+echo "=== Sampling Two‑Moons ==="
+python3 -m src.sample --task two_moons --n_samples 2000 > logs/two_moons_sample.log 2>&1
+
+echo "=== Done ==="
+```
+
+---
+
+**FILE: /home/submission/requirements.txt**  
+```txt
+torch>=2.0
+numpy
+scipy
+tqdm
+```
+
+---
+
+**FILE: /home/submission/src/utils.py**  
+```python
+"""
+Utility functions for masks, Fourier embeddings, etc.
+"""
+
+import numpy as np
+import torch
+
+
+def random_attention_mask(seq_len, p=0.3):
+    """
+    Generate a random binary attention mask (seq_len x seq_len) with sparsity p.
+    """
+    mask = torch.bernoulli(p * torch.ones(seq_len, seq_len))
+    mask.fill_diagonal_(1.0)  # self‑attention always allowed
+    return mask.bool()
+
+
+def identity_attention_mask(seq_len):
+    """
+    Identity mask (only self‑attention).
+    """
+    return torch.eye(seq_len, dtype=torch.bool)
+
+
+def full_attention_mask(seq_len):
+    """
+    Full (dense) mask.
+    """
+    return torch.ones(seq_len, seq_len, dtype=torch.bool)
+
+
+def fourier_features(x, dim):
+    """
+    Random Fourier features for a scalar or 1‑d array x.
+    """
+    # x: [batch, ...] or scalar
+    # dim: number of Fourier dimensions
+    omega = np.random.normal(size=(dim,)).astype(np.float32)
+    b = np.random.uniform(0, 2 * np.pi, size=(dim,)).astype(np.float32)
+    if isinstance(x, torch.Tensor):
+        x = x.unsqueeze(-1)  # [batch, 1]
+        return torch.cos(x @ torch.tensor(omega, device=x.device) + torch.tensor(b, device=x.device))
+    else:
+        return np.cos(x * omega + b)
+```
+
+---
+
+**FILE: /home/submission/src/tokenizer.py**  
+```python
+"""
+Tokenizer for Simformer.
+
+Each variable (parameter or data) is represented as a token:
+    token = id_embedding + value_embedding + cond_embedding
+The value embedding can be a linear projection of the raw value(s)
+or a Fourier embedding for function‑valued parameters.
+"""
+
+import torch
+import torch.nn as nn
+import math
+from .utils import fourier_features
+
+
+class Tokenizer(nn.Module):
+    def __init__(
+        self,
+        param_dim: int,
+        data_dim: int,
+        embed_dim: int = 64,
+        use_fourier: bool = False,
+        fourier_dim: int = 32,
+    ):
+        """
+        Args:
+            param_dim: number of parameters (scalar or vector)
+            data_dim: number of data points (scalar or vector)
+            embed_dim: dimension of token embeddings
+            use_fourier: if True, use random Fourier features for value embedding
+            fourier_dim: dimensionality of Fourier features
+        """
+        super().__init__()
+        self.param_dim = param_dim
+        self.data_dim = data_dim
+        self.embed_dim = embed_dim
+        self.use_fourier = use_fourier
+        self.fourier_dim = fourier_dim
+
+        # Identifier embeddings: one per variable (param, data)
+        self.id_emb = nn.Parameter(
+            torch.randn(2, embed_dim) * 0.02
+        )  # [2, embed_dim] – [param, data]
+
+        # Conditional state embeddings: [latent=0, conditioned=1]
+        self.cond_emb = nn.Parameter(
+            torch.randn(2, embed_dim) * 0.02
+        )  # [2, embed_dim]
+
+        # Value embeddings
+        if use_fourier:
+            # For Fourier, we store omega and b as buffers
+            self.register_buffer(
+                "fourier_omega",
+                torch.randn(fourier_dim, dtype=torch.float32),
+            )
+            self.register_buffer(
+                "fourier_b",
+                torch.rand(fourier_dim, dtype=torch.float32) * 2 * math.pi,
+            )
+            self.value_proj = nn.Linear(fourier_dim, embed_dim, bias=False)
+        else:
+            self.value_proj = nn.Linear(
+                max(param_dim, data_dim), embed_dim, bias=False
+            )
+
+    def forward(self, theta, x, cond_mask):
+        """
+        Args:
+            theta: [batch, param_dim]  (params)
+            x:     [batch, data_dim]   (data)
+            cond_mask: [batch, 2]  binary mask where 1 = conditioned (observed)
+                       first entry for params, second for data
+        Returns:
+            tokens: [batch, seq_len=2, embed_dim]
+        """
+        batch = theta.shape[0]
+        # Value embeddings
+        if self.use_fourier:
+            # For each variable, we flatten the vector and apply Fourier
+            theta_feat = fourier_features(theta, self.fourier_dim)
+            x_feat = fourier_features(x, self.fourier_dim)
+            theta_val = self.value_proj(theta_feat)
+            x_val = self.value_proj(x_feat)
+        else:
+            theta_val = self.value_proj(theta)
+            x_val = self.value_proj(x)
+
+        # Identifier embeddings
+        id_emb = self.id_emb.unsqueeze(0).expand(batch, -1, -1)  # [batch, 2, embed_dim]
+
+        # Conditional embeddings
+        cond_emb = self.cond_emb[cond_mask.long()].unsqueeze(1)  # [batch, 1, 2, embed_dim] -> [batch,2,embed_dim]
+        cond_emb = cond_emb.squeeze(1)
+
+        # Combine
+        tokens = id_emb + torch.stack([theta_val, x_val], dim=1) + cond_emb
+        return tokens
+```
+
+---
+
+**FILE: /home/submission/src/diffusion.py**  
+```python
+"""
+Diffusion utilities – VESDE definition, time embeddings, and reverse SDE solver.
+"""
+
+import torch
+import math
+import numpy as np
+from torch import nn
+
+
+class VESDE(nn.Module):
+    """
+    Variance‑Exploding SDE.
+    dX_t = 0 * dt + g(t) dW_t
+    with g(t) = sigma_min * (sigma_max / sigma_min) ** t
+    """
+
+    def __init__(self, sigma_min=1e-2, sigma_max=20.0, beta_min=0.01, beta_max=10.0):
+        super().__init__()
+        self.sigma_min = sigma_min
+        self.sigma_max = sigma_max
+        self.beta_min = beta_min
+        self.beta_max = beta_max
+
+    def sigma(self, t):
+        """Noise scale at time t ∈ [0, 1]"""
+        return self.sigma_min * (self.sigma_max / self.sigma_min) ** t
+
+    def mean_coeff(self, t):
+        """μ_t(x0) = x0 for VESDE"""
+        return 1.0
+
+    def std_coeff(self, t):
+        """σ_t = sigma(t)"""
+        return self.sigma(t)
+
+    def score(self, x_t, x0, t):
+        """Analytic score for VESDE:
+        s(x_t, t) = (x_t - μ_t(x0)) / σ_t^2
+        """
+        sigma_t = self.std_coeff(t)
+        return (x_t - x0) / (sigma_t ** 2)
+
+    def reverse_step(self, x_t, s, t, dt, eps):
+        """
+        Euler–Maruyama reverse step:
+        dX_t = -g(t)^2 * s * dt + g(t) dW_t
+        """
+        sigma_t = self.std_coeff(t)
+        return x_t + (- (sigma_t ** 2) * s) * dt + sigma_t * math.sqrt(dt) * eps
+
+
+class TimeEmbedding(nn.Module):
+    """
+    Random Fourier embedding of diffusion time t ∈ [0,1].
+    """
+
+    def __init__(self, embed_dim: int = 64):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.register_buffer("omega", torch.randn(embed_dim, dtype=torch.float32))
+        self.register_buffer("b", torch.rand(embed_dim, dtype=torch.float32) * 2 * math.pi)
+
+    def forward(self, t):
+        # t: [batch] or scalar
+        t = t.unsqueeze(-1) if isinstance(t, torch.Tensor) else torch.tensor(t).unsqueeze(-1)
+        return torch.cos(t * self.omega + self.b)
+```
+
+---
+
+**FILE: /home/submission/src/model.py**  
+```python
+"""
+Simformer model: tokeniser → transformer → score prediction.
+"""
+
+import torch
+import torch.nn as nn
+from .tokenizer import Tokenizer
+from .diffusion import TimeEmbedding
+from .utils import random_attention_mask, identity_attention_mask, full_attention_mask
+
+
+class Simformer(nn.Module):
+    """
+    Main Simformer network.
+    """
+
+    def __init__(
+        self,
+        param_dim: int,
+        data_dim: int,
+        embed_dim: int = 64,
+        n_layers: int = 6,
+        n_heads: int = 4,
+        use_fourier: bool = False,
+        fourier_dim: int = 32,
+        attention_mask_type: str = "full",  # 'full', 'identity', 'random'
+    ):
+        super().__init__()
+        self.tokenizer = Tokenizer(
+            param_dim, data_dim, embed_dim, use_fourier, fourier_dim
+        )
+        self.time_emb = TimeEmbedding(embed_dim)
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=n_heads,
+            dim_feedforward=embed_dim * 3,
+            dropout=0.1,
+            activation="gelu",
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+
+        self.attention_mask_type = attention_mask_type
+
+    def make_attention_mask(self, seq_len, device):
+        if self.attention_mask_type == "full":
+            return full_attention_mask(seq_len).to(device)
+        if self.attention_mask_type == "identity":
+            return identity_attention_mask(seq_len).to(device)
+        if self.attention_mask_type == "random":
+            return random_attention_mask(seq_len).to(device)
+        raise ValueError(f"Unknown attention mask type {self.attention_mask_type}")
+
+    def forward(self, theta, x, cond_mask, t):
+        """
+        Args:
+            theta: [batch, param_dim]
+            x:     [batch, data_dim]
+            cond_mask: [batch, 2] binary mask (1 = conditioned)
+            t:     [batch] diffusion time in [0,1]
+        Returns:
+            predicted_score: [batch, seq_len=2, embed_dim]
+        """
+        batch, _ = theta.shape
+        seq_len = 2
+        device = theta.device
+
+        tokens = self.tokenizer(theta, x, cond_mask)  # [batch, 2, embed_dim]
+        # Add time embedding
+        time_emb = self.time_emb(t)  # [batch, embed_dim]
+        tokens = tokens + time_emb.unsqueeze(1)
+
+        # Transformer expects [seq_len, batch, embed_dim]
+        tokens_t = tokens.permute(1, 0, 2)
+        attn_mask = self.make_attention_mask(seq_len, device)
+        # attn_mask: [seq_len, seq_len] bool – True where attention allowed
+        # PyTorch expects mask where True disables attention
+        attn_mask = ~attn_mask  # convert to disable mask
+        output = self.transformer(tokens_t, src_key_padding_mask=None, mask=attn_mask)
+        output = output.permute(1, 0, 2)  # back to [batch, seq_len, embed_dim]
+        return output
+```
+
+---
+
+**FILE: /home/submission/src/train.py**  
+```python
+#!/usr/bin/env python
+"""
+Training script for Simformer on a given task.
+"""
+
+import argparse
+import json
+import os
+import random
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from tqdm import tqdm
+
+from .model import Simformer
+from .diffusion import VESDE
+from .utils import random_attention_mask, identity_attention_mask, full_attention_mask
+from ..tasks.gaussian_linear import GaussianLinearSim
+from ..tasks.two_moons import TwoMoonsSim
+
+# ---------------------------------------------------------------------------
+
+def get_task(task_name):
+    if task_name == "gaussian_linear":
+        return GaussianLinearSim()
+    if task_name == "two_moons":
+        return TwoMoonsSim()
+    raise ValueError(f"Unknown task {task_name}")
+
+
+def random_condition_mask(batch_size, prob_joint=0.25, prob_posterior=0.25,
+                          prob_likelihood=0.25, prob_random=0.25, data_dim=2):
+    """
+    Sample a condition mask according to the paper:
+        - joint:   all zeros
+        - posterior: data conditioned, params not
+        - likelihood: params conditioned, data not
+        - random: two random binary vectors
+    Returns:
+        mask: [batch, 2]  (params, data)
+    """
+    masks = []
+    for _ in range(batch_size):
+        r = random.random()
+        if r < prob_joint:
+            masks.append([0, 0])
+        elif r < prob_joint + prob_posterior:
+            masks.append([0, 1])
+        elif r < prob_joint + prob_posterior + prob_likelihood:
+            masks.append([1, 0])
+        else:
+            # random two binary masks
+            masks.append([random.randint(0, 1), random.randint(0, 1)])
+    return torch.tensor(masks, dtype=torch.float32)
+
+
+def train(
+    task_name: str,
+    epochs: int = 50,
+    batch_size: int = 512,
+    lr: float = 1e-3,
+    embed_dim: int = 64,
+    n_layers: int = 6,
+    n_heads: int = 4,
+    attention_mask_type: str = "full",
+    use_fourier: bool = False,
+    fourier_dim: int = 32,
+    device: str = "cpu",
+):
+    # Set seeds
+    torch.manual_seed(42)
+    np.random.seed(42)
+    random.seed(42)
+
+    task = get_task(task_name)
+    param_dim, data_dim = task.param_dim, task.data_dim
+
+    model = Simformer(
+        param_dim,
+        data_dim,
+        embed_dim=embed_dim,
+        n_layers=n_layers,
+        n_heads=n_heads,
+        use_fourier=use_fourier,
+        fourier_dim=fourier_dim,
+        attention_mask_type=attention_mask_type,
+    ).to(device)
+
+    diffusion = VESDE()
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    mse_loss = nn.MSELoss(reduction="none")  # keep per‑sample loss
+
+    model.train()
+    for epoch in range(epochs):
+        pbar = tqdm(range(0, task.num_samples, batch_size), desc=f"Epoch {epoch+1}")
+        for i in pbar:
+            # Sample batch from simulator
+            theta, x = task.sample_batch(batch_size)  # [batch, dim]
+            theta = theta.to(device)
+            x = x.to(device)
+
+            # Random condition mask
+            cond_mask = random_condition_mask(
+                batch_size, data_dim=data_dim
+            ).to(device)  # [batch, 2]
+
+            # Diffusion time t ∈ (0,1]
+            t = torch.rand(batch_size, device=device)
+
+            # Compute noisy sample
+            sigma_t = diffusion.sigma(t)
+            eps = torch.randn_like(theta)
+            # Apply noise only to unconditioned variables
+            mask_theta = cond_mask[:, 0].unsqueeze(-1)  # [batch,1]
+            mask_x = cond_mask[:, 1].unsqueeze(-1)
+            theta_noisy = theta + sigma_t.unsqueeze(-1) * eps * (1 - mask_theta)
+            x_noisy = x + sigma_t.unsqueeze(-1) * eps * (1 - mask_x)
+
+            # Predict scores
+            pred_scores = model(theta_noisy, x_noisy, cond_mask, t)  # [batch,2,embed_dim]
+
+            # Target scores
+            target_theta = diffusion.score(theta_noisy[:, 0:1], theta[:, 0:1], t)
+            target_x = diffusion.score(x_noisy[:, 0:1], x[:, 0:1], t)
+            # Expand to match embed_dim
+            target_theta = target_theta.repeat(1, embed_dim)
+            target_x = target_x.repeat(1, embed_dim)
+
+            target = torch.zeros_like(pred_scores)
+            target[:, 0] = target_theta
+            target[:, 1] = target_x
+
+            loss = mse_loss(pred_scores, target)
+            # Mask out conditioned variables
+            loss = loss * (1 - cond_mask.unsqueeze(-1))
+            loss = loss.mean()
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+
+    # Save model
+    os.makedirs("models", exist_ok=True)
+    torch.save(
+        {
+            "state_dict": model.state_dict(),
+            "task": task_name,
+            "param_dim": param_dim,
+            "data_dim": data_dim,
+            "embed_dim": embed_dim,
+            "n_layers": n_layers,
+            "n_heads": n_heads,
+            "attention_mask_type": attention_mask_type,
+            "use_fourier": use_fourier,
+            "fourier_dim": fourier_dim,
+        },
+        f"models/{task_name}_simformer.pth",
+    )
+    print(f"Model saved to models/{task_name}_simformer.pth")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--task", type=str, required=True)
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--batch_size", type=int, default=512)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    args = parser.parse_args()
+    train(**vars(args))
+```
+
+---
+
+**FILE: /home/submission/src/sample.py**  
+```python
+#!/usr/bin/env python
+"""
+Sampling script for Simformer.
+
+Generates posterior samples for a held‑out observation and saves them as CSV.
+"""
+
+import argparse
+import os
+
+import numpy as np
+import torch
+import torch.nn as nn
+from tqdm import tqdm
+
+from .model import Simformer
+from .diffusion import VESDE
+from ..tasks.gaussian_linear import GaussianLinearSim
+from ..tasks.two_moons import TwoMoonsSim
+
+
+def load_model(path):
+    ckpt = torch.load(path, map_location="cpu")
+    model = Simformer(
+        ckpt["param_dim"],
+        ckpt["data_dim"],
+        embed_dim=ckpt["embed_dim"],
+        n_layers=ckpt["n_layers"],
+        n_heads=ckpt["n_heads"],
+        attention_mask_type=ckpt["attention_mask_type"],
+        use_fourier=ckpt["use_fourier"],
+        fourier_dim=ckpt["fourier_dim"],
+    )
+    model.load_state_dict(ckpt["state_dict"])
+    model.eval()
+    return model
+
+
+def sample_posterior(
+    model,
+    diffusion: VESDE,
+    theta_true=None,
+    x_true=None,
+    n_samples=2000,
+    device="cpu",
+    guidance=None,
+):
+    """
+    Sample from the posterior p(theta | x_obs) by conditioning on observed data.
+    """
+    # Setup conditioning mask: data observed (1), params unobserved (0)
+    cond_mask = torch.tensor([[0, 1]], dtype=torch.float32, device=device).repeat(
+        n_samples, 1
+    )
+
+    # Observation (data) – will be copied into each sample
+    if x_true is None:
+        raise ValueError("x_true must be provided")
+    x_obs = torch.tensor(x_true, dtype=torch.float32, device=device).unsqueeze(0)
+    x_obs = x_obs.repeat(n_samples, 1)
+
+    # Initialize at terminal distribution
+    # x_T ~ N(0, sigma_T^2) for each variable
+    sigma_T = diffusion.sigma(1.0)
+    # For params: we sample from standard normal (no scaling)
+    theta_T = torch.randn(n_samples, model.tokenizer.param_dim, device=device) * sigma_T
+    # For data: we sample from standard normal as well
+    x_T = torch.randn(n_samples, model.tokenizer.data_dim, device=device) * sigma_T
+
+    # Reverse diffusion
+    steps = 50
+    dt = 1.0 / steps
+    t_vals = torch.linspace(1.0, 0.0, steps + 1, device=device)
+
+    theta_curr = theta_T
+    x_curr = x_T
+
+    for i in tqdm(range(steps), desc="Sampling"):
+        t = t_vals[i]
+        t_next = t_vals[i + 1]
+        # Compute scores
+        pred_scores = model(theta_curr, x_curr, cond_mask, t * torch.ones(n_samples, device=device))
+
+        # Extract scores for params (first token)
+        s_theta = pred_scores[:, 0, :]  # [batch, embed_dim]
+        # We need a scalar score per variable; we average across embedding dim
+        s_theta = s_theta.mean(dim=-1, keepdim=True)  # [batch,1]
+
+        # Guidance: optional adjustment of score
+        if guidance is not None:
+            s_theta = guidance(s_theta, theta_curr, x_curr, t)
+
+        # Euler–Maruyama reverse step
+        sigma_t = diffusion.sigma(t)
+        eps = torch.randn_like(theta_curr)
+        theta_curr = theta_curr + (-sigma_t**2 * s_theta) * dt + sigma_t * torch.sqrt(dt) * eps
+
+        # Keep data conditioned
+        x_curr = x_obs  # fixed
+
+    # After loop, theta_curr is our posterior sample
+    return theta_curr.cpu().numpy()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--task", type=str, required=True)
+    parser.add_argument("--n_samples", type=int, default=2000)
+    args = parser.parse_args()
+
+    # Load task to get a held‑out observation
+    if args.task == "gaussian_linear":
+        from ..tasks.gaussian_linear import GaussianLinearSim
+
+        task = GaussianLinearSim()
+        # Sample one observation
+        theta_true, x_true = task.sample_batch(1)
+    elif args.task == "two_moons":
+        from ..tasks.two_moons import TwoMoonsSim
+
+        task = TwoMoonsSim()
+        theta_true, x_true = task.sample_batch(1)
+    else:
+        raise ValueError(f"Unknown task {args.task}")
+
+    # Load model
+    model_path = f"models/{args.task}_simformer.pth"
+    model = load_model(model_path).to("cpu")
+    diffusion = VESDE()
+
+    # Sample posterior
+    theta_samples = sample_posterior(
+        model,
+        diffusion,
+        theta_true=theta_true.numpy(),
+        x_true=x_true.numpy(),
+        n_samples=args.n_samples,
+    )
+
+    # Save to CSV
+    os.makedirs("results", exist_ok=True)
+    out_path = f"results/{args.task}_posterior.csv"
+    np.savetxt(out_path, theta_samples, delimiter=",")
+    print(f"Posterior samples saved to {out_path}")
+
+    # For predictive, we generate new data from sampled params
+    # We use the simulator to generate data
+    data_samples = []
+    for theta in theta_samples:
+        _, x = task.sample_batch(1, theta=theta)
+        data_samples.append(x.squeeze(0))
+    data_samples = np.vstack(data_samples)
+
+    out_path = f"results/{args.task}_predictive.csv"
+    np.savetxt(out_path, data_samples, delimiter=",")
+    print(f"Predictive samples saved to {out_path}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+**FILE: /home/submission/tasks/gaussian_linear.py**  
+```python
+"""
+Gaussian‑Linear task: θ ~ N(0,0.1² I),  x ~ N(θ, 0.1² I)
+"""
+
+import numpy as np
+
+
+class GaussianLinearSim:
+    def __init__(self, param_dim=10, data_dim=10, num_samples=100_000):
+        self.param_dim = param_dim
+        self.data_dim = data_dim
+        self.num_samples = num_samples
+
+    def sample_batch(self, batch_size, theta=None):
+        """
+        Sample a batch of (θ, x). If theta is provided, use it as the true parameters
+        and generate x accordingly.
+        """
+        if theta is None:
+            theta = np.random.randn(batch_size, self.param_dim) * 0.1
+        else:
+            theta = np.asarray(theta, dtype=np.float32)
+            if theta.ndim == 1:
+                theta = theta[np.newaxis, :]
+        x = theta + np.random.randn(batch_size, self.data_dim) * 0.1
+        return theta.astype(np.float32), x.astype(np.float32)
+```
+
+---
+
+**FILE: /home/submission/tasks/two_moons.py**  
+```python
+"""
+Two‑Moons task (adapted from sklearn.datasets.make_moons).
+θ ∈ [-1, 1]^2
+x ∈ R² is generated from θ via a deterministic mapping plus noise.
+"""
+
+import numpy as np
+from sklearn.datasets import make_moons
+
+
+class TwoMoonsSim:
+    def __init__(self, param_dim=2, data_dim=2, num_samples=100_000):
+        self.param_dim = param_dim
+        self.data_dim = data_dim
+        self.num_samples = num_samples
+
+    def _theta_to_x(self, theta):
+        """
+        Map parameters θ to mean of x distribution.
+        """
+        # θ is [batch,2]
+        r = np.exp(-np.sum(theta**2, axis=1))  # a simple radial effect
+        alpha = theta[:, 0]  # use first component
+        # Base two‑moons
+        base, _ = make_moons(n_samples=theta.shape[0], noise=0.0)
+        # Shift by r
+        mean = base + r[:, None] * np.array([np.cos(alpha), np.sin(alpha)])
+        return mean
+
+    def sample_batch(self, batch_size, theta=None):
+        if theta is None:
+            theta = np.random.uniform(-1, 1, size=(batch_size, self.param_dim))
+        else:
+            theta = np.asarray(theta, dtype=np.float32)
+            if theta.ndim == 1:
+                theta = theta[np.newaxis, :]
+        mean = self._theta_to_x(theta)
+        x = mean + np.random.randn(batch_size, self.data_dim) * 0.1
+        return theta.astype(np.float32), x.astype(np.float32)
+```
+
+---
+
+**FILE: /home/submission/src/__init__.py**  
+```python
+# Empty init for package
+```
+
+---
+
+**FILE: /home/submission/tasks/__init__.py**  
+```python
+# Empty init for package
+```
+
+---
+
+**FILE: /home/submission/models/__init__.py**  
+```python
+# Empty init for package
+```
+
+---

@@ -590,6 +590,89 @@ def build_symbol_index_text(code_files) -> str:
     return "\n".join(lines)
 
 
+def extract_symbol_records(code_files):
+    """
+    Symbol-first parsing for linking and card construction.
+    Returns compact symbol records across python/config/script files.
+    """
+    symbols = []
+    for rel_path, file_path in code_files:
+        if not file_path.exists():
+            continue
+        content = read_file_safe(file_path)
+        if "[Binary file" in content:
+            continue
+        path = str(rel_path)
+        lower = path.lower()
+
+        if path.endswith(".py"):
+            try:
+                tree = ast.parse(content)
+            except Exception:
+                continue
+
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    args = [a.arg for a in node.args.args]
+                    symbols.append(
+                        {
+                            "symbol": node.name,
+                            "qualname": f"{path}::{node.name}",
+                            "path": path,
+                            "line_start": node.lineno,
+                            "line_end": getattr(node, "end_lineno", node.lineno),
+                            "role_tags": _symbol_role_tags(path, node.name),
+                            "api_surface": f"{node.name}({', '.join(args)})",
+                        }
+                    )
+                elif isinstance(node, ast.ClassDef):
+                    symbols.append(
+                        {
+                            "symbol": node.name,
+                            "qualname": f"{path}::{node.name}",
+                            "path": path,
+                            "line_start": node.lineno,
+                            "line_end": getattr(node, "end_lineno", node.lineno),
+                            "role_tags": _symbol_role_tags(path, node.name),
+                            "api_surface": node.name,
+                        }
+                    )
+        elif path.endswith((".json", ".yaml", ".yml", ".toml", ".ini", ".cfg")):
+            symbols.append(
+                {
+                    "symbol": Path(path).name,
+                    "qualname": f"{path}::config",
+                    "path": path,
+                    "line_start": 1,
+                    "line_end": len(content.splitlines()),
+                    "role_tags": ["config"],
+                    "api_surface": "config",
+                }
+            )
+        elif path.endswith((".sh", ".bash")):
+            symbols.append(
+                {
+                    "symbol": Path(path).name,
+                    "qualname": f"{path}::script",
+                    "path": path,
+                    "line_start": 1,
+                    "line_end": len(content.splitlines()),
+                    "role_tags": ["script"],
+                    "api_surface": "script",
+                }
+            )
+    return symbols
+
+
+def _symbol_role_tags(path, symbol):
+    text = f"{path.lower()}::{symbol.lower()}"
+    tags = []
+    for tag in ("model", "trainer", "loss", "dataset", "eval", "config", "script"):
+        if tag in text:
+            tags.append(tag)
+    return tags or ["implementation"]
+
+
 _CODE_LOC_RE = re.compile(r"^(.+):(\d+)\s*$")
 
 

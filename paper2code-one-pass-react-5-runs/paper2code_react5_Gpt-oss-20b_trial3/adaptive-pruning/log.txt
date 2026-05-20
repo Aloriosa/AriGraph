@@ -1,0 +1,281 @@
+2026-03-14 15:35:50.558546 ======================================================================
+2026-03-14 15:35:50.558709 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 15:35:50.558759 ======================================================================
+2026-03-14 15:35:50.558800 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/adaptive-pruning/paper.md
+2026-03-14 15:35:50.558837 Log path: paper2code_react5_Gpt-oss-20b_trial3/adaptive-pruning
+2026-03-14 15:35:50.558872 Model: Openai/Gpt-oss-20b
+2026-03-14 15:35:50.558906 Max iterations: 5
+2026-03-14 15:35:50.558945 Run reproduce.sh: False
+2026-03-14 15:35:50.559005 Run LLM paper check: True
+2026-03-14 15:35:50.559038 
+2026-03-14 15:35:50.559070 Loading paper...
+2026-03-14 15:35:50.559836 Paper length: 91398 chars (using 91398 for prompt)
+2026-03-14 15:35:50.559935 
+2026-03-14 15:35:50.580065 --- Iteration 0: Initial generation ---
+2026-03-16 22:49:37.573286 Trial number: 3
+2026-03-16 22:49:37.573404 ======================================================================
+2026-03-16 22:49:37.573461 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-16 22:49:37.573513 ======================================================================
+2026-03-16 22:49:37.573550 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/adaptive-pruning/paper.md
+2026-03-16 22:49:37.573587 Log path: paper2code_react5_Gpt-oss-20b_trial3/adaptive-pruning
+2026-03-16 22:49:37.573621 Model: Openai/Gpt-oss-20b
+2026-03-16 22:49:37.573657 Max iterations: 5
+2026-03-16 22:49:37.573696 Run reproduce.sh: False
+2026-03-16 22:49:37.573729 Run LLM paper check: True
+2026-03-16 22:49:37.573762 
+2026-03-16 22:49:37.573793 Loading paper...
+2026-03-16 22:49:37.574614 Paper length: 91398 chars (using 91398 for prompt)
+2026-03-16 22:49:37.574674 
+2026-03-16 22:49:37.595169 --- Iteration 0: Initial generation ---
+2026-03-16 22:50:14.487583   Created: README.md
+2026-03-16 22:50:14.487741   Created: reproduce.sh
+2026-03-16 22:50:14.487822   Created: requirements.txt
+2026-03-16 22:50:14.487927   Created: src/training.py
+2026-03-16 22:50:14.488002 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial3/adaptive-pruning/submission_trial3 (4 files)
+2026-03-16 22:50:14.488060 
+2026-03-16 22:50:14.488097 --- Iteration 1: Observe & Refine ---
+2026-03-16 22:50:40.166968 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Dynamic pruning and tuning during training (APT’s core adaptive mechanism).  
+- APT adapter implementation (the paper’s custom adapter that adjusts input/output dims and rank).  
+- Outlier‑aware salience scoring function for mask learning.  
+- Self‑distillation with shared teacher‑student parameters.  
+- Dynamic rank adjustment for tuning parameters.  
+- Training‑time, inference‑time, and memory‑usage measurements (the paper reports speed‑ups and memory savings).  
+- Baseline comparisons (LoRA, pruning, SPA, LRP, etc.).  
+- Full GLUE or other large‑scale datasets; the code uses only a 100‑example SST‑2 subset.  
+- Large‑scale models (RoBERTa, T5, LLaMA) and the reported pruning ratios (60 % for RoBERTa, 70 % for LLaMA).  
+- Exact hyperparameter settings from the paper (learning rate, batch size, number of epochs, etc.).  
+- Evaluation protocol matching the paper (e.g., accuracy on dev set, checkpointing, etc.).  
+
+**INCORRECT**  
+- Uses `distilbert-base-uncased` instead of the paper’s RoBERTa/T5/LLaMA models.  
+- Prunes attention heads statically (zeroing weights) rather than adaptively during training.  
+- Applies LoRA only to `query` and `value` modules; the paper’s APT adapter may target different modules or use a different rank.  
+- Uses a single epoch and a tiny dataset, which does not reflect the training regime described in the paper.  
+- Learning rate (`2e-5`) and batch size (`8`) are arbitrary and not tied to the paper’s reported settings.  
+
+**PARTIAL**  
+- Implements a basic LoRA adapter (parameter‑efficient fine‑tuning).  
+- Implements structured pruning of attention heads (though static).  
+- Uses HuggingFace `datasets`, `transformers`, `peft`, and `accelerate`.  
+- Sets random seeds for reproducibility.  
+- Provides a training script that runs and outputs an accuracy metric.  
+- Writes results to a file (`results.txt`).  
+
+**OK**  
+- Basic training pipeline structure.  
+- Use of `Trainer`, `TrainingArguments`, and data collator.  
+- Reproducibility via fixed seeds.  
+- Installation script (`reproduce.sh`) that installs dependencies and runs the training script.  
+
+**Conclusion**  
+The provided code does **not** reproduce the core contributions of the APT paper. It implements only a toy static pruning + LoRA setup on a small model and dataset, missing all adaptive, dynamic, and efficiency‑measurement aspects that are central to the paper.
+2026-03-16 22:50:40.167206 
+2026-03-16 22:50:40.167454 Generating refined code...
+2026-03-16 22:51:47.480930   Updated: README.md
+2026-03-16 22:51:47.481088   Updated: reproduce.sh
+2026-03-16 22:51:47.481236   Updated: requirements.txt
+2026-03-16 22:51:47.481338   Updated: src/training.py
+2026-03-16 22:51:47.481400 
+2026-03-16 22:51:47.481439 --- Iteration 2: Observe & Refine ---
+2026-03-16 22:51:59.957050 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incorrect / Partial Requirements**
+
+| Category | Item | Status | Notes |
+|----------|------|--------|-------|
+| **Core Method** | Adaptive tuning (dynamic LoRA rank adjustment) | **MISSING** | Code uses a fixed LoRA rank (`INITIAL_RANK=4`) and never changes it during training. The paper’s APT explicitly adds tuning parameters adaptively. |
+| | Outlier‑aware salience scoring for pruning | **MISSING** | The code uses a simple absolute‑gradient sum per head. The paper proposes a more sophisticated, outlier‑aware scoring function. |
+| | Structured pruning of *all* parameter blocks (heads, FFN neurons, model dimensions) | **MISSING** | Only attention heads are pruned. No pruning of FFN layers or hidden‑size dimensions is implemented. |
+| | Self‑distillation that shares teacher & student parameters | **PARTIAL** | A separate frozen teacher model is used. The paper’s method shares parameters between teacher and student (i.e., the same model is used for both). |
+| **Hyperparameters** | Target sparsity schedule (γ_t) and pruning steps | **PARTIAL** | The code uses a linear schedule (`prune_ratio_this_epoch = (TARGET_PRUNE_RATIO / PRUNE_STEPS) * epoch`). The paper describes a more nuanced, task‑specific schedule. |
+| | LoRA rank schedule (Δ_t) | **MISSING** | No dynamic rank adjustment; rank stays constant. |
+| | Learning rate, batch size, epochs | **OK** | Values are present but not tied to the paper’s reported settings (paper uses large models and many epochs). |
+| **Data Setup** | Dataset & splits | **MISSING** | The code uses a *tiny* subset of SST‑2 (2000 train, 200 dev). The paper evaluates on full GLUE tasks or other large datasets. |
+| | Tokenization & max sequence length | **OK** | Basic tokenization is performed, but the paper may use different preprocessing. |
+| **Evaluation** | Metrics | **OK** | Accuracy is computed. |
+| | Baseline comparison | **MISSING** | No comparison to LoRA, pruning, or other baselines. |
+| | Validation protocol | **PARTIAL** | Uses a single dev split; the paper may use cross‑validation or multiple runs. |
+| **Experimental Setup** | Hardware & training steps | **MISSING** | The code runs on a single GPU with 3 epochs; the paper reports training on large models (e.g., RoBERTa, T5, LLaMA) with many more steps. |
+| | Checkpointing & logging | **MISSING** | No checkpointing, no detailed logs of pruning masks or rank changes. |
+| **reproduce.sh** | Full pipeline | **OK** | Installs dependencies and runs `training.py`. |
+| | Reproducibility of paper’s results | **MISSING** | The script cannot reproduce the paper’s reported numbers (e.g., 98 % performance with 60 % pruning). |
+
+**Summary**
+
+The provided code implements a *toy* version of APT that captures only a subset of the paper’s core ideas (LoRA adapters, head pruning, self‑distillation). It lacks the adaptive tuning, sophisticated salience scoring, full structured pruning, shared‑parameter distillation, proper dataset usage, baseline comparisons, and experimental rigor required to reproduce the paper’s results.
+
+**Recommendation**
+
+To bring the implementation in line with the paper, the following must be added/modified:
+
+1. Implement dynamic LoRA rank adjustment (Δ_t) based on tuning layer importance.
+2. Replace the simple salience scoring with the paper’s outlier‑aware method.
+3. Extend pruning to FFN neurons and hidden‑size dimensions.
+4. Use a shared‑parameter teacher for self‑distillation.
+5. Use the full datasets and evaluation protocols described in the paper.
+6. Add baseline comparisons and detailed logging/checkpointing.
+
+Once these changes are made, the reproduction will be complete.
+2026-03-16 22:51:59.957245 
+2026-03-16 22:51:59.957376 Generating refined code...
+2026-03-16 22:53:50.822098   Updated: README.md
+2026-03-16 22:53:50.822231   Updated: reproduce.sh
+2026-03-16 22:53:50.822360   Updated: requirements.txt
+2026-03-16 22:53:50.822486   Updated: src/training.py
+2026-03-16 22:53:50.822539 
+2026-03-16 22:53:50.822601 --- Iteration 3: Observe & Refine ---
+2026-03-16 22:54:16.669699 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- APT adapter that dynamically adjusts input/output dimensions and rank (core of the method).  
+- Outlier‑aware salience scoring function used for pruning.  
+- Self‑distillation with shared teacher–student parameters.  
+- Explicit pruning of hidden‑dimension blocks and feed‑forward neuron blocks.  
+- Cubic pruning schedule (paper mentions cubic; code uses linear).  
+- Target sparsity schedule for different model sizes (e.g., 70 % for LLaMA).  
+- Pruning of the key projection in multi‑head attention (only query/value are pruned).  
+- Actual removal of pruned parameters from the model graph (memory & inference speedup).  
+- Inference speedup measurement (only batch‑time is reported).  
+- Checkpointing / model saving for reproducibility.  
+- Evaluation on the full set of GLUE tasks (paper uses multiple tasks).  
+
+**INCORRECT**  
+- Self‑distillation uses a separate teacher model instead of shared parameters.  
+- Salience scoring is a simple weight×gradient sum, not the outlier‑aware function described.  
+- Attention head pruning only zeroes query/value weights; key weights are untouched.  
+- Pruning schedule is linear; paper describes a cubic schedule.  
+- Pruning of hidden dimensions and feed‑forward neurons is not handled explicitly.  
+- Fixed 60 % final prune ratio; no dynamic target sparsity per training step.  
+
+**PARTIAL**  
+- Core idea of adaptive pruning + adaptive LoRA rank is present but incomplete.  
+- Hyperparameters (LR, batch size, epochs) are set but may differ from the paper’s values.  
+- Dataset is SST‑2; paper likely uses multiple GLUE tasks.  
+- Evaluation metrics (accuracy, training time, memory, inference time) are measured but do not capture memory reduction or speedup from actual pruning.  
+- Experimental setup runs 5 epochs with no checkpointing or logging of intermediate models.  
+- `reproduce.sh` runs the script but does not reproduce the exact experimental protocol of the paper.  
+
+**OK**  
+- Baseline comparisons (full fine‑tune, LoRA only, APT) are implemented.  
+- Training time, peak GPU memory, inference time per batch, and inference memory are logged.  
+- The script can be executed end‑to‑end via `reproduce.sh`.  
+
+**Conclusion**  
+The code implements a toy version of the APT idea but lacks many critical components of the paper’s method and experimental protocol. Significant additions are required to match the paper’s contributions.
+2026-03-16 22:54:16.669880 
+2026-03-16 22:54:16.670047 Generating refined code...
+2026-03-16 22:54:35.091756   Updated: README.md
+2026-03-16 22:54:35.091896 
+2026-03-16 22:54:35.091943 --- Iteration 4: Observe & Refine ---
+2026-03-16 22:54:44.711413 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Outlier‑aware salience scoring function (paper’s key novelty).  
+- APT adapter that dynamically adjusts input/output dimensions and rank (`r_apt`).  
+- Explicit pruning of hidden‑dimension blocks (e.g., pruning hidden size in FFN layers).  
+- Full GLUE benchmark evaluation (paper reports on all GLUE tasks).  
+- Exact training schedule (number of steps, warm‑up, learning‑rate schedule).  
+- Checkpointing after each epoch (paper mentions saving checkpoints).  
+- Hardware‑specific profiling (e.g., A100 GPU details).  
+
+**INCORRECT**  
+- Pruning schedule defaults to linear; paper uses a cubic schedule (`γ_t = γ_T + (1-γ_T)*(1-t/T)^3`).  
+- LoRA rank adaptation logic is overly simplistic (increments rank by 1 for top‑half modules each epoch) rather than the paper’s salience‑based adaptive scheme.  
+- Hyperparameters (LR=2e‑5, batch=32, epochs=5) are not aligned with the paper’s reported settings (likely larger batch, more steps).  
+- Dataset: only SST‑2 is used; paper evaluates on multiple GLUE tasks.  
+- Evaluation metric: only accuracy is reported; paper reports multiple metrics (e.g., F1, MSE for STS‑B).  
+- Teacher model: code uses a separate teacher with the same backbone but no adapters; paper’s self‑distillation shares parameters between teacher and student.  
+
+**PARTIAL**  
+- Self‑distillation is present but the implementation does not share parameters as described.  
+- Attention‑head pruning is implemented but not the full block‑wise pruning of heads, FFN neurons, and hidden‑size blocks.  
+- LoRA adapters are added, but the APT adapter concept (dynamic input/output dims) is missing.  
+- Training loop logs peak memory and time, but does not match the paper’s detailed profiling (e.g., per‑step memory, FLOPs).  
+
+**OK**  
+- Basic PEFT (LoRA) integration.  
+- Basic structured pruning of linear layers and attention heads.  
+- Basic training loop with AdamW and linear scheduler.  
+- Basic inference profiling (time, memory).  
+
+**Conclusion**  
+The current code implements a very simplified version of APT and does not reproduce the key algorithmic contributions or experimental protocol described in the paper. Significant additions and corrections are required.
+2026-03-16 22:54:44.711612 
+2026-03-16 22:54:44.711771 Generating refined code...
+2026-03-16 22:56:17.548450   Updated: README.md
+2026-03-16 22:56:17.548606   Updated: reproduce.sh
+2026-03-16 22:56:17.548712   Updated: requirements.txt
+2026-03-16 22:56:17.548781   Updated: src/training.py
+2026-03-16 22:56:17.548823 
+2026-03-16 22:56:17.548862 --- Iteration 5: Observe & Refine ---
+2026-03-16 22:57:08.601878 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Training on all GLUE tasks (paper reports results on multiple tasks, not just SST‑2).  
+- Baseline comparisons (LoRA, pruning, SPA, LRP, etc.).  
+- Structured pruning of hidden‑dimension blocks (only linear layers are pruned).  
+- Outlier‑aware salience scoring (paper uses a special function, code uses simple weight×grad).  
+- Dynamic addition of tuning parameters beyond rank (e.g., adding new LoRA modules).  
+- Explicit control of total tuning‑parameter budget (Δt).  
+- Teacher model should be frozen after initialization; code copies weights each epoch.  
+- Exact hyper‑parameters from the paper (learning rate, batch size, number of epochs, etc.).  
+- Reporting of inference speedup relative to baselines.  
+- Use of RoBERTa, T5, and LLaMA models (paper focuses on these).  
+- Evaluation protocol that reproduces the 98 %/86 % performance numbers.  
+
+**INCORRECT**  
+- Salience scoring: `compute_salience_linear` and `compute_salience_lora` use a simple weight×grad sum; the paper’s outlier‑aware function is missing.  
+- `compute_salience_lora` accesses `lora.lora_B.weight.grad` incorrectly (lora_B is a Parameter, not a Module).  
+- `SALIENT_ALPHA` is applied twice and incorrectly; moving‑average logic is broken.  
+- Pruning masks are updated using the same accumulator for input and output, which is wrong.  
+- Head pruning only zeroes query/value weights; output projection and head‑masking are not handled.  
+- LoRA wrapper uses `lora_B.weight` incorrectly; the forward pass does not respect the input/output masks properly.  
+- Teacher update copies base weights every epoch; the teacher should remain frozen after initialization.  
+- `DataLoader(base_model, ...)` is used incorrectly (though not actually executed).  
+- `lora_salience_acc` and `lora_salience` are computed but never used to guide rank growth correctly.  
+
+**PARTIAL**  
+- Cubic pruning schedule (`γ_t = γ_T + (1-γ_T)*(1-t/T)^3`) is implemented.  
+- Self‑distillation is present (MSE on hidden states).  
+- LoRA adapters are added and their rank can grow, but the growth rule is simplistic (top‑half salience → +1 rank).  
+- Training loop includes pruning and rank adaptation, but the logic is incomplete and may not converge to the target sparsity.  
+- Evaluation on GLUE tasks is performed, but the model is only trained on SST‑2, so the reported metrics do not match the paper.  
+- Logging, checkpointing, and basic hyper‑parameter definitions are present.  
+
+**OK**  
+- Basic training loop structure.  
+- Use of BERT‑base as the backbone.  
+- Integration of LoRA‑style adapters.  
+- Cubic pruning schedule.  
+- Self‑distillation mechanism.  
+- Evaluation on GLUE tasks (though not matching the paper’s training regime).  
+- Logging and checkpointing.  
+
+**Conclusion**  
+The current code implements a very rough skeleton of APT but misses many critical components, contains several incorrect implementations, and does not reproduce the paper’s experimental results. Significant revisions are required to match the paper’s methodology and evaluation protocol.
+2026-03-16 22:57:08.602108 
+2026-03-16 22:57:08.602334 Generating refined code...
+2026-03-16 22:58:24.571877   Updated: README.md
+2026-03-16 22:58:24.572039   Updated: reproduce.sh
+2026-03-16 22:58:24.572154   Updated: requirements.txt
+2026-03-16 22:58:24.572252   Updated: src/training.py
+2026-03-16 22:58:24.572294 
+2026-03-16 22:58:24.572349 ======================================================================
+2026-03-16 22:58:24.572395 REACT BASELINE COMPLETE
+2026-03-16 22:58:24.572431 ======================================================================
+2026-03-16 22:58:24.572482 Total iterations: 6
+2026-03-16 22:58:24.572519 API tokens: 52854 completion, 232327 prompt
+2026-03-16 22:58:24.572553 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial3/adaptive-pruning/generated_code_response.txt

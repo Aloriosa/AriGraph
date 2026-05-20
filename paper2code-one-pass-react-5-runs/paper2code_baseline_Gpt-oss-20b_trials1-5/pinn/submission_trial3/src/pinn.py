@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+# ==========================================================
+# A minimal PINN implementation for the convection PDE.
+# ----------------------------------------------------------
+# It supports training with Adam followed by L‑BFGS.
+# The script outputs final loss and L2 relative error to
+# the `results/` directory.
+# ==========================================================
+
+import argparse
+import os
+import math
+import random
+
+import torch
+import torch.nn as nn
+import torch.autograd as autograd
+from torch.nn import functional as F
+import numpy as np
+from tqdm import tqdm
+
+# ------------------------------------------------------------------
+# 1. Utilities
+# ------------------------------------------------------------------
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+# ------------------------------------------------------------------
+# 2. PINN network
+# ------------------------------------------------------------------
+class MLP(nn.Module):
+    def __init__(self, in_dim: int, hidden: int, out_dim: int = 1):
+        super().__init__()
+        self.layers = nn.ModuleList()
+        self.layers.append(nn.Linear(in_dim, hidden))
+        for _ in range(2):  # total 3 hidden layers
+            self.layers.append(nn.Linear(hidden, hidden))
+        self.out = nn.Linear(hidden, out_dim)
+
+        # Xavier normal init
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_normal_(m.weight)
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x):
+        for l in self.layers:
+            x = torch.tanh(l(x))
+        return self.out(x)
+
+# ------------------------------------------------------------------
+# 3. PDE operators
+# ------------------------------------------------------------------
+def convection_residual(u, x, t, beta=40.0):
+    """
+    Computes du/dt + beta du/dx
+    u: (batch, 1) tensor
+    x, t: (batch, 1) tensors
+    """
+    # Create requires_grad
+    u_t = autograd.grad(u, t, grad_outputs=torch.ones_like(u), create_graph=True)[0]
+    u_x = autograd.grad(u, x, grad_outputs=torch.ones_like(u), create_graph=True)[0]
+    return u_t + beta * u_x
+
+def initial_condition(x):
+    return torch.sin(x)
+
+def boundary_condition(x):
+    # periodic: u(0,t) == u(2π,t)
+    return torch.sin(x)
+
+# ------------------------------------------------------------------
+# 4. Data generation
+# ------------------------------------------------------------------
+def sample_points(num_res, num_bc, num_init, device):
+    """
+    Returns tensors for residual, boundary, and initial points.
+    """
+    # Residual points: 2D grid (x,t)
+    x_res = torch.rand(num_res, 1, device=device) * 2 * math.pi
+    t_res = torch.rand(num_res, 1, device=device)
+    # Boundary points: x=0 and x=2π, t in [0,1]
+    t_bc = torch.rand(num_bc, 1, device=device)
+    x_bc_0 = torch.zeros_like(t_bc)
+    x_bc_2pi = 2 * math.pi * torch.ones_like(t_bc)
+    # Initial condition: t=0, x in [0,2π]
+    x_init = torch.rand(num_init, 1, device=device) * 2 * math.pi
+    t_init = torch.zeros_like(x_init)
+
+    return (x_res, t_res), (x_bc_0, t_bc), (x_bc_2pi, t_bc), (x_init, t_init)
+
+# ------------------------------------------------------------------
+# 5. Training loop
+# ------------------------------------------------------------------
+def train_pinn(args):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    set_seed(args.seed)
+
+    # Build network
+    net = MLP(in_dim=2, hidden=args.hidden).to(device)
+
+    # Optimisers
+    adam_opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+    # L-BFGS expects a closure; we create a wrapper later
+    lbfgs_opt = torch.optim.LBFGS(net.parameters(), lr=1.0, max_iter=20, line_search_fn='strong_wolfe')
+
+    # Data
+    (x_res, t_res), (x_bc_0, t_bc_0), (x_bc_2pi, t_bc_2pi), (x_init, t_init) = sample_points(
+        args.num_res, args.num_bc, args.num_init, device)
+
+    # Training
+    total_steps = args.epochs
+    adam_steps = args.adam_steps
+    loss_history = []
+
+    @torch.enable_grad()
+    def closure():
+        # Zero gradients
+        adam_opt.zero_grad()
+        lbfgs_opt.zero_grad()
+
+        # Forward
+        inp_res = torch.cat([x_res, t_res], dim=1)
+        u_res = net(inp_res)
+
+        inp_bc0 = torch.cat([x_bc_0, t_bc_0], dim=1)
+        u_bc0 = net(inp_bc0)
+
+        inp_bc2pi = torch.cat([x_bc_2pi, t_bc_2pi], dim=1)
+        u_bc2pi = net(inp_bc2pi)
+
+        inp_init = torch.cat([x_init, t_init], dim=1)
+        u_init = net(inp_init)
+
+        # Residual loss
+        res = convection_residual(u_res, x_res, t_res, beta=40.0)
+        loss_res = 0.5 * torch.mean(res ** 2)
+
+        # Boundary loss (periodic)
+        loss_bc = 0.5 * torch.mean((u_bc0 - u_bc2pi) ** 2)
+
+        # Initial condition loss
+        true_init = initial_condition(x_init)
+        loss_init = 0.5 * torch.mean((u_init - true_init) ** 2)
+
+        loss = loss_res + loss_bc + loss_init
+        loss.backward()
+        return loss
+
+    pbar = tqdm(total=total_steps, desc="Training")
+    for step in range(total_steps):
+        if step < adam_steps:
+            adam_opt.step(closure)
+        else:
+            lbfgs_opt.step(closure)
+        if step % 100 == 0 or step == total_steps - 1:
+            loss_val = closure().item()
+            loss_history.append(loss_val)
+            pbar.set_postfix(loss=f"{loss_val:.3e}")
+        pbar.update(1)
+    pbar.close()
+
+    final_loss = loss_history[-1]
+    # Compute L2 relative error on a dense grid
+    L2RE = evaluate_l2re(net, device)
+
+    # Save results
+    os.makedirs("results", exist_ok=True)
+    with open("results/conv_loss.txt", "w") as f:
+        f.write(f"{final_loss:.12e}\n")
+    with open("results/conv_l2re.txt", "w") as f:
+        f.write(f"{L2RE:.12e}\n")
+    print(f"\nFinal loss: {final_loss:.12e}")
+    print(f"Final L2 relative error: {L2RE:.12e}")
+
+def evaluate_l2re(net, device):
+    """
+    Compute L2 relative error on a dense 255x100 grid
+    (as used in the paper).
+    """
+    N_x = 255
+    N_t = 100
+    x = torch.linspace(0, 2 * math.pi, N_x, device=device).unsqueeze(1)
+    t = torch.linspace(0, 1, N_t, device=device).unsqueeze(0)
+    X, T = torch.meshgrid(x.squeeze(), t.squeeze(), indexing="ij")
+    X = X.reshape(-1, 1)
+    T = T.reshape(-1, 1)
+    inp = torch.cat([X, T], dim=1)
+    with torch.no_grad():
+        u_pred = net(inp).reshape(N_x, N_t)
+
+    # Exact solution
+    u_exact = torch.sin(X - 40 * T).reshape(N_x, N_t)
+
+    # L2 error
+    err = u_pred - u_exact
+    L2err = torch.sqrt(torch.mean(err ** 2))
+    L2norm = torch.sqrt(torch.mean(u_exact ** 2))
+    return (L2err / L2norm).item()
+
+# ------------------------------------------------------------------
+# 6. Argument parsing
+# ------------------------------------------------------------------
+def main():
+    parser = argparse.ArgumentParser(description="PINN training for convection PDE")
+    parser.add_argument("--pde", type=str, default="convection", help="PDE to solve (only 'convection' implemented)")
+    parser.add_argument("--num_res", type=int, default=2000, help="Number of residual points")
+    parser.add_argument("--num_bc", type=int, default=200, help="Number of boundary points per side")
+    parser.add_argument("--num_init", type=int, default=200, help="Number of initial condition points")
+    parser.add_argument("--hidden", type=int, default=50, help="Hidden layer width")
+    parser.add_argument("--epochs", type=int, default=5000, help="Total training steps")
+    parser.add_argument("--adam_steps", type=int, default=2000, help="Number of Adam steps before switching to L-BFGS")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    args = parser.parse_args()
+
+    if args.pde != "convection":
+        raise NotImplementedError("Only the convection PDE is implemented in this minimal example.")
+    train_pinn(args)
+
+if __name__ == "__main__":
+    main()

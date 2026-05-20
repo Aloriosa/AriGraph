@@ -1,0 +1,230 @@
+2026-03-14 17:11:53.845077 ======================================================================
+2026-03-14 17:11:53.845209 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 17:11:53.845271 ======================================================================
+2026-03-14 17:11:53.845309 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/sequential-neural-score-estimation/paper.md
+2026-03-14 17:11:53.845343 Log path: paper2code_react5_Gpt-oss-20b_trial3/sequential-neural-score-estimation
+2026-03-14 17:11:53.845377 Model: Openai/Gpt-oss-20b
+2026-03-14 17:11:53.845409 Max iterations: 5
+2026-03-14 17:11:53.845442 Run reproduce.sh: False
+2026-03-14 17:11:53.845478 Run LLM paper check: True
+2026-03-14 17:11:53.845510 
+2026-03-14 17:11:53.845540 Loading paper...
+2026-03-14 17:11:53.845910 Paper length: 190143 chars (using 190143 for prompt)
+2026-03-14 17:11:53.846006 
+2026-03-14 17:11:53.865919 --- Iteration 0: Initial generation ---
+2026-03-16 22:58:31.377007 Trial number: 3
+2026-03-16 22:58:31.377152 ======================================================================
+2026-03-16 22:58:31.377207 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-16 22:58:31.377267 ======================================================================
+2026-03-16 22:58:31.377309 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/sequential-neural-score-estimation/paper.md
+2026-03-16 22:58:31.377351 Log path: paper2code_react5_Gpt-oss-20b_trial3/sequential-neural-score-estimation
+2026-03-16 22:58:31.377390 Model: Openai/Gpt-oss-20b
+2026-03-16 22:58:31.377430 Max iterations: 5
+2026-03-16 22:58:31.377472 Run reproduce.sh: False
+2026-03-16 22:58:31.377513 Run LLM paper check: True
+2026-03-16 22:58:31.377550 
+2026-03-16 22:58:31.377588 Loading paper...
+2026-03-16 22:58:31.378001 Paper length: 190143 chars (using 190143 for prompt)
+2026-03-16 22:58:31.378057 
+2026-03-16 22:58:31.397609 --- Iteration 0: Initial generation ---
+2026-03-16 23:00:18.254480   Created: README.md
+2026-03-16 23:00:18.254606   Created: requirements.txt
+2026-03-16 23:00:18.254675   Created: reproduce.sh
+2026-03-16 23:00:18.254754   Created: main.py
+2026-03-16 23:00:18.254798 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial3/sequential-neural-score-estimation/submission_trial3 (4 files)
+2026-03-16 23:00:18.254837 
+2026-03-16 23:00:18.254874 --- Iteration 1: Observe & Refine ---
+2026-03-16 23:00:31.455979 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Sequential Neural Posterior Score Estimation (SNPSE) and its truncated‑proposal variant (TSNPSE).  
+- The full sequential training procedure described in the paper (adaptive simulation guidance, proposal truncation, etc.).  
+- Benchmark SBI problems used in the paper (e.g., Two‑Moons, Lotka–Volterra, etc.).  
+- Evaluation metrics and diagnostic plots reported in the paper (KL divergence, coverage, posterior predictive checks, etc.).  
+- Baseline comparisons (SNPE, SNLE, SNRE, etc.).  
+- Full experimental protocol (exact number of simulations, training steps, checkpointing, hardware details).  
+
+**PARTIAL**  
+- Core NPSE algorithm: the code implements a toy version of the conditional score‑based diffusion model, but it is limited to a 2‑D Gaussian posterior and does not follow the general conditional denoising posterior score‑matching objective of the paper.  
+- Training objective: the code uses a simple MSE between predicted and analytically computed scores, whereas the paper derives a weighted Fisher divergence / conditional denoising score‑matching loss.  
+- Model architecture: a small MLP with sinusoidal time embedding is used; the paper does not specify a particular architecture, but the implementation is far simpler than what would be required for realistic SBI tasks.  
+- Hyperparameters: generic values (lr=1e‑4, batch=256, epochs=200) are used; the paper does not provide these, but the chosen values are not justified or tuned for the toy problem.  
+- Data setup: only a synthetic 2‑D Gaussian likelihood is used; the paper evaluates on several complex simulator‑based models.  
+- Evaluation: only sample mean and covariance are printed; the paper reports more comprehensive diagnostics.  
+- Probability‑flow ODE integration: the code uses a fixed Euler step (dt=0.01) and a simplified drift term (0.5 σ² · score); the paper’s derivation includes a general drift f(t) and a more accurate ODE solver.  
+- Reproduce.sh: runs training and sampling for the toy example but does not reproduce the full experimental pipeline of the paper.  
+
+**OK**  
+- Basic training loop, score network definition, forward diffusion simulation, and sampling via probability‑flow ODE.  
+- Reproducibility script installs dependencies and runs the toy experiment end‑to‑end.  
+
+**Conclusion**  
+The provided code implements a very simplified toy version of NPSE but lacks the sequential component, benchmark experiments, evaluation metrics, and full methodological details required to reproduce the results presented in the paper.
+2026-03-16 23:00:31.456216 
+2026-03-16 23:00:31.456789 Generating refined code...
+2026-03-16 23:02:45.433650   Updated: README.md
+2026-03-16 23:02:45.433803   Updated: requirements.txt
+2026-03-16 23:02:45.433874   Updated: reproduce.sh
+2026-03-16 23:02:45.433997   Updated: main.py
+2026-03-16 23:02:45.434053 
+2026-03-16 23:02:45.434096 --- Iteration 2: Observe & Refine ---
+2026-03-16 23:03:35.032686 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incorrect / Partial Implementation Checklist**
+
+| Category | Item | Status | Notes |
+|----------|------|--------|-------|
+| Core Method | Sequential training with truncated proposals (TSNPSE) | **PARTIAL** | The code attempts a KDE‑based truncation but the logic is incomplete (placeholder `pass` and no actual sampling from the truncated prior). |
+| Core Method | Correct reverse diffusion / probability‑flow ODE | **INCORRECT** | The ODE uses `+0.5 * sigma_t^2 * score` but the correct sign is `-0.5 * sigma_t^2 * score`. |
+| Core Method | Score network architecture | **OK** | Conditional MLP on θ, x, t – matches the paper’s description. |
+| Core Method | Forward noising process (σ(t)) | **OK** | `get_sigma(t)` implements the variance‑exploding schedule. |
+| Core Method | Training objective (denoising posterior score matching) | **OK** | Uses `(θ_t – θ_0)/σ_t^2` as target. |
+| Hyperparameters | Learning rate, batch size, epochs | **PARTIAL** | Values are present but not tied to the paper’s recommended settings. |
+| Hyperparameters | ε (truncation threshold) | **INCORRECT** | `epsilon` is passed but never used. |
+| Data Setup | Simulators | **PARTIAL** | Toy implementations of the three benchmarks are provided, but they may differ from the paper’s exact simulators. |
+| Data Setup | Prior ranges | **PARTIAL** | Prior sampling in the truncated prior sampler is hard‑coded to `[-1,1]` for all benchmarks, which is incorrect for Gaussian mixture and Gaussian linear. |
+| Evaluation | Metrics | **PARTIAL** | Only mean and covariance are reported; no KL, ESS, or other diagnostics used in the paper. |
+| Evaluation | Baselines | **MISSING** | No comparison to SNPE, SNLE, etc. |
+| Experimental Setup | Checkpointing / reproducibility | **PARTIAL** | Random seed set, but no checkpointing or detailed hardware logging. |
+| Experimental Setup | Training schedule per round | **PARTIAL** | The code trains on all accumulated data each round but does not implement the paper’s specific sequential schedule (e.g., re‑sampling from truncated prior). |
+| Reproduce Script | `reproduce.sh` | **OK** | Installs dependencies and runs `main.py`. |
+| Output | Sample files | **OK** | Saves posterior samples and a metrics JSON. |
+| Output | Directory structure | **OK** | Matches the README description. |
+
+**Summary**
+
+The implementation captures the high‑level idea of conditional score estimation and a toy sequential training loop, but it falls short of faithfully reproducing the paper’s TSNPSE algorithm:
+
+- The reverse diffusion ODE sign is wrong, leading to incorrect posterior samples.
+- Truncated prior sampling is incomplete and not used.
+- ε is unused, and prior ranges are hard‑coded incorrectly.
+- Evaluation is minimal and lacks baseline comparisons.
+- Hyperparameters and training schedule are not aligned with the paper.
+
+**Recommendation**
+
+Fix the ODE sign, complete the truncated prior logic, use ε properly, align hyperparameters with the paper, and add baseline comparisons and richer diagnostics before claiming full reproducibility.
+2026-03-16 23:03:35.032912 
+2026-03-16 23:03:35.033175 Generating refined code...
+2026-03-16 23:05:44.561886   Updated: main.py
+2026-03-16 23:05:44.562065   Updated: README.md
+2026-03-16 23:05:44.562144   Updated: reproduce.sh
+2026-03-16 23:05:44.562216   Updated: requirements.txt
+2026-03-16 23:05:44.562263 
+2026-03-16 23:05:44.562315 --- Iteration 3: Observe & Refine ---
+2026-03-16 23:06:07.927175 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Conditional denoising posterior score matching objective \( \mathcal{J}_{\text{post}}^{\mathrm{DSM}} \) (the paper’s core training loss).  
+- Weighting function \( \lambda_t \) in the Fisher‑divergence objective.  
+- Explicit use of the forward SDE coefficients \(f(t), g(t)\) and the corresponding time‑dependent noise schedule as described in the paper.  
+- Probability‑flow ODE integration that also tracks the log‑density (continuous normalising flow).  
+- Baseline comparisons (SNPE, SNLE, SNRE, etc.) and the associated evaluation metrics (KL divergence, coverage, effective sample size).  
+- Proper handling of the analytic posterior for the Gaussian‑linear benchmark (e.g., using it to compute ground‑truth metrics).  
+- Training checkpointing and best‑model selection across rounds.  
+- Hyper‑parameter tuning guidelines (e.g., learning‑rate schedule, batch‑size schedule) that match the paper’s experimental protocol.  
+- Full implementation of the alternative sequential strategies discussed in the paper (e.g., TSNPSE, TSNPSE‑S, TSNPSE‑C).  
+
+**INCORRECT**  
+- The training loss uses unconditional denoising score matching \( \hat{s}(\theta_t, x, t) \) against \( (\theta_t-\theta_0)/\sigma_t^2 \), which ignores the conditioning on \(x\) required by the paper’s objective.  
+- The ODE step uses \( \theta \leftarrow \theta - 0.5\,\sigma_t^2\,\hat{s}\,dt \) but does not incorporate the drift term \(f(t)\) (which is zero for the VE SDE but should still be explicitly handled).  
+- The truncated prior sampler re‑initialises the score network each round instead of continuing training from the previous round’s weights, which deviates from the paper’s sequential training procedure.  
+
+**PARTIAL**  
+- Truncated prior sampling uses a KDE with a fixed bandwidth of 0.5; the paper does not specify a bandwidth, but a more adaptive choice (e.g., cross‑validation) would be preferable.  
+- The code implements a toy set of benchmarks (Gaussian linear, mixture, two‑moons) but the paper evaluates on a broader suite (e.g., Lotka‑Volterra, Ricker, etc.).  
+- The `reproduce.sh` script runs the pipeline but does not reproduce the exact experimental settings (e.g., number of rounds, simulations per round, learning‑rate schedule) used in the paper.  
+
+**OK**  
+- The overall structure (conditional score network, sequential training loop, truncated proposal, posterior sampling via probability‑flow ODE) follows the high‑level idea of SNPSE/TSNPSE.  
+- The code correctly samples from the simulator, stores \((\theta, x)\) pairs, and uses them to train a neural network.  
+- The truncated proposal logic (sampling from the prior and accepting based on KDE density) matches the paper’s description of TSNPSE.  
+- The output format (samples and simple diagnostics) is consistent with a reproducibility script.  
+
+**Conclusion**  
+The implementation captures the skeleton of the method but omits several critical components of the paper’s algorithm, training objective, and evaluation protocol. Significant revisions are required to match the paper’s results.
+2026-03-16 23:06:07.927436 
+2026-03-16 23:06:07.927714 Generating refined code...
+2026-03-16 23:07:39.152798   Updated: main.py
+2026-03-16 23:07:39.152948   Updated: reproduce.sh
+2026-03-16 23:07:39.153015   Updated: README.md
+2026-03-16 23:07:39.153077   Updated: requirements.txt
+2026-03-16 23:07:39.153127 
+2026-03-16 23:07:39.153165 --- Iteration 4: Observe & Refine ---
+2026-03-16 23:07:59.048685 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Evaluation metrics beyond simple mean/covariance (e.g., KL‑divergence, coverage, RMSE, etc.) that are reported in the paper.  
+- Baseline comparisons to SNPE, SNLE, SNRE, etc., which are used in the paper to demonstrate performance.  
+- The more complex benchmark problems (e.g., Lotka–Volterra, neuroscience simulator, etc.) that appear in the paper; the code only contains three toy benchmarks.  
+
+**PARTIAL**  
+- Hyper‑parameter settings (learning rate, batch size, number of epochs, sigma schedule, KDE bandwidth, epsilon) are hard‑coded and may not match the exact values used in the paper.  
+- The weighting function λ(t) in the training objective is set to a constant; the paper may use a non‑trivial schedule.  
+
+**OK**  
+- Conditional score‑based diffusion model architecture (ScoreNetwork).  
+- Conditional denoising posterior score‑matching objective (DSM).  
+- Variance‑exploding SDE and corresponding σ(t) schedule.  
+- Truncated prior sampling via KDE and ε‑threshold.  
+- Probability‑flow ODE sampling procedure.  
+- Sequential training loop with accumulation of data and model checkpointing.  
+- Reproducibility script (`reproduce.sh`) that installs dependencies and runs all experiments.  
+- Seed setting, GPU support, and basic diagnostics output.
+2026-03-16 23:07:59.048924 
+2026-03-16 23:07:59.049161 Generating refined code...
+2026-03-16 23:09:33.800484   Updated: main.py
+2026-03-16 23:09:33.800652   Updated: README.md
+2026-03-16 23:09:33.800731   Updated: reproduce.sh
+2026-03-16 23:09:33.800814   Updated: requirements.txt
+2026-03-16 23:09:33.800912 
+2026-03-16 23:09:33.800970 --- Iteration 5: Observe & Refine ---
+2026-03-16 23:09:55.895294 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Baseline comparisons (SNPE, SNLE, SNRE, SNVI, GATSBI, TSNPE, SUNLE, etc.) – the code only implements TSNPSE.  
+- Real‑world neuroscience dataset used in the paper – not present.  
+- Additional evaluation metrics reported in the paper (e.g., coverage, RMSE, effective sample size) – only mean, covariance and KL for the Gaussian‑linear toy are computed.  
+- Density evaluation via the probability‑flow ODE (instantaneous change‑of‑variables) – not implemented (though not strictly required for sampling).  
+
+**PARTIAL**  
+- Weighting function λₜ in the training objective: the code uses a constant λₜ=1, whereas the paper allows a time‑dependent weighting.  
+- Truncated prior sampler: uses a fixed KDE bandwidth (0.5) and a simple ε‑threshold; the paper may use a different bandwidth selection or adaptive truncation strategy.  
+
+**OK**  
+- Core TSNPSE algorithm (conditional score network, forward VESDE, reverse probability‑flow ODE).  
+- Conditional denoising posterior score‑matching objective.  
+- Variance‑exploding SDE implementation (`get_sigma`).  
+- Sequential training loop with truncated proposals based on KDE of the posterior.  
+- Hyperparameters (learning rate, batch size, epochs, σ_min/σ_max, ε).  
+- Toy benchmark simulators (Gaussian linear, Gaussian mixture, Two‑Moons).  
+- Posterior sampling via probability‑flow ODE.  
+- Basic diagnostics (posterior mean, covariance, KL for Gaussian‑linear).  
+- `reproduce.sh` runs the full pipeline and installs dependencies.  
+
+**Conclusion**  
+The reproduction code implements the core TSNPSE method and its sequential training loop, but it lacks the baseline comparisons, real‑world experiments, and several evaluation metrics that are central to the paper’s experimental claims. To fully match the paper, the missing components above would need to be added.
+2026-03-16 23:09:55.895582 
+2026-03-16 23:09:55.895946 Generating refined code...
+2026-03-16 23:11:57.207117   Updated: baseline.py
+2026-03-16 23:11:57.207294   Updated: main.py
+2026-03-16 23:11:57.207402   Updated: README.md
+2026-03-16 23:11:57.207473   Updated: requirements.txt
+2026-03-16 23:11:57.207588   Updated: reproduce.sh
+2026-03-16 23:11:57.207651 
+2026-03-16 23:11:57.207705 ======================================================================
+2026-03-16 23:11:57.207743 REACT BASELINE COMPLETE
+2026-03-16 23:11:57.207778 ======================================================================
+2026-03-16 23:11:57.207829 Total iterations: 6
+2026-03-16 23:11:57.207902 API tokens: 62823 completion, 441898 prompt
+2026-03-16 23:11:57.207948 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial3/sequential-neural-score-estimation/generated_code_response.txt

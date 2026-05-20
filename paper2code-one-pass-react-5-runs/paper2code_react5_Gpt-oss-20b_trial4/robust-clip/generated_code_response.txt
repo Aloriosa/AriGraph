@@ -1,0 +1,563 @@
+**FILE: requirements.txt**
+```text
+torch>=2.0.0
+torchvision>=0.15.0
+clip-by-openai==1.0.1
+torchattacks==3.4.0
+tqdm
+numpy
+scikit-learn
+pillow
+```
+
+---
+
+**FILE: reproduce.sh**
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ---- 1. Install dependencies ----------------------------------------------
+echo "Installing Python dependencies..."
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# ---- 2. Download ImageNet (subset) and zero‑shot datasets -------------------
+echo "Downloading ImageNet validation set (subset)..."
+# We use the public ImageNet validation subset (50k images) shipped with torchvision.
+# If you want the full set, replace this with your own ImageNet path.
+mkdir -p data/imagenet_val
+python download_imagenet_val.py
+
+echo "Downloading CIFAR-10 (for zero‑shot evaluation)..."
+python download_cifar10.py
+
+# ---- 3. Train a FARE‑CLIP model ------------------------------------------
+echo "Training FARE‑CLIP..."
+python train_fare.py \
+    --data_dir data/imagenet_val \
+    --epochs 2 \
+    --batch_size 128 \
+    --learning_rate 1e-5 \
+    --weight_decay 1e-4 \
+    --epsilon 4/255 \
+    --adv_steps 10 \
+    --output_dir checkpoints/fare_clip
+
+# ---- 4. Evaluate on ImageNet (clean & robust) ----------------------------
+echo "Evaluating on ImageNet (clean)..."
+python evaluate.py \
+    --model_path checkpoints/fare_clip/model.pt \
+    --data_dir data/imagenet_val \
+    --split val \
+    --eps 0 \
+    --output_file results/imagenet_clean.csv
+
+echo "Evaluating on ImageNet (robust, eps=2/255)..."
+python evaluate.py \
+    --model_path checkpoints/fare_clip/model.pt \
+    --data_dir data/imagenet_val \
+    --split val \
+    --eps 2/255 \
+    --output_file results/imagenet_eps2.csv
+
+echo "Evaluating on ImageNet (robust, eps=4/255)..."
+python evaluate.py \
+    --model_path checkpoints/fare_clip/model.pt \
+    --data_dir data/imagenet_val \
+    --split val \
+    --eps 4/255 \
+    --output_file results/imagenet_eps4.csv
+
+# ---- 5. Zero‑shot evaluation on CIFAR‑10 -----------------------------------
+echo "Zero‑shot evaluation on CIFAR‑10..."
+python zero_shot.py \
+    --model_path checkpoints/fare_clip/model.pt \
+    --data_dir data/cifar10 \
+    --output_file results/cifar10_zeroshot.csv
+
+echo "Reproduction finished. Results are stored in the 'results/' directory."
+```
+
+---
+
+**FILE: download_imagenet_val.py**
+```python
+import os
+import urllib.request
+import tarfile
+import shutil
+
+IMAGENET_VAL_URL = "https://s3.amazonaws.com/fast-ai-imageclas/imagenet1000_val.tar"
+
+def download_and_extract(url, dst):
+    tar_path = dst + ".tar"
+    print(f"Downloading {url} to {tar_path} ...")
+    urllib.request.urlretrieve(url, tar_path)
+    print("Extracting...")
+    with tarfile.open(tar_path) as tar:
+        tar.extractall(dst)
+    print("Removing tar file...")
+    os.remove(tar_path)
+
+if __name__ == "__main__":
+    out_dir = "data/imagenet_val"
+    os.makedirs(out_dir, exist_ok=True)
+    download_and_extract(IMAGENET_VAL_URL, out_dir)
+```
+
+---
+
+**FILE: download_cifar10.py**
+```python
+import torchvision.datasets as datasets
+import torchvision.transforms as transforms
+import os
+
+def download_cifar10(root="data/cifar10"):
+    os.makedirs(root, exist_ok=True)
+    datasets.CIFAR10(root=root, train=True, download=True)
+    datasets.CIFAR10(root=root, train=False, download=True)
+    print("CIFAR‑10 downloaded to", root)
+
+if __name__ == "__main__":
+    download_cifar10()
+```
+
+---
+
+**FILE: utils.py**
+```python
+import torch
+import torch.nn.functional as F
+import clip
+from tqdm import tqdm
+
+@torch.no_grad()
+def zero_shot_accuracy(model, dataloader, device="cuda"):
+    """
+    Zero‑shot classification accuracy for CLIP.
+    Assumes the dataset has a `classes` attribute listing class names.
+    """
+    model.eval()
+    logits_sum = torch.zeros(len(dataloader.dataset.classes), device=device)
+    total = 0
+    with torch.no_grad():
+        for images, targets in tqdm(dataloader):
+            images = images.to(device)
+            logits = model.get_image_features(images)
+            # compute similarity with all class text
+            with torch.no_grad():
+                text_tokens = model.tokenize(dataloader.dataset.classes).to(device)
+                text_features = model.get_text_features(text_tokens)
+            sims = logits @ text_features.t()  # (B, num_classes)
+            probs = F.softmax(sims, dim=-1)
+            logits_sum += probs.sum(0)
+            total += images.size(0)
+    acc = (logits_sum.argmax() == torch.tensor(dataloader.dataset.classes).int()).float().item()
+    return acc
+
+def load_clip_model(device="cuda"):
+    """
+    Load OpenAI CLIP (ViT-B/32) and return the model and its device.
+    """
+    model, preprocess = clip.load("ViT-B/32", device=device, jit=False)
+    return model, preprocess
+
+def get_vision_encoder(model):
+    return model.visual
+
+def get_text_encoder(model):
+    return model.encode_text
+
+def get_image_features(model, images):
+    return model.encode_image(images)
+
+def get_text_features(model, text_tokens):
+    return model.encode_text(text_tokens)
+```
+
+---
+
+**FILE: train_fare.py**
+```python
+#!/usr/bin/env python
+import argparse
+import os
+import torch
+import torch.nn as nn
+import torch.distributed as dist
+import torch.multiprocessing as mp
+import torchattacks
+import clip
+from torchvision import datasets, transforms
+from utils import load_clip_model
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="FARE‑CLIP training")
+    parser.add_argument("--data_dir", type=str, required=True,
+                        help="Path to ImageNet validation subset (used as training data).")
+    parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--learning_rate", type=float, default=1e-5)
+    parser.add_argument("--weight_decay", type=float, default=1e-4)
+    parser.add_argument("--epsilon", type=str, default="4/255",
+                        help="Adversarial epsilon, e.g. '4/255'")
+    parser.add_argument("--adv_steps", type=int, default=10)
+    parser.add_argument("--output_dir", type=str, default="checkpoints/fare_clip")
+    return parser.parse_args()
+
+def run(rank, world_size, args):
+    torch.cuda.set_device(rank)
+    device = torch.device(f"cuda:{rank}")
+
+    # Load a fresh CLIP (original) for reference embeddings
+    clip_org, preprocess = load_clip_model(device)
+    clip_org.eval()
+
+    # Load a copy of the vision encoder to fine‑tune
+    visual = clip_org.visual
+    # We keep the text encoder frozen
+    text_encoder = clip_org.encode_text
+
+    # Wrap the visual encoder as a trainable module
+    model = nn.Sequential(visual)
+    model = model.to(device)
+
+    # Optimizer
+    optimizer = torch.optim.AdamW(model.parameters(),
+                                 lr=args.learning_rate,
+                                 weight_decay=args.weight_decay)
+
+    # Loss weight for the adversarial term
+    adv_weight = 1.0
+
+    # Attack object (APGD) that maximizes the embedding distance
+    eps_val = eval(args.epsilon)  # e.g. 4/255
+    attack = torchattacks.APGD(
+        model,
+        loss_func=lambda y, y_hat: -((y_hat - y).pow(2).sum(-1)).mean(),  # maximize L2 distance
+        eps=eps_val,
+        alpha=eps_val / args.adv_steps,
+        steps=args.adv_steps,
+        rand_init=True,
+        rand_init_eps=eps_val,
+    )
+
+    # Data loader (ImageNet validation subset as training data)
+    train_transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=clip_org.visual.input_mean, std=clip_org.visual.input_std),
+    ])
+    train_dataset = datasets.ImageFolder(args.data_dir, transform=train_transform)
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=8, pin_memory=True
+    )
+
+    for epoch in range(args.epochs):
+        model.train()
+        pbar = tqdm(total=len(train_loader), desc=f"Epoch {epoch+1}")
+        for images, _ in train_loader:
+            images = images.to(device)
+
+            # Original embeddings (reference)
+            with torch.no_grad():
+                phi_org = visual(images)
+
+            # 1) Clean loss: keep embeddings close to original
+            phi_clean = model(images)
+            loss_clean = ((phi_clean - phi_org).pow(2).sum(-1)).mean()
+
+            # 2) Adversarial loss: maximize distance
+            # Create adversarial images
+            images_adv = attack(images, phi_org)
+            phi_adv = model(images_adv)
+
+            loss_adv = ((phi_adv - phi_org).pow(2).sum(-1)).mean()
+
+            loss = loss_clean + adv_weight * loss_adv
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            pbar.update(1)
+        pbar.close()
+
+    # Save the fine‑tuned vision encoder
+    os.makedirs(args.output_dir, exist_ok=True)
+    torch.save(model.state_dict(), os.path.join(args.output_dir, "model.pt"))
+    print(f"Checkpoint saved to {args.output_dir}")
+
+if __name__ == "__main__":
+    args = parse_args()
+    # single‑GPU training (no distributed)
+    run(0, 1, args)
+```
+
+---
+
+**FILE: evaluate.py**
+```python
+#!/usr/bin/env python
+import argparse
+import os
+import torch
+import torchattacks
+import clip
+import torch.nn.functional as F
+from torchvision import datasets, transforms
+from tqdm import tqdm
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="FARE‑CLIP evaluation")
+    parser.add_argument("--model_path", type=str, required=True,
+                        help="Path to fine‑tuned vision encoder checkpoint.")
+    parser.add_argument("--data_dir", type=str, required=True,
+                        help="Path to ImageNet validation subset.")
+    parser.add_argument("--split", type=str, default="val",
+                        help="Dataset split (val).")
+    parser.add_argument("--eps", type=float, default=0.0,
+                        help="Epsilon for adversarial evaluation.")
+    parser.add_argument("--output_file", type=str, required=True,
+                        help="CSV file to write results.")
+    return parser.parse_args()
+
+def load_clip(device):
+    model, preprocess = clip.load("ViT-B/32", device=device, jit=False)
+    return model, preprocess
+
+def main():
+    args = parse_args()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Load original CLIP for reference (text encoder)
+    clip_orig, preprocess = load_clip(device)
+    clip_orig.eval()
+
+    # Load fine‑tuned vision encoder
+    model = torch.nn.Sequential(clip_orig.visual)
+    state = torch.load(args.model_path, map_location=device)
+    model.load_state_dict(state)
+    model.to(device)
+    model.eval()
+
+    # Data loader
+    transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=clip_orig.visual.input_mean, std=clip_orig.visual.input_std),
+    ])
+    dataset = datasets.ImageFolder(args.data_dir, transform=transform)
+    loader = torch.utils.data.DataLoader(dataset,
+                                         batch_size=128,
+                                         shuffle=False,
+                                         num_workers=8,
+                                         pin_memory=True)
+
+    # Attack (APGD) if eps > 0
+    if args.eps > 0:
+        attack = torchattacks.APGD(
+            model,
+            loss_func=lambda y, y_hat: -((y_hat - y).pow(2).sum(-1)).mean(),
+            eps=args.eps,
+            alpha=args.eps / 10,
+            steps=10,
+            rand_init=True,
+            rand_init_eps=args.eps,
+        )
+    else:
+        attack = None
+
+    correct = 0
+    total = 0
+    for imgs, labels in tqdm(loader):
+        imgs = imgs.to(device)
+        labels = labels.to(device)
+
+        if attack is not None:
+            imgs_adv = attack(imgs, clip_orig.visual(imgs))
+            feats = model(imgs_adv)
+        else:
+            feats = model(imgs)
+
+        logits = clip_orig.encode_image(imgs)  # use original image embeddings for classification
+        preds = logits.argmax(dim=-1)
+        correct += (preds == labels).sum().item()
+        total += imgs.size(0)
+
+    acc = correct / total * 100
+    with open(args.output_file, "w") as f:
+        f.write(f"epsilon,{args.eps}\n")
+        f.write(f"accuracy,{acc:.2f}\n")
+    print(f"Evaluation done. Accuracy={acc:.2f}% for eps={args.eps}")
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+**FILE: zero_shot.py**
+```python
+#!/usr/bin/env python
+import argparse
+import os
+import torch
+import clip
+import torch.nn.functional as F
+from torchvision import datasets, transforms
+from tqdm import tqdm
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Zero‑shot accuracy on CIFAR‑10")
+    parser.add_argument("--model_path", type=str, required=True,
+                        help="Fine‑tuned vision encoder checkpoint.")
+    parser.add_argument("--data_dir", type=str, required=True,
+                        help="Path to CIFAR‑10 data.")
+    parser.add_argument("--output_file", type=str, required=True,
+                        help="CSV file to write results.")
+    return parser.parse_args()
+
+def main():
+    args = parse_args()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Load original CLIP (text encoder only needed)
+    clip_model, preprocess = clip.load("ViT-B/32", device=device, jit=False)
+    clip_model.eval()
+
+    # Load fine‑tuned vision encoder
+    model = torch.nn.Sequential(clip_model.visual)
+    state = torch.load(args.model_path, map_location=device)
+    model.load_state_dict(state)
+    model.to(device)
+    model.eval()
+
+    # CIFAR‑10 data
+    transform = transforms.Compose([
+        transforms.Resize(224),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=clip_model.visual.input_mean, std=clip_model.visual.input_std),
+    ])
+    testset = datasets.CIFAR10(root=args.data_dir, train=False, download=False, transform=transform)
+    loader = torch.utils.data.DataLoader(testset, batch_size=128, shuffle=False, num_workers=8)
+
+    class_names = testset.classes  # ['airplane', 'automobile', ...]
+
+    # Prepare text embeddings
+    with torch.no_grad():
+        text_tokens = clip_model.tokenize(class_names).to(device)
+        text_features = clip_model.encode_text(text_tokens).float()
+        text_features /= text_features.norm(dim=-1, keepdim=True)
+
+    correct = 0
+    total = 0
+    for imgs, labels in tqdm(loader):
+        imgs = imgs.to(device)
+        labels = labels.to(device)
+
+        feats = model(imgs)
+        feats = feats.float()
+        feats /= feats.norm(dim=-1, keepdim=True)
+
+        logits = feats @ text_features.t()
+        preds = logits.argmax(dim=-1)
+        correct += (preds == labels).sum().item()
+        total += imgs.size(0)
+
+    acc = correct / total * 100
+    with open(args.output_file, "w") as f:
+        f.write(f"accuracy,{acc:.2f}\n")
+    print(f"Zero‑shot CIFAR‑10 accuracy: {acc:.2f}%")
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+**FILE: README.md**
+```markdown
+# Robust CLIP – FARE (Unsupervised Adversarial Fine‑Tuning)
+
+This repository contains a lightweight reproduction of the *FARE* (Unsupervised Adversarial Fine‑Tuning) method for CLIP vision encoders as described in the paper *“Robust CLIP: Unsupervised Adversarial Fine‑Tuning of Vision Embeddings for Robust Large Vision‑Language Models”*.
+
+## Goal
+
+* Fine‑tune the vision encoder of CLIP on a small ImageNet subset using the FARE loss (preserve original embeddings while training against adversarial perturbations).
+* Evaluate the resulting model on:
+  * Clean ImageNet validation accuracy.
+  * Robust ImageNet accuracy at ε = 2/255 and ε = 4/255.
+  * Zero‑shot classification on CIFAR‑10.
+
+The script `reproduce.sh` orchestrates the entire pipeline: data download, training, evaluation, and result generation.
+
+> **Note**: This is a *minimal* implementation intended for educational / reproducibility purposes. It uses a lightweight `ViT‑B/32` backbone instead of the larger `ViT‑L/14` used in the paper and trains for only 2 epochs. The numbers will differ from the paper but the procedure and code structure match the described method.
+
+## Requirements
+
+- Python 3.10+
+- CUDA‑enabled GPU (recommended, but CPU runs slower)
+- See `requirements.txt` for exact packages.
+
+## Usage
+
+```bash
+bash reproduce.sh
+```
+
+The script will:
+1. Install dependencies.
+2. Download a subset of ImageNet validation set and CIFAR‑10.
+3. Train a FARE‑CLIP model for 2 epochs.
+4. Evaluate on clean and robust ImageNet validation.
+5. Perform zero‑shot evaluation on CIFAR‑10.
+
+All results are written to the `results/` directory as CSV files.
+
+## Repository Structure
+
+```
+.
+├── README.md
+├── requirements.txt
+├── reproduce.sh
+├── download_imagenet_val.py
+├── download_cifar10.py
+├── utils.py
+├── train_fare.py
+├── evaluate.py
+├── zero_shot.py
+└── results/          ← created automatically
+```
+
+## Key Implementation Details
+
+* **FARE Loss** – For each batch:
+  * *Clean loss*: \( \| \phi_{\text{ft}}(x) - \phi_{\text{org}}(x) \|_2^2 \)
+  * *Adversarial loss*: maximize the same distance for an adversarial image \(x_{\text{adv}}\) generated by APGD.
+  * Total loss = clean loss + λ * adversarial loss (λ = 1).
+
+* **Adversarial Attack** – APGD from `torchattacks` with 10 steps, step size = ε / 10, random initialization.
+
+* **Model Loading** – We keep the original CLIP text encoder frozen and only fine‑tune the vision encoder.
+
+* **Zero‑shot Evaluation** – CLIP zero‑shot classification on CIFAR‑10 using the text embeddings of the 10 class names.
+
+## Extending the Script
+
+* Replace `ViT‑B/32` with `ViT‑L/14` (requires more GPU memory).
+* Increase training epochs or batch size for better accuracy.
+* Use the full ImageNet training set for a more faithful reproduction.
+
+## Acknowledgements
+
+The implementation builds on the official OpenAI CLIP repo (`clip-by-openai`) and the `torchattacks` library for adversarial attacks. The repository was created by the assistant for the purpose of demonstrating a reproducible pipeline based on the provided paper.
+```
+
+---

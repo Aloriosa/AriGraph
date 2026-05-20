@@ -1,0 +1,76 @@
+"""
+Evaluate the adapter on a held‑out set.
+"""
+
+import os
+import torch
+from tqdm import tqdm
+from transformers import logging
+logging.set_verbosity_error()
+
+from .dataset import load_dataset
+from .blackbox_llm import BlackBoxLLM
+from .adapter import Adapter
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def collate_batch(batch):
+    prompts = [ex["question"] if "question" in ex else ex["prompt"] for ex in batch]
+    answers = [ex["answer"] if "answer" in ex else ex["target"] for ex in batch]
+    return prompts, answers
+
+def evaluate(adapter, blackbox, dataset, k=3, max_len=64):
+    adapter.eval()
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for prompts, answers in tqdm(dataset, desc="Evaluating"):
+            candidates = []
+            for p in prompts:
+                cand = blackbox.generate(p, k=k, max_length=max_len)
+                candidates.append(cand)
+            # Score each candidate
+            scores = []
+            for p, cand in zip(prompts, candidates):
+                texts = [f"{p} {c}" for c in cand]
+                s = adapter(texts).cpu().numpy()
+                scores.append(s)
+            # Pick the best candidate
+            for i, s in enumerate(scores):
+                pred_idx = s.argmax()
+                pred = candidates[i][pred_idx]
+                if pred.strip() == answers[i].strip():
+                    correct += 1
+                total += 1
+    acc = correct / total if total > 0 else 0.0
+    print(f"Accuracy: {acc*100:.2f}%")
+    return acc
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", default="gsm8k", choices=["gsm8k","strategyqa","truthfulqa","scienceqa"])
+    parser.add_argument("--ckpt_dir", default="checkpoints")
+    parser.add_argument("--k", type=int, default=3)
+    parser.add_argument("--max_len", type=int, default=64)
+    args = parser.parse_args()
+
+    # Load adapter checkpoint
+    ckpt_path = os.path.join(args.ckpt_dir, "adapter_epoch3.pt")
+    if not os.path.exists(ckpt_path):
+        raise FileNotFoundError(f"Checkpoint {ckpt_path} not found. Run training first.")
+    adapter = Adapter().to(DEVICE)
+    adapter.load_state_dict(torch.load(ckpt_path, map_location=DEVICE))
+
+    # Load dataset
+    ds = load_dataset(args.dataset, split="validation")
+    from torch.utils.data import DataLoader
+    dataloader = DataLoader(ds, batch_size=8, shuffle=False, collate_fn=collate_batch)
+
+    # Black‑box generator
+    blackbox = BlackBoxLLM(device=DEVICE)
+
+    evaluate(adapter, blackbox, dataloader, k=args.k, max_len=args.max_len)
+
+if __name__ == "__main__":
+    main()

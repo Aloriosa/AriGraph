@@ -1,0 +1,130 @@
+import math
+import torch
+import torch.autograd as autograd
+import numpy as np
+
+# Analytical solutions
+def convection_sol(x, t, beta=40.0):
+    return torch.sin(x - beta * t)
+
+def reaction_sol(x, t, rho=5.0):
+    h = torch.exp(-((x - math.pi) ** 2) / (2 * (math.pi / 4) ** 2))
+    return (h * torch.exp(rho * t)) / (h * torch.exp(rho * t) + 1 - h)
+
+def wave_sol(x, t, beta=5.0):
+    return (
+        torch.sin(math.pi * x) * torch.cos(2 * math.pi * t)
+        + 0.5 * torch.sin(beta * math.pi * x) * torch.cos(2 * beta * math.pi * t)
+    )
+
+
+class BasePDE:
+    """
+    Abstract base class for PDE operators and analytical solutions.
+    Each subclass must implement:
+        - residual(u, x_t) → tensor of residuals
+        - boundary(u, x_t) → tensor of boundary residuals
+        - analytical_solution(x, t) → tensor
+    """
+
+    def __init__(self, device):
+        self.device = device
+
+    def residual(self, model, x_t):
+        """
+        Compute PDE residual ∂u/∂t + ... etc.
+        Must be implemented by subclasses.
+        """
+        raise NotImplementedError
+
+    def boundary(self, model, x_t):
+        """
+        Compute boundary / initial residuals.
+        Must be implemented by subclasses.
+        """
+        raise NotImplementedError
+
+    def analytical_solution(self, x, t):
+        """
+        Analytical solution for L2RE evaluation.
+        """
+        raise NotImplementedError
+
+
+class ConvectionPDE(BasePDE):
+    def __init__(self, device, beta=40.0):
+        super().__init__(device)
+        self.beta = beta
+
+    def residual(self, model, x_t):
+        # x_t: (N, 2) – (x, t)
+        x_t.requires_grad_(True)
+        u = model(x_t).squeeze()  # shape (N,)
+        grads = autograd.grad(
+            u, x_t, grad_outputs=torch.ones_like(u), create_graph=True
+        )[0]  # shape (N, 2)
+        ux = grads[:, 0]
+        ut = grads[:, 1]
+        return ut + self.beta * ux
+
+    def boundary(self, model, x_t):
+        # Periodic: u(0, t) - u(2π, t)
+        # Assume x_t contains points on both boundaries
+        u = model(x_t).squeeze()
+        # first half boundary at x=0, second half at x=2π
+        u0 = u[: x_t.shape[0] // 2]
+        u2pi = u[x_t.shape[0] // 2 :]
+        return u0 - u2pi
+
+    def analytical_solution(self, x, t):
+        return convection_sol(x, t, beta=self.beta)
+
+
+class ReactionPDE(BasePDE):
+    def __init__(self, device, rho=5.0):
+        super().__init__(device)
+        self.rho = rho
+
+    def residual(self, model, x_t):
+        x_t.requires_grad_(True)
+        u = model(x_t).squeeze()
+        grads = autograd.grad(u, x_t, grad_outputs=torch.ones_like(u), create_graph=True)[0]
+        ut = grads[:, 1]
+        return ut - self.rho * u * (1 - u)
+
+    def boundary(self, model, x_t):
+        # Periodic: u(0, t) - u(2π, t)
+        u = model(x_t).squeeze()
+        u0 = u[: x_t.shape[0] // 2]
+        u2pi = u[x_t.shape[0] // 2 :]
+        return u0 - u2pi
+
+    def analytical_solution(self, x, t):
+        return reaction_sol(x, t, rho=self.rho)
+
+
+class WavePDE(BasePDE):
+    def __init__(self, device):
+        super().__init__(device)
+
+    def residual(self, model, x_t):
+        x_t.requires_grad_(True)
+        u = model(x_t).squeeze()
+        grads = autograd.grad(u, x_t, grad_outputs=torch.ones_like(u), create_graph=True)[0]
+        ux = grads[:, 0]
+        ut = grads[:, 1]
+        # second-order: need second derivatives via autograd
+        uxx = autograd.grad(ux, x_t, grad_outputs=torch.ones_like(ux), create_graph=True)[0][:, 0]
+        utt = autograd.grad(ut, x_t, grad_outputs=torch.ones_like(ut), create_graph=True)[0][:, 1]
+        return utt - 4 * uxx
+
+    def boundary(self, model, x_t):
+        # Dirichlet: u(0, t) = 0, u(1, t) = 0
+        u = model(x_t).squeeze()
+        # first half x=0, second half x=1
+        u0 = u[: x_t.shape[0] // 2]
+        u1 = u[x_t.shape[0] // 2 :]
+        return torch.cat([u0, u1], dim=0)
+
+    def analytical_solution(self, x, t):
+        return wave_sol(x, t, beta=5.0)

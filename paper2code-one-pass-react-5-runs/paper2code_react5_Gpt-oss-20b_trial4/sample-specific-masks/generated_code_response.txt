@@ -1,0 +1,429 @@
+FILE: src/utils.py
+```python
+import torch
+import random
+import numpy as np
+
+def set_seed(seed: int = 42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+def get_mask(mask_size: str, device: torch.device, shape: torch.Size):
+    """
+    Create a binary mask for the input batch.
+    :param mask_size: 'full', 'medium', or 'narrow'
+    :param device: torch device
+    :param shape: (B, C, H, W)
+    :return: mask tensor of shape (B, C, H, W) on the given device
+    """
+    B, C, H, W = shape
+    if mask_size == "full":
+        return torch.ones((B, C, H, W), device=device)
+    elif mask_size == "medium":
+        size = H // 4  # 56 for 224
+        top = (H - size) // 2
+        left = (W - size) // 2
+        mask = torch.zeros((B, C, H, W), device=device)
+        mask[:, :, top:top+size, left:left+size] = 1.0
+        return mask
+    elif mask_size == "narrow":
+        size = H // 8  # 28 for 224
+        top = (H - size) // 2
+        left = (W - size) // 2
+        mask = torch.zeros((B, C, H, W), device=device)
+        mask[:, :, top:top+size, left:left+size] = 1.0
+        return mask
+    else:
+        raise ValueError(f"Unsupported mask_size: {mask_size}")
+```
+
+FILE: src/pretrained_backbone.py
+```python
+import torch
+import torchvision.models as models
+
+class PretrainedBackbone(torch.nn.Module):
+    """Convenience wrapper that exposes a frozen ImageNet‑pretrained backbone."""
+    def __init__(self, backbone_name: str):
+        super().__init__()
+        if backbone_name == "resnet18":
+            self.backbone = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+        elif backbone_name == "resnet50":
+            self.backbone = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
+        elif backbone_name == "vit_b32":
+            self.backbone = models.vit_b_32(weights=models.ViT_B32_Weights.IMAGENET1K_V1)
+        else:
+            raise ValueError(f"Unsupported backbone: {backbone_name}")
+
+        self.backbone.eval()
+        for p in self.backbone.parameters():
+            p.requires_grad = False
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.backbone(x)
+```
+
+FILE: src/mapping.py
+```python
+import torch
+import numpy as np
+
+def random_mapping(num_target: int, num_source: int = 1000):
+    """Return a random injective mapping of shape (num_target,)"""
+    indices = np.random.choice(num_source, num_target, replace=False)
+    return torch.tensor(indices, dtype=torch.long)
+
+def compute_mapping(loader, model, num_target: int, num_source: int = 1000, device="cpu"):
+    """
+    Compute a mapping from target to source labels by counting the most frequent
+    source predictions for each target class.  `model` should be a frozen
+    ImageNet‑pretrained backbone (e.g. PretrainedBackbone).
+    """
+    model.eval()
+    freq = torch.zeros((num_source, num_target), dtype=torch.int64, device=device)
+
+    with torch.no_grad():
+        for imgs, labels in loader:
+            imgs = imgs.to(device)
+            logits = model(imgs)
+            preds = torch.argmax(logits, dim=1)
+            for t in range(num_target):
+                mask = (labels == t)
+                if mask.sum() == 0:
+                    continue
+                preds_t = preds[mask]
+                for s in range(num_source):
+                    freq[s, t] += (preds_t == s).sum()
+
+    mapping = []
+    used = set()
+    for t in range(num_target):
+        idx = torch.argmax(freq[:, t]).item()
+        while idx in used:
+            freq[idx, t] = -1
+            idx = torch.argmax(freq[:, t]).item()
+        mapping.append(idx)
+        used.add(idx)
+
+    return torch.tensor(mapping, dtype=torch.long, device=device)
+```
+
+FILE: src/model.py
+```python
+import torch
+import torch.nn as nn
+import torchvision.models as models
+from .mask_generator import MaskGenerator
+from .utils import get_mask
+
+class BaseModel(nn.Module):
+    """
+    Baseline watermarking model: shared mask (full/medium/narrow).
+    """
+    def __init__(self, backbone_name="resnet18", num_target_classes=10,
+                 mask_size="full", mapping_tensor=None, device="cpu"):
+        super().__init__()
+        self.device = device
+        self.mask_size = mask_size
+
+        # Build backbone
+        if backbone_name == "resnet18":
+            self.backbone = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+            backbone_out = 1000
+        elif backbone_name == "resnet50":
+            self.backbone = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
+            backbone_out = 1000
+        elif backbone_name == "vit_b32":
+            self.backbone = models.vit_b_32(weights=models.ViT_B32_Weights.IMAGENET1K_V1)
+            backbone_out = 1000
+        else:
+            raise ValueError("Unsupported backbone")
+
+        self.backbone.eval()
+        for p in self.backbone.parameters():
+            p.requires_grad = False
+
+        # Learnable pattern δ (shared across all images)
+        self.delta = nn.Parameter(torch.zeros(1, 3, 224, 224, device=device))
+
+        # Mapping from target to source classes
+        if mapping_tensor is not None:
+            self.mapping = mapping_tensor.to(device)
+        else:
+            self.mapping = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (B,3,224,224)  target images
+        Returns logits of shape (B, 1000)
+        """
+        mask = get_mask(self.mask_size, x.device, x.shape)
+        y = x + self.delta * mask
+        logits = self.backbone(y)
+        return logits
+
+    def loss(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        if self.mapping is None:
+            raise ValueError("Mapping tensor must be set before training")
+        selected_logits = logits[:, self.mapping]
+        return nn.functional.cross_entropy(selected_logits, targets)
+
+class SMMModel(BaseModel):
+    """
+    Full SMM pipeline: sample‑specific mask generator + shared pattern.
+    Inherits the backbone, delta and output mapping from BaseModel.
+    """
+    def __init__(self, backbone_name="resnet18", num_target_classes=10,
+                 mask_size="full", mapping_tensor=None, device="cpu"):
+        super().__init__(backbone_name, num_target_classes, mask_size,
+                         mapping_tensor, device)
+        self.mask_gen = MaskGenerator().to(device)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        mask = self.mask_gen(x)          # (B,3,224,224)
+        y = x + self.delta * mask
+        logits = self.backbone(y)
+        return logits
+```
+
+FILE: src/main.py
+```python
+import torch
+import torch.optim as optim
+from tqdm import tqdm
+
+from .data import get_dataloaders
+from .model import BaseModel, SMMModel
+from .utils import set_seed
+from .mapping import random_mapping, compute_mapping
+from .pretrained_backbone import PretrainedBackbone
+from .config import *
+
+def get_optimizer(model, lr):
+    """Collect all trainable parameters of the model."""
+    params = list(model.delta.parameters())
+    if hasattr(model, "mask_gen"):
+        params += list(model.mask_gen.parameters())
+    return optim.Adam(params, lr=lr, weight_decay=WEIGHT_DECAY)
+
+def lr_scheduler(optimizer, epoch):
+    if epoch in LR_SCHEDULE:
+        for param_group in optimizer.param_groups:
+            param_group['lr'] *= LR_GAMMA
+
+def train_one_epoch(model, loader, optimizer, device, epoch):
+    model.train()
+    total_loss = 0.0
+    for images, labels in tqdm(loader, desc=f"Train epoch {epoch+1}", leave=False):
+        images = images.to(device)
+        labels = labels.to(device)
+
+        optimizer.zero_grad()
+        logits = model(images)
+        loss = model.loss(logits, labels)
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item() * images.size(0)
+    return total_loss / len(loader.dataset)
+
+def evaluate(model, loader, device):
+    model.eval()
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for images, labels in loader:
+            images = images.to(device)
+            labels = labels.to(device)
+            logits = model(images)
+            selected_logits = logits[:, model.mapping]
+            preds = selected_logits.argmax(dim=1)
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+    return 100.0 * correct / total
+
+if __name__ == "__main__":
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    set_seed(SEED)
+    torch.backends.cudnn.benchmark = True
+
+    # Load data
+    train_loader, test_loader = get_dataloaders(DATASET, batch_size=BATCH_SIZE)
+
+    # Determine number of target classes
+    if DATASET == "cifar10":
+        num_target = 10
+    elif DATASET == "cifar100":
+        num_target = 100
+    elif DATASET == "svhn":
+        num_target = 10
+    else:
+        raise ValueError(f"Unsupported dataset: {DATASET}")
+
+    # Create mapping tensor
+    if MAPPING_STRATEGY == "random":
+        mapping_tensor = random_mapping(num_target, NUM_SOURCE_CLASSES)
+    elif MAPPING_STRATEGY == "frequent":
+        # Compute mapping once using the frozen ImageNet backbone
+        pretrained_model = PretrainedBackbone(BACKBONE).to(device)
+        mapping_tensor = compute_mapping(train_loader, pretrained_model,
+                                         num_target, NUM_SOURCE_CLASSES,
+                                         device=device)
+    elif MAPPING_STRATEGY == "iterative":
+        # Initial mapping is random; will be updated each epoch
+        mapping_tensor = random_mapping(num_target, NUM_SOURCE_CLASSES)
+    else:
+        raise ValueError(f"Unsupported mapping strategy: {MAPPING_STRATEGY}")
+
+    # Instantiate models
+    baseline = BaseModel(backbone_name=BACKBONE,
+                         num_target_classes=num_target,
+                         mask_size=BASE_MASK_SIZE,
+                         mapping_tensor=mapping_tensor,
+                         device=device).to(device)
+
+    smm      = SMMModel(backbone_name=BACKBONE,
+                        num_target_classes=num_target,
+                        mask_size=BASE_MASK_SIZE,
+                        mapping_tensor=mapping_tensor,
+                        device=device).to(device)
+
+    # Optimizers
+    opt_baseline = get_optimizer(baseline, BASE_LR)
+    opt_smm      = get_optimizer(smm, BASE_LR)
+
+    # Training loop
+    for epoch in range(EPOCHS):
+        lr_scheduler(opt_baseline, epoch)
+        lr_scheduler(opt_smm, epoch)
+
+        loss_b = train_one_epoch(baseline, train_loader, opt_baseline, device, epoch)
+        loss_s = train_one_epoch(smm, train_loader, opt_smm, device, epoch)
+
+        acc_b = evaluate(baseline, test_loader, device)
+        acc_s = evaluate(smm, test_loader, device)
+
+        print(f"Epoch {epoch+1:3d} | Baseline loss: {loss_b:.4f} | SMM loss: {loss_s:.4f}")
+        print(f"           | Baseline acc : {acc_b:.2f}% | SMM acc : {acc_s:.2f}%")
+
+        # Update mapping if iterative strategy is used
+        if MAPPING_STRATEGY == "iterative":
+            new_mapping = compute_mapping(train_loader, smm, num_target,
+                                          NUM_SOURCE_CLASSES, device=device)
+            smm.mapping = new_mapping
+            baseline.mapping = new_mapping  # keep same mapping for fairness
+
+    # Final evaluation
+    final_acc_b = evaluate(baseline, test_loader, device)
+    final_acc_s = evaluate(smm, test_loader, device)
+
+    print("\n===== Final results =====")
+    print(f"Baseline accuracy: {final_acc_b:.2f}%")
+    print(f"SMM accuracy:     {final_acc_s:.2f}%")
+
+    # Save results
+    with open("results.txt", "w") as f:
+        f.write(f"Baseline accuracy: {final_acc_b:.2f}%\n")
+        f.write(f"SMM accuracy: {final_acc_s:.2f}%\n")
+```
+
+FILE: src/mask_generator.py
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MaskGenerator(nn.Module):
+    """
+    Lightweight 5‑layer CNN that outputs a 3‑channel mask for each image.
+    The design follows the paper: 5 conv layers with 2 MaxPool layers.
+    """
+    def __init__(self):
+        super().__init__()
+        # Layer 1
+        self.conv1 = nn.Conv2d(3, 16, kernel_size=3, padding=1)
+        self.bn1   = nn.BatchNorm2d(16)
+        # Layer 2
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
+        self.bn2   = nn.BatchNorm2d(32)
+        # Layer 3
+        self.conv3 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.bn3   = nn.BatchNorm2d(64)
+        # Layer 4
+        self.conv4 = nn.Conv2d(64, 32, kernel_size=3, padding=1)
+        self.bn4   = nn.BatchNorm2d(32)
+        # Layer 5
+        self.conv5 = nn.Conv2d(32, 3, kernel_size=3, padding=1)
+        self.bn5   = nn.BatchNorm2d(3)
+
+        self.pool = nn.MaxPool2d(2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (B,3,H,W)  ->  (B,3,H,W)  mask in [0,1]
+        """
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = self.pool(x)          # /2
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = self.pool(x)          # /4
+        x = F.relu(self.bn3(self.conv3(x)))
+        x = F.relu(self.bn4(self.conv4(x)))
+        x = F.relu(self.bn5(self.conv5(x)))
+        # Patch‑wise interpolation: upsample by nearest to original size
+        x = F.interpolate(x, scale_factor=4, mode='nearest')
+        # Clamp to [0,1] and apply sigmoid for smooth masks
+        return torch.sigmoid(x)
+```
+
+FILE: src/data.py
+```python
+import torch
+from torchvision import transforms, datasets
+
+from .config import IMAGE_SIZE, NUM_WORKERS
+
+def build_transform(augment: bool = True):
+    if augment:
+        transform_list = [
+            transforms.RandomResizedCrop(size=IMAGE_SIZE, scale=(0.8, 1.0)),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1),
+            transforms.ToTensor(),
+        ]
+    else:
+        transform_list = [
+            transforms.Resize(IMAGE_SIZE),
+            transforms.CenterCrop(IMAGE_SIZE),
+            transforms.ToTensor(),
+        ]
+    return transforms.Compose(transform_list)
+
+def get_dataloaders(dataset_name: str, batch_size: int = 256):
+    train_transform = build_transform(True)
+    test_transform = build_transform(False)
+
+    if dataset_name == "cifar10":
+        train_set = datasets.CIFAR10(root=".", train=True, download=True, transform=train_transform)
+        test_set  = datasets.CIFAR10(root=".", train=False, download=True, transform=test_transform)
+    elif dataset_name == "cifar100":
+        train_set = datasets.CIFAR100(root=".", train=True, download=True, transform=train_transform)
+        test_set  = datasets.CIFAR100(root=".", train=False, download=True, transform=test_transform)
+    elif dataset_name == "svhn":
+        # SVHN comes in two variants: 'train' and 'extra'; we use 'train'
+        train_set = datasets.SVHN(root=".", split="train", download=True, transform=train_transform)
+        test_set  = datasets.SVHN(root=".", split="test", download=True, transform=test_transform)
+    else:
+        raise ValueError(f"Unsupported dataset: {dataset_name}")
+
+    train_loader = torch.utils.data.DataLoader(
+        train_set, batch_size=batch_size, shuffle=True, num_workers=NUM_WORKERS, pin_memory=True
+    )
+    test_loader = torch.utils.data.DataLoader(
+        test_set, batch_size=batch_size, shuffle=False, num_workers=NUM_WORKERS, pin_memory=True
+    )
+    return train_loader, test_loader
+```
+
+All other files remain unchanged.

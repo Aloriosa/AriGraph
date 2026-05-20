@@ -1,0 +1,351 @@
+#!/usr/bin/env python3
+# Minimal SAPG implementation on Pendulum-v1
+
+import os
+import random
+import json
+import math
+from collections import deque, namedtuple
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import gymnasium as gym
+
+# Set reproducibility
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+
+# Hyperparameters
+ENV_NAME = "Pendulum-v1"
+NUM_POLICIES = 3          # 1 leader + 2 followers
+POLICY_HIDDEN = 64
+VALUE_HIDDEN = 64
+PHI_DIM = 32
+GAMMA = 0.99
+LAM = 0.95      # GAE lambda
+CLIP_EPS = 0.2
+ENTROPY_COEF = 0.0
+LEARNING_RATE = 3e-4
+BATCH_SIZE = 64
+EPOCHS = 4
+HORIZON = 200
+NUM_EVAL_EPISODES = 10
+TOTAL_ITERATIONS = 20
+ENV_STEPS_PER_POLICY = 16 * HORIZON  # 16 envs per policy
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+Transition = namedtuple(
+    "Transition",
+    ["state", "action", "reward", "done", "log_prob", "value"],
+)
+
+# ----------------------------------------------------
+# Networks
+# ----------------------------------------------------
+class SharedBackbone(nn.Module):
+    def __init__(self, input_dim, hidden_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class Policy(nn.Module):
+    def __init__(self, backbone, action_dim, phi_dim):
+        super().__init__()
+        self.backbone = backbone
+        self.phi = nn.Parameter(torch.zeros(phi_dim))
+        self.mean_head = nn.Linear(backbone.net[-1].out_features, action_dim)
+        self.log_std = nn.Parameter(torch.zeros(action_dim))
+
+    def forward(self, x):
+        hidden = self.backbone(x) + self.phi
+        mean = self.mean_head(hidden)
+        std = self.log_std.exp().expand_as(mean)
+        return mean, std
+
+    def get_action(self, state):
+        mean, std = self(state)
+        dist = torch.distributions.Normal(mean, std)
+        action = dist.sample()
+        logp = dist.log_prob(action).sum(-1)
+        return action.cpu().numpy(), logp.cpu().detach().numpy()
+
+    def log_prob(self, state, action):
+        mean, std = self(state)
+        dist = torch.distributions.Normal(mean, std)
+        return dist.log_prob(action).sum(-1)
+
+
+class ValueNet(nn.Module):
+    def __init__(self, backbone):
+        super().__init__()
+        self.backbone = backbone
+        self.value_head = nn.Linear(backbone.net[-1].out_features, 1)
+
+    def forward(self, x):
+        hidden = self.backbone(x)
+        return self.value_head(hidden).squeeze(-1)
+
+
+# ----------------------------------------------------
+# SAPG Agent
+# ----------------------------------------------------
+class SAPGAgent:
+    def __init__(self, state_dim, action_dim, num_policies, phi_dim):
+        self.shared_backbone = SharedBackbone(state_dim, POLICY_HIDDEN).to(DEVICE)
+        self.policies = [
+            Policy(self.shared_backbone, action_dim, phi_dim).to(DEVICE)
+            for _ in range(num_policies)
+        ]
+        self.value_nets = [
+            ValueNet(self.shared_backbone).to(DEVICE) for _ in range(num_policies)
+        ]
+
+        self.optim = optim.Adam(
+            list(self.shared_backbone.parameters())
+            + [p.parameter() for p in self.policies]
+            + [v.parameter() for v in self.value_nets],
+            lr=LEARNING_RATE,
+        )
+
+    def collect_trajectories(self, envs, horizon):
+        """Collect data for each policy on its assigned envs."""
+        batches = [[] for _ in self.policies]
+
+        for _ in range(horizon):
+            for idx, env in enumerate(envs):
+                state = env.state
+                policy = self.policies[idx]
+                value_net = self.value_nets[idx]
+
+                state_t = torch.tensor(state, dtype=torch.float32).to(DEVICE)
+                mean, std = policy(state_t)
+                dist = torch.distributions.Normal(mean, std)
+                action = dist.sample()
+                logp = dist.log_prob(action).sum(-1)
+
+                value = value_net(state_t).detach()
+                action_np = action.cpu().numpy()
+                next_state, reward, terminated, truncated, _ = env.step(action_np)
+                done = terminated or truncated
+
+                trans = Transition(
+                    state=state,
+                    action=action.cpu().detach().numpy(),
+                    reward=reward,
+                    done=done,
+                    log_prob=logp.cpu().item(),
+                    value=value.item(),
+                )
+                batches[idx].append(trans)
+
+                if done:
+                    env.reset()
+
+        return batches
+
+    def compute_returns(self, transitions):
+        """Compute discounted returns and advantages."""
+        returns = []
+        advs = []
+        G = 0
+        for trans in reversed(transitions):
+            G = trans.reward + GAMMA * G * (1 - trans.done)
+            returns.insert(0, G)
+        returns = torch.tensor(returns, dtype=torch.float32).to(DEVICE)
+
+        values = torch.tensor([t.value for t in transitions], dtype=torch.float32).to(
+            DEVICE
+        )
+        advs = returns - values
+        return returns, advs
+
+    def ppo_loss(self, policy, value_net, transitions, returns, advantages):
+        """Compute PPO surrogate loss + value loss + entropy."""
+        states = torch.tensor([t.state for t in transitions], dtype=torch.float32).to(
+            DEVICE
+        )
+        actions = torch.tensor([t.action for t in transitions], dtype=torch.float32).to(
+            DEVICE
+        )
+        old_logp = torch.tensor(
+            [t.log_prob for t in transitions], dtype=torch.float32
+        ).to(DEVICE)
+
+        # Current log probs
+        mean, std = policy(states)
+        dist = torch.distributions.Normal(mean, std)
+        logp = dist.log_prob(actions).sum(-1)
+
+        # Ratio
+        ratio = torch.exp(logp - old_logp)
+
+        # Surrogate
+        surr1 = ratio * advantages
+        surr2 = torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS) * advantages
+        policy_loss = -torch.min(surr1, surr2).mean()
+
+        # Value loss
+        values = value_net(states).squeeze(-1)
+        value_loss = nn.functional.mse_loss(values, returns)
+
+        # Entropy
+        entropy = dist.entropy().sum(-1).mean()
+        loss = policy_loss + 0.5 * value_loss - ENTROPY_COEF * entropy
+        return loss, policy_loss, value_loss, entropy
+
+    def offpolicy_loss(self, leader_policy, leader_value, other_batches):
+        """Compute importance‑weighted loss for leader from other policies."""
+        all_trans = [t for batch in other_batches for t in batch]
+        states = torch.tensor([t.state for t in all_trans], dtype=torch.float32).to(
+            DEVICE
+        )
+        actions = torch.tensor([t.action for t in all_trans], dtype=torch.float32).to(
+            DEVICE
+        )
+        old_logp = torch.tensor(
+            [t.log_prob for t in all_trans], dtype=torch.float32
+        ).to(DEVICE)
+
+        # Current log probs under leader
+        mean, std = leader_policy(states)
+        dist = torch.distributions.Normal(mean, std)
+        logp = dist.log_prob(actions).sum(-1)
+
+        # Ratio
+        ratio = torch.exp(logp - old_logp)
+
+        # Compute returns and advantages using leader's value network
+        returns, advs = self.compute_returns(all_trans)
+
+        surr1 = ratio * advs
+        surr2 = torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS) * advs
+        loss = -torch.mean(torch.min(surr1, surr2))
+        return loss, ratio.mean().item()
+
+    def update(self, batches):
+        """Single update step over collected batches."""
+        all_losses = []
+
+        # Leader (index 0)
+        leader_trans = batches[0]
+        returns, advs = self.compute_returns(leader_trans)
+        off_loss, off_ratio = self.offpolicy_loss(
+            self.policies[0], self.value_nets[0], batches[1:]
+        )
+        on_loss, on_p_loss, on_v_loss, on_entropy = self.ppo_loss(
+            self.policies[0], self.value_nets[0], leader_trans, returns, advs
+        )
+        leader_loss = on_loss + off_loss
+        all_losses.append(leader_loss)
+
+        # Followers
+        for idx in range(1, len(self.policies)):
+            trans = batches[idx]
+            ret, adv = self.compute_returns(trans)
+            loss, p_loss, v_loss, ent = self.ppo_loss(
+                self.policies[idx], self.value_nets[idx], trans, ret, adv
+            )
+            all_losses.append(loss)
+
+        # Backprop
+        self.optim.zero_grad()
+        total_loss = torch.stack(all_losses).sum()
+        total_loss.backward()
+        nn.utils.clip_grad_norm_(self.shared_backbone.parameters(), 0.5)
+        nn.utils.clip_grad_norm_(
+            [p.parameter() for p in self.policies], 0.5
+        )
+        nn.utils.clip_grad_norm_(
+            [v.parameter() for v in self.value_nets], 0.5
+        )
+        self.optim.step()
+
+    def evaluate(self, env, policy, n_episodes=NUM_EVAL_EPISODES):
+        returns = []
+        for _ in range(n_episodes):
+            state = env.reset()
+            done = False
+            ep_ret = 0.0
+            while not done:
+                state_t = torch.tensor(state, dtype=torch.float32).to(DEVICE)
+                mean, std = policy(state_t)
+                action = mean.cpu().detach().numpy()
+                state, reward, terminated, truncated, _ = env.step(action)
+                done = terminated or truncated
+                ep_ret += reward
+            returns.append(ep_ret)
+        return np.mean(returns)
+
+
+# ----------------------------------------------------
+# Main training loop
+# ----------------------------------------------------
+def main():
+    # Create envs
+    envs = [gym.make(ENV_NAME, render_mode=None) for _ in range(NUM_POLICIES * 16)]
+    for env in envs:
+        env.reset()
+
+    state_dim = envs[0].observation_space.shape[0]
+    action_dim = envs[0].action_space.shape[0]
+
+    agent = SAPGAgent(state_dim, action_dim, NUM_POLICIES, PHI_DIM)
+
+    metrics = []
+
+    for itr in range(TOTAL_ITERATIONS):
+        # Assign env blocks
+        blocks = [
+            envs[i * 16 : (i + 1) * 16] for i in range(NUM_POLICIES)
+        ]
+
+        # Collect data
+        batches = agent.collect_trajectories(blocks, HORIZON)
+
+        # Update
+        agent.update(batches)
+
+        # Evaluate each policy
+        eval_env = gym.make(ENV_NAME, render_mode=None)
+        eval_rewards = []
+        for idx, policy in enumerate(agent.policies):
+            r = agent.evaluate(eval_env, policy)
+            eval_rewards.append(r)
+            eval_env.reset()
+
+        print(
+            f"Iteration {itr:02d}: "
+            + ", ".join([f"{name:.2f}" for name, name in zip(["Leader"] + [f"Follower{i+1}" for i in range(NUM_POLICIES-1)], eval_rewards)])
+        )
+
+        metrics.append({
+            "iteration": itr,
+            "leader": eval_rewards[0],
+            "followers": eval_rewards[1:],
+        })
+
+    # Save metrics
+    with open("metrics.txt", "w") as f:
+        for m in metrics:
+            line = f"Iteration {m['iteration']}: Leader={m['leader']:.2f}"
+            for i, fwd in enumerate(m["followers"], start=1):
+                line += f", Follower{i}={fwd:.2f}"
+            f.write(line + "\n")
+    print("Training finished. Metrics written to metrics.txt")
+
+
+if __name__ == "__main__":
+    main()

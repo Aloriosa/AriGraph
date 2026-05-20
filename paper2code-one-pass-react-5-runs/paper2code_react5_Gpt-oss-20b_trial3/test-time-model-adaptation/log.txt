@@ -1,0 +1,141 @@
+2026-03-15 16:11:33.185584 ======================================================================
+2026-03-15 16:11:33.185755 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-15 16:11:33.185803 ======================================================================
+2026-03-15 16:11:33.185842 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/test-time-model-adaptation/paper.md
+2026-03-15 16:11:33.185876 Log path: paper2code_react5_Gpt-oss-20b_trial3/test-time-model-adaptation
+2026-03-15 16:11:33.185910 Model: Openai/Gpt-oss-20b
+2026-03-15 16:11:33.185942 Max iterations: 5
+2026-03-15 16:11:33.186024 Run reproduce.sh: False
+2026-03-15 16:11:33.186084 Run LLM paper check: True
+2026-03-15 16:11:33.186139 
+2026-03-15 16:11:33.186191 Loading paper...
+2026-03-15 16:11:33.186579 Paper length: 95489 chars (using 95489 for prompt)
+2026-03-15 16:11:33.186650 
+2026-03-15 16:11:33.205924 --- Iteration 0: Initial generation ---
+2026-03-15 16:12:18.197187   Created: generated_reproduction.txt
+2026-03-15 16:12:18.197281 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial3/test-time-model-adaptation/submission (1 files)
+2026-03-15 16:12:18.197341 
+2026-03-15 16:12:18.197401 --- Iteration 1: Observe & Refine ---
+2026-03-15 16:12:26.032122 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Full ViT‑Base evaluation on ImageNet‑C, ImageNet‑R, ImageNet‑V2 and ImageNet‑Sketch as in the paper.  
+MISSING: Quantized 8‑bit ViT support and the corresponding memory‑usage comparison.  
+MISSING: Back‑to‑source activation‑shifting scheme described in Section 3.2.  
+MISSING: Unsupervised fitness function that combines prediction entropy **and** activation‑statistics discrepancy between OOD CLS activations and source CLS activations.  
+MISSING: Use of a small set of source ID samples (≈32) for estimating source statistics.  
+MISSING: Exact CMA‑ES hyperparameters (population size, sigma, learning rate schedule) reported in the paper.  
+MISSING: Baseline comparisons (e.g., TENT, SAR, MEMO) and the detailed accuracy tables.  
+MISSING: A reproducible `reproduce.sh` or equivalent script that runs the full pipeline and outputs the paper’s results.  
+
+INCORRECT: The code uses CIFAR‑10 with Gaussian‑noise corruption instead of the ImageNet‑C benchmark used in the paper.  
+INCORRECT: The fitness function appears to rely solely on prediction entropy, omitting the activation‑statistics term required for stable CMA‑ES optimization.  
+INCORRECT: Prompt insertion may not match the paper’s design (e.g., wrong token position or dimensionality).  
+INCORRECT: CMA‑ES is invoked with default settings that likely differ from the paper’s tuned parameters (population size, sigma, etc.).  
+INCORRECT: No quantization is applied, so the claimed 24‑fold memory reduction cannot be verified.  
+
+PARTIAL: Prompt adaptation is implemented, but the prompt size, initialization, and update schedule are not aligned with the paper’s specifications.  
+PARTIAL: CMA‑ES is used as the optimizer, yet its integration with the forward‑only pipeline lacks the detailed control logic described (e.g., candidate generation, fitness evaluation loop).  
+PARTIAL: Activation shifting is either omitted or implemented in a simplified form that does not reflect the forward‑only back‑to‑source strategy.  
+
+ALL_OK: Reproduction appears incomplete; significant components of the paper’s method and experimental protocol are missing or incorrectly implemented.
+2026-03-15 16:12:26.032305 
+2026-03-15 16:12:26.032583 Generating refined code...
+2026-03-15 16:13:44.527084   Updated: generated_reproduction.txt
+2026-03-15 16:13:44.527178 
+2026-03-15 16:13:44.527232 --- Iteration 2: Observe & Refine ---
+2026-03-15 16:13:59.801592 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- **Dataset & corruption protocol** – The paper evaluates on ImageNet‑C (level 5), ImageNet‑R, ImageNet‑V2, and ImageNet‑Sketch. The code uses CIFAR‑10 with a simple Gaussian‑noise corruption, so the benchmark data and corruption settings are not reproduced.  
+- **Baseline methods** – No implementation or comparison to TENT, SAR, MEMO, or other gradient‑based TTA baselines.  
+- **Quantization** – The paper’s key claim is that FOA works on 8‑bit quantized ViT and outperforms TENT on 32‑bit ViT. The toy code runs only in full‑precision mode.  
+- **Memory‑usage measurement** – The paper reports run‑time memory (e.g., 5 165 MB vs. 208 MB). The code does not record or report memory consumption.  
+- **CMA‑ES hyper‑parameters** – The paper specifies population size, step‑size schedule, and other CMA‑ES settings tuned for the ImageNet scale. The toy code uses the default `cma` library settings, which are not guaranteed to match the paper’s configuration.  
+- **Activation‑shifting details** – The paper describes a dynamic, back‑to‑source shifting direction that adapts during test time. The toy code applies a fixed, simple shift, so the exact mechanism is not reproduced.  
+- **Reproducibility script** – No `reproduce.sh` or equivalent script that runs the full experimental pipeline and produces the paper’s results.  
+
+**PARTIAL**  
+- **Core FOA pipeline** – Prompt insertion, CMA‑ES optimization, unsupervised fitness (entropy + CLS‑statistic discrepancy), and a forward‑only activation shift are all present, but the implementations are simplified and not identical to the paper’s detailed design.  
+- **Source‑statistics estimation** – The code uses 32 ID samples to compute CLS statistics, matching the paper’s claim, but the exact procedure (e.g., which layers, how many samples per class) is not fully specified.  
+
+**INCORRECT**  
+- **Fitness function** – The paper’s fitness combines prediction entropy with a *distribution discrepancy* term that is carefully defined (e.g., KL divergence or MMD between CLS activations). The toy code uses a simple Euclidean distance between CLS means, which does not match the paper’s formulation.  
+- **Activation‑shifting logic** – The paper’s shifting scheme involves a learned or dynamically updated direction from OOD to ID. The toy code applies a static shift, which is not faithful to the described method.  
+
+**OK**  
+- **Model choice** – Uses a pretrained ViT‑Base from `timm`, matching the paper’s backbone.  
+- **Prompt size** – Inserts a small prompt (3 tokens), consistent with the paper’s “newly added prompt” idea.  
+- **No back‑propagation** – The code updates only the prompt via CMA‑ES, leaving all model weights frozen, as required.  
+- **Use of CMA‑ES** – Employs a derivative‑free optimizer (CMA‑ES) for online adaptation, matching the paper’s core innovation.  
+
+**Conclusion**  
+The toy implementation captures the high‑level spirit of FOA but omits many critical components needed to reproduce the paper’s experimental results. To achieve a faithful reproduction, the missing datasets, baselines, quantization, exact hyper‑parameters, and detailed activation‑shifting logic must be added, along with a reproducibility script that reproduces the reported accuracies and memory figures.
+2026-03-15 16:13:59.801777 
+2026-03-15 16:13:59.801905 Generating refined code...
+2026-03-15 16:14:43.234459   Updated: generated_reproduction.txt
+2026-03-15 16:14:43.234593 
+2026-03-15 16:14:43.234683 --- Iteration 3: Observe & Refine ---
+2026-03-15 16:14:46.527277 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core FOA algorithm implementation (prompt insertion, CMA optimizer, fitness function, activation shifting)  
+MISSING: Derivative‑free CMA‑ES optimizer code and its integration with the ViT model  
+MISSING: Unsupervised fitness function combining prediction entropy and CLS activation discrepancy  
+MISSING: Back‑to‑source activation shifting mechanism and its dynamic direction update  
+MISSING: Hyperparameter definitions (e.g., CMA population size, learning rates, batch size, number of ID samples for statistics)  
+MISSING: Dataset loading, preprocessing, and corruption handling for ImageNet‑C / other benchmarks  
+MISSING: Evaluation script that computes top‑1 accuracy, memory usage, and compares against baselines (TENT, SAR, MEMO)  
+MISSING: reproduce.sh that orchestrates training, adaptation, and evaluation to reproduce the paper’s reported numbers  
+MISSING: Documentation of hardware requirements (e.g., quantized 8‑bit ViT support)  
+MISSING: Logging / checkpointing of adapted prompts and activation shifts  
+
+**Result:** ALL components required to reproduce the paper’s experiments are missing from the provided code.
+2026-03-15 16:14:46.527469 
+2026-03-15 16:14:46.527630 Generating refined code...
+2026-03-15 16:15:32.851342   Updated: generated_reproduction.txt
+2026-03-15 16:15:32.851443 
+2026-03-15 16:15:32.851505 --- Iteration 4: Observe & Refine ---
+2026-03-15 16:15:34.716898 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core method/algorithm (FOA with CMA, prompt adaptation, activation shifting)  
+MISSING: Hyperparameters (CMA settings, batch size, learning rates, etc.)  
+MISSING: Data setup (ImageNet-C, preprocessing, splits)  
+MISSING: Evaluation protocol (metrics, baselines, comparison tables)  
+MISSING: Experimental setup (hardware specs, training steps, checkpoints)  
+MISSING: reproduce.sh (full pipeline to reproduce paper results)  
+
+ALL_OK: Reproduction appears incomplete.
+2026-03-15 16:15:34.717050 
+2026-03-15 16:15:34.717218 Generating refined code...
+2026-03-15 16:16:25.392956   Updated: generated_reproduction.txt
+2026-03-15 16:16:25.393054 
+2026-03-15 16:16:25.393104 --- Iteration 5: Observe & Refine ---
+2026-03-15 16:16:27.310821 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core method/algorithm (FOA implementation, CMA optimizer, prompt insertion, fitness function, activation shifting)  
+MISSING: Hyperparameters (CMA settings, batch size, learning rates, number of ID samples for statistics, etc.)  
+MISSING: Data setup (ImageNet-C loading, preprocessing, corruption levels, split handling)  
+MISSING: Evaluation (accuracy computation, comparison to TENT, memory usage measurement)  
+MISSING: Experimental setup (training loop, checkpointing, device handling, quantization steps)  
+MISSING: reproduce.sh (script to run the full pipeline and generate the paper’s results)  
+
+ALL components required to reproduce the paper’s experiments are absent from the provided code.
+2026-03-15 16:16:27.310975 
+2026-03-15 16:16:27.311087 Generating refined code...
+2026-03-15 16:17:18.259074   Updated: generated_reproduction.txt
+2026-03-15 16:17:18.259168 
+2026-03-15 16:17:18.259218 ======================================================================
+2026-03-15 16:17:18.259278 REACT BASELINE COMPLETE
+2026-03-15 16:17:18.259335 ======================================================================
+2026-03-15 16:17:18.259376 Total iterations: 6
+2026-03-15 16:17:18.259415 API tokens: 36908 completion, 197100 prompt
+2026-03-15 16:17:18.259455 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial3/test-time-model-adaptation/generated_code_response.txt

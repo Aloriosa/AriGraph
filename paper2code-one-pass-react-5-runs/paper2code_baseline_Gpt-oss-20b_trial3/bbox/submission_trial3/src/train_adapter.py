@@ -1,0 +1,244 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+Minimal BBox-Adapter training and evaluation script.
+
+The script:
+1. Loads a toy math QA dataset.
+2. Uses a black‑box GPT‑2 model to generate multiple candidate answers.
+3. Trains a lightweight adapter (DistilBERT + linear head) to score candidates
+   using a ranking‑based NCE (cross‑entropy) loss.
+4. Evaluates the adapter on a held‑out test set.
+"""
+
+import os
+import json
+import random
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    AutoModel,
+    set_seed,
+)
+
+# --------------------------------------------------------------------------- #
+# Dataset utilities
+# --------------------------------------------------------------------------- #
+class MathDataset(Dataset):
+    """Simple JSON‑L lines dataset of prompt/answer pairs."""
+
+    def __init__(self, file_path: str):
+        self.samples = []
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    self.samples.append(json.loads(line))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        return self.samples[idx]
+
+
+# --------------------------------------------------------------------------- #
+# Adapter model
+# --------------------------------------------------------------------------- #
+class AdapterModel(nn.Module):
+    """
+    Lightweight adapter: DistilBERT encoder + scalar linear head.
+    """
+
+    def __init__(self, encoder_name: str = "distilbert-base-uncased"):
+        super().__init__()
+        self.encoder = AutoModel.from_pretrained(encoder_name)
+        self.scorer = nn.Linear(self.encoder.config.hidden_size, 1)
+
+    def forward(self, input_ids, attention_mask):
+        outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+        # Use the [CLS] token representation (first token)
+        cls_repr = outputs.last_hidden_state[:, 0, :]
+        logits = self.scorer(cls_repr).squeeze(-1)
+        return logits
+
+
+# --------------------------------------------------------------------------- #
+# Black‑box LLM wrapper
+# --------------------------------------------------------------------------- #
+class BlackBoxLLM:
+    """
+    Thin wrapper around a causal language model (e.g. GPT‑2) to generate
+    multiple candidate continuations given a prompt.
+    """
+
+    def __init__(self, model_name: str = "distilgpt2"):
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = AutoModelForCausalLM.from_pretrained(model_name)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
+        self.model.eval()
+
+    def generate(
+        self,
+        prompt: str,
+        num_candidates: int = 4,
+        max_new_tokens: int = 20,
+    ) -> list:
+        """
+        Generate multiple candidate continuations for a given prompt.
+        """
+        inputs = self.tokenizer(prompt, return_tensors="pt")
+        input_ids = inputs["input_ids"].to(self.device)
+        outputs = self.model.generate(
+            input_ids=input_ids,
+            max_new_tokens=max_new_tokens,
+            do_sample=True,
+            top_p=0.95,
+            top_k=50,
+            num_return_sequences=num_candidates,
+            pad_token_id=self.tokenizer.eos_token_id,
+        )
+        seqs = [
+            self.tokenizer.decode(out, skip_special_tokens=True).strip()
+            for out in outputs
+        ]
+        return seqs
+
+
+# --------------------------------------------------------------------------- #
+# Helper functions
+# --------------------------------------------------------------------------- #
+def collate_inputs(batch, tokenizer, max_length=32):
+    """
+    Concatenate prompt and candidate, then tokenize.
+    """
+    texts = [f"{p} {c}" for p, c in batch]
+    enc = tokenizer(
+        texts,
+        padding="longest",
+        truncation=True,
+        max_length=max_length,
+        return_tensors="pt",
+    )
+    return enc
+
+
+# --------------------------------------------------------------------------- #
+# Training & evaluation
+# --------------------------------------------------------------------------- #
+def train_and_evaluate(
+    train_file: str,
+    test_file: str,
+    epochs: int = 5,
+    batch_size: int = 4,
+    num_candidates: int = 4,
+    lr: float = 5e-5,
+    seed: int = 42,
+):
+    set_seed(seed)
+    # Load data
+    train_ds = MathDataset(train_file)
+    test_ds = MathDataset(test_file)
+
+    # Prepare models
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    adapter = AdapterModel().to(device)
+    tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+    bb_llm = BlackBoxLLM()
+
+    optimizer = optim.AdamW(adapter.parameters(), lr=lr)
+
+    # ----------------------------------------------------------------------- #
+    # Training loop
+    # ----------------------------------------------------------------------- #
+    print("=== Starting training ===")
+    for epoch in range(1, epochs + 1):
+        random.shuffle(train_ds.samples)
+        for i in range(0, len(train_ds), batch_size):
+            batch_samples = train_ds.samples[i : i + batch_size]
+            # Generate candidates for each prompt
+            batch_inputs = []
+            labels = []
+            for sample in batch_samples:
+                prompt = sample["prompt"]
+                answer = sample["answer"].strip()
+                candidates = bb_llm.generate(
+                    prompt, num_candidates=num_candidates, max_new_tokens=20
+                )
+                # Find the index of the correct answer
+                try:
+                    pos_idx = candidates.index(answer)
+                except ValueError:
+                    pos_idx = 0  # fallback: treat first candidate as positive
+                # Put the positive candidate first
+                candidates = [candidates[pos_idx]] + candidates[:pos_idx] + candidates[
+                    pos_idx + 1 :
+                ]
+                # Build input pairs
+                for cand in candidates:
+                    batch_inputs.append((prompt, cand))
+                labels.append(0)  # positive is always at index 0
+
+            # Tokenize
+            enc = collate_inputs(batch_inputs, tokenizer)
+            enc = {k: v.to(device) for k, v in enc.items()}
+            logits = adapter(enc["input_ids"], enc["attention_mask"])
+            # Reshape logits to (num_examples, num_candidates)
+            logits = logits.view(-1, num_candidates)
+            labels = torch.tensor(labels, dtype=torch.long, device=device)
+
+            loss = nn.CrossEntropyLoss()(logits, labels)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        print(f"Epoch {epoch} finished, loss: {loss.item():.4f}")
+
+    # ----------------------------------------------------------------------- #
+    # Save adapter
+    # ----------------------------------------------------------------------- #
+    os.makedirs("models", exist_ok=True)
+    torch.save(adapter.state_dict(), "models/adapter.pt")
+    print("=== Adapter saved to models/adapter.pt ===")
+
+    # ----------------------------------------------------------------------- #
+    # Evaluation
+    # ----------------------------------------------------------------------- #
+    print("=== Evaluating on test set ===")
+    adapter.eval()
+    correct = 0
+    total = len(test_ds)
+
+    with torch.no_grad():
+        for sample in test_ds:
+            prompt = sample["prompt"]
+            answer = sample["answer"].strip()
+            candidates = bb_llm.generate(
+                prompt, num_candidates=num_candidates, max_new_tokens=20
+            )
+            batch_inputs = [(prompt, cand) for cand in candidates]
+            enc = collate_inputs(batch_inputs, tokenizer)
+            enc = {k: v.to(device) for k, v in enc.items()}
+            logits = adapter(enc["input_ids"], enc["attention_mask"])
+            pred_idx = logits.argmax().item()
+            pred = candidates[pred_idx]
+            if pred == answer:
+                correct += 1
+
+    accuracy = correct / total
+    print(f"Test Accuracy: {accuracy * 100:.2f}%")
+    with open("models/eval.txt", "w") as f:
+        f.write(f"Test Accuracy: {accuracy * 100:.2f}%\n")
+
+
+if __name__ == "__main__":
+    # Paths relative to repository root
+    train_path = os.path.join("data", "train.jsonl")
+    test_path = os.path.join("data", "test.jsonl")
+    train_and_evaluate(train_path, test_path)

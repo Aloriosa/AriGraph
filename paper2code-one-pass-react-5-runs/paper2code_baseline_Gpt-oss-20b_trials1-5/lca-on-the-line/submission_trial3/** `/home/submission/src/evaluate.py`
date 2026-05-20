@@ -1,0 +1,145 @@
+import argparse
+import os
+import json
+import torch
+import timm
+import clip
+import pandas as pd
+from tqdm import tqdm
+from utils import seed_everything, get_device, get_dataloader, load_imagenet_classes, save_metrics
+from lca import precompute_lca_matrix, lca_distance, synset_from_id
+
+# ------------------------------------------------------------
+# Model wrappers
+# ------------------------------------------------------------
+class ModelWrapper:
+    def __init__(self, name: str, module, preprocess, to_logits=True):
+        self.name = name
+        self.module = module
+        self.preprocess = preprocess
+        self.to_logits = to_logits  # if False, return features for CLIP
+        self.device = get_device()
+        self.module.to(self.device)
+        self.module.eval()
+
+    @torch.no_grad()
+    def predict(self, images):
+        images = images.to(self.device)
+        outputs = self.module(images)
+        if self.to_logits:
+            return outputs.softmax(dim=1)
+        else:
+            return outputs  # for CLIP feature extractor
+
+# ------------------------------------------------------------
+# CLIP wrapper
+# ------------------------------------------------------------
+class CLIPWrapper:
+    def __init__(self, model_name: str):
+        self.name = f"CLIP_{model_name}"
+        self.model, self.preprocess = clip.load(model_name, device=get_device())
+        self.model.eval()
+
+    @torch.no_grad()
+    def predict(self, images):
+        # images: torch tensor [B,3,224,224]
+        image_features = self.model.encode_image(images)
+        image_features = image_features / image_features.norm(dim=1, keepdim=True)
+        return image_features  # normalized features
+
+# ------------------------------------------------------------
+# Main evaluation
+# ------------------------------------------------------------
+def main(args):
+    seed_everything(42)
+
+    # Load class mapping
+    class_file = os.path.join(args.data_dir, "imagenet_classes.txt")
+    synsets = load_imagenet_classes(class_file)
+    num_classes = len(synsets)
+    print(f"Loaded {num_classes} ImageNet classes from {class_file}")
+
+    # LCA matrix (used for ID metric)
+    print("Precomputing LCA matrix (may take a few minutes)...")
+    lca_matrix = precompute_lca_matrix(synsets)
+
+    # Prepare data loaders
+    print("Preparing ID dataloader...")
+    id_loader, id_dataset = get_dataloader(args.id_path, args.batch_size)
+
+    ood_loader = None
+    if args.ood_path:
+        print("Preparing OOD dataloader...")
+        ood_loader, _ = get_dataloader(args.ood_path, args.batch_size)
+
+    # Define models
+    models = []
+    # Torchvision models
+    for name in ["resnet50", "resnet101", "vit_base_patch32_224", "mobilenet_v3_large"]:
+        module = torch.hub.load("pytorch/vision:v0.15.0", name, pretrained=True)
+        preprocess = None  # using torchvision transforms
+        models.append(ModelWrapper(name, module, preprocess))
+
+    # CLIP models (using openai/clip)
+    for clip_name in ["RN50", "ViT-B/32"]:
+        models.append(CLIPWrapper(clip_name))
+
+    results = []
+
+    for model in tqdm(models, desc="Models"):
+        # ID evaluation
+        top1_correct = 0
+        lca_total = 0.0
+        total_samples = 0
+
+        for imgs, labels in id_loader:
+            probs = model.predict(imgs)  # shape [B, C]
+            top1 = probs.argmax(dim=1)
+            top1_correct += (top1 == labels).sum().item()
+            # LCA for each sample
+            preds = top1.cpu().numpy()
+            gts = labels.cpu().numpy()
+            for p, gt in zip(preds, gts):
+                lca_total += lca_matrix[p, gt]
+            total_samples += imgs.size(0)
+
+        id_top1 = top1_correct / total_samples
+        id_lca = lca_total / total_samples
+
+        # OOD evaluation
+        ood_top1 = None
+        if ood_loader:
+            ood_top1_correct = 0
+            ood_total = 0
+            for imgs, labels in ood_loader:
+                probs = model.predict(imgs)
+                top1 = probs.argmax(dim=1)
+                ood_top1_correct += (top1 == labels).sum().item()
+                ood_total += imgs.size(0)
+            ood_top1 = ood_top1_correct / ood_total
+
+        results.append({
+            "model": model.name,
+            "id_top1": id_top1,
+            "id_lca": id_lca,
+            "ood_top1": ood_top1
+        })
+
+    df = pd.DataFrame(results)
+    save_metrics(df, args.out_file)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="LCA‑on‑the‑Line Evaluation")
+    parser.add_argument("--id_path", type=str, required=True,
+                        help="Path to ImageNet validation folder (ImageNet‑ID)")
+    parser.add_argument("--ood_path", type=str, default="",
+                        help="Path to an optional OOD dataset folder")
+    parser.add_argument("--data_dir", type=str, default="data",
+                        help="Directory containing imagenet_classes.txt")
+    parser.add_argument("--batch_size", type=int, default=64,
+                        help="Batch size for evaluation")
+    parser.add_argument("--out_file", type=str, default="results/results.csv",
+                        help="Output CSV path")
+    args = parser.parse_args()
+    os.makedirs(os.path.dirname(args.out_file), exist_ok=True)
+    main(args)

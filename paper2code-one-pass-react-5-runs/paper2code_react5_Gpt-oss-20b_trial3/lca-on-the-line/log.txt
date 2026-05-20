@@ -1,0 +1,203 @@
+2026-03-14 20:11:24.186457 ======================================================================
+2026-03-14 20:11:24.186599 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 20:11:24.186642 ======================================================================
+2026-03-14 20:11:24.186678 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/lca-on-the-line/paper.md
+2026-03-14 20:11:24.186711 Log path: paper2code_react5_Gpt-oss-20b_trial3/lca-on-the-line
+2026-03-14 20:11:24.186743 Model: Openai/Gpt-oss-20b
+2026-03-14 20:11:24.186774 Max iterations: 5
+2026-03-14 20:11:24.186806 Run reproduce.sh: False
+2026-03-14 20:11:24.186840 Run LLM paper check: True
+2026-03-14 20:11:24.186870 
+2026-03-14 20:11:24.186899 Loading paper...
+2026-03-14 20:11:24.187534 Paper length: 108847 chars (using 108847 for prompt)
+2026-03-14 20:11:24.187590 
+2026-03-14 20:11:24.207129 --- Iteration 0: Initial generation ---
+2026-03-14 20:12:08.150155   Created: generated_reproduction.txt
+2026-03-14 20:12:08.150254 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial3/lca-on-the-line/submission (1 files)
+2026-03-14 20:12:08.150308 
+2026-03-14 20:12:08.150342 --- Iteration 1: Observe & Refine ---
+2026-03-14 20:12:17.843526 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Full evaluation of the 75 models (36 Vision Models and 39 Vision‑Language Models) described in the paper.  
+- Evaluation on all five ImageNet‑OOD variants (ImageNet‑S, ImageNet‑R, ImageNet‑A, ObjectNet, and the remaining OOD set).  
+- The K‑means clustering procedure for constructing a latent taxonomy when no predefined hierarchy exists.  
+- The alignment step that uses soft labels or prompt engineering to steer predictions toward the class hierarchy.  
+- The generalized LCA distance formulation that handles soft‑max probability distributions (see Appendix D.3 of the paper).  
+- The use of information‑content (entropy) as the node‑weight function \(f(\cdot)\) in the LCA distance.  
+- A reproducibility script (e.g., `reproduce.sh`) that runs the entire pipeline and produces the paper’s tables/figures.  
+- Baseline comparisons with existing “Effective Robustness” / “X‑on‑the‑line” metrics.  
+
+**INCORRECT**  
+- The code operates on only the first 10 k ImageNet samples, whereas the paper uses the full ImageNet‑1k ID test set.  
+- The models used are only pretrained vision models from `torchvision`; the paper’s benchmark includes a wide range of VLMs (e.g., CLIP, BLIP, etc.) and does not rely on pre‑training only.  
+
+**PARTIAL**  
+- LCA distance is computed by mapping ImageNet class IDs to WordNet synsets, but the implementation does not show the use of the information‑content weighting \(f(\cdot)\) or the full taxonomy‑loss averaging over all samples.  
+- Correlation analysis between ID LCA distance and OOD top‑1 accuracy is performed, but only for three models instead of the full set, and the statistical reporting is minimal.  
+
+**Conclusion**  
+The current code reproduces only a very small, incomplete slice of the paper’s experimental protocol. Significant components—model coverage, full OOD evaluation, taxonomy construction, alignment techniques, and proper metric implementation—are missing or incorrect.  
+
+**ALL_OK**: *No – the reproduction is incomplete.*
+2026-03-14 20:12:17.843711 
+2026-03-14 20:12:17.843925 Generating refined code...
+2026-03-14 20:12:35.157503   Updated: generated_reproduction.txt
+2026-03-14 20:12:35.157608 
+2026-03-14 20:12:35.157646 --- Iteration 2: Observe & Refine ---
+2026-03-14 20:12:55.707663 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / incomplete components (must be added or fixed)**  
+
+| # | Requirement from the paper | Status in the provided code | Comment |
+|---|-----------------------------|-----------------------------|---------|
+| 1 | **All five OOD datasets** – ImageNet‑S, ImageNet‑R, ImageNet‑A, ObjectNet, **ImageNet‑O** | Only four datasets are listed in the README | Add ImageNet‑O download and evaluation |
+| 2 | **Construction of a latent taxonomy via K‑means** – for datasets without a predefined hierarchy | Not mentioned or implemented | Implement K‑means clustering and tree construction |
+| 3 | **Alignment of predictions with the class hierarchy** (soft‑label or prompt‑engineering) to improve generalization | Not mentioned | Add code to generate soft‑label targets or prompt‑based alignment |
+| 4 | **Full model coverage** – 75 models (36 VMs + 39 VLMs) | Only 4 pretrained models are referenced | Expand the model list to match the paper’s benchmark |
+| 5 | **Exact LCA distance formula** – \(D_{LCA}(y',y)=f(y)-f(N_{LCA}(y,y'))\) with \(f(\cdot)\) as information content | No evidence of this implementation | Add a function that computes the information‑content based depth and the LCA node |
+| 6 | **Expected LCA (ELCA) from soft‑max distributions** – generalized form for probabilistic predictions | Mentioned but not shown | Implement the ELCA calculation as described in the appendix |
+| 7 | **Per‑sample LCA computation only for mis‑predictions** (\(y\neq\hat y\)) | Not shown | Add a mask to compute LCA only on errors |
+| 8 | **Dataset‑level averaging of LCA** | Not shown | Compute mean LCA over all samples |
+| 9 | **Use of WordNet hierarchy** – loading synsets, computing ancestors, depths | Not shown | Integrate NLTK/wordnet or a custom WordNet parser |
+|10 | **Robustness to different taxonomies** – experiments with constructed hierarchies | Not shown | Add experiments comparing WordNet vs. K‑means hierarchies |
+|11 | **Full “LCA‑on‑the‑Line” framework** – correlation analysis between ID LCA and OOD top‑1 | Only a brief mention of correlation | Implement Pearson / R² calculation and plot generation |
+|12 | **Effective robustness concept** – comparison with ID accuracy | Not implemented | Add baseline plots comparing ID accuracy vs. OOD accuracy |
+|13 | **Semantic severity of mistake** – visualisation of LCA distances | Not implemented | Add visualisation utilities (e.g., Fig. 3 style) |
+
+**Partially implemented / uncertain components**  
+
+| # | Requirement | Status | Comment |
+|---|-------------|--------|---------|
+| 14 | **Small set of pretrained models** (ResNet‑18, ResNet‑50, ViT‑B‑32, CLIP‑RN50) | Present | Good start, but not exhaustive |
+| 15 | **Expected LCA distance** | Mentioned | Need to verify correctness |
+| 16 | **Correlation analysis** | Mentioned | Need to confirm implementation |
+| 17 | **CSV output of per‑sample metrics** | Present | Good for reproducibility |
+
+**OK**  
+
+| # | Requirement | Status | Comment |
+|---|-------------|--------|---------|
+| 18 | **Downloading ImageNet‑1k test split and OOD datasets** | Present | Handles data acquisition |
+| 19 | **Basic script structure** | Present | Provides a runnable pipeline |
+
+---
+
+**Conclusion**  
+The current repository only covers a minimal subset of the paper’s methodology. To fully reproduce the results, the missing components above must be added, and the partially implemented parts verified for correctness. Once these are addressed, the reproduction will be complete.
+2026-03-14 20:12:55.707878 
+2026-03-14 20:12:55.707994 Generating refined code...
+2026-03-14 20:13:59.900542   Updated: generated_reproduction.txt
+2026-03-14 20:13:59.900647 
+2026-03-14 20:13:59.900687 --- Iteration 3: Observe & Refine ---
+2026-03-14 20:14:20.948990 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Full implementation of the WordNet hierarchy loader and the information‑content based LCA distance computation.  
+- Code to load the ImageNet‑1k test split and the five OOD benchmarks (ImageNet‑S, ImageNet‑R, ImageNet‑A, ObjectNet, ImageNet‑O).  
+- A model zoo loader that can instantiate all 75 pretrained VMs and VLMs (36 VMs + 39 VLMs).  
+- Per‑sample LCA distance calculation (including the mis‑prediction‑only variant).  
+- Expected LCA (ELCA) computation for soft‑prediction settings.  
+- Correlation analysis (Pearson / R²) between ID LCA and OOD top‑1 accuracy.  
+- K‑means clustering routine for constructing a latent taxonomy when no predefined hierarchy exists.  
+- Soft‑label alignment / prompt‑engineering utilities that align model predictions with the class taxonomy.  
+- Evaluation pipeline that computes ID top‑1 accuracy, ID LCA, OOD top‑1 accuracy, and the correlation metrics for every model.  
+- A reproducibility script (`reproduce.sh` or equivalent) that runs the entire pipeline end‑to‑end.  
+- Explicit hyper‑parameter settings (batch size, device placement, etc.).  
+- Code that demonstrates robustness of LCA distance to variations in the underlying taxonomy.  
+- Code that handles soft‑prediction LCA distance (generalised form).  
+- Scripts or notebooks that generate the figures (Fig. 1, Fig. 2) and tables reported in the paper.  
+
+**PARTIAL**  
+- The README describes “Taxonomy utilities – Build the WordNet hierarchy, compute node depths and the information‑content based LCA distance,” but no actual code is provided.  
+- The README mentions “Metrics – Compute per‑sample LCA distance, Expected LCA (ELCA), and aggregate statistics,” yet no implementation exists.  
+- The README references “Correlation analysis – Pearson / R² correlation between in‑distribution (ID) LCA and out‑of‑distribution (OOD) top‑1 accuracy,” but this is only a placeholder.  
+- The optional K‑means latent taxonomy construction and soft‑label alignment are listed as placeholders, not implemented.  
+
+**INCORRECT**  
+- None (the repository contains only a high‑level description, not executable code).  
+
+**OK**  
+- None.  
+
+**Conclusion**  
+All critical components required to reproduce the paper’s experiments are missing or only partially described. The current repository does not implement the core LCA‑on‑the‑Line methodology, dataset handling, model evaluation, or the correlation analysis presented in the paper.
+2026-03-14 20:14:20.949260 
+2026-03-14 20:14:20.949392 Generating refined code...
+2026-03-14 20:15:15.541199   Updated: generated_reproduction.txt
+2026-03-14 20:15:15.541285 
+2026-03-14 20:15:15.541331 --- Iteration 4: Observe & Refine ---
+2026-03-14 20:15:18.436803 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core method/algorithm (LCA distance computation, taxonomy loss, WordNet integration)  
+MISSING: Hyperparameters (learning rate, batch size, number of epochs, etc.)  
+MISSING: Data setup (ImageNet ID test set, five OOD variants, preprocessing, splits)  
+MISSING: Evaluation protocol (compute top‑1 accuracy, LCA distance, correlation analysis, baseline comparisons)  
+MISSING: Experimental setup (hardware specs, training steps, checkpoint handling, reproducibility scripts)  
+MISSING: `reproduce.sh` or equivalent script to run the full pipeline and generate the paper’s results  
+PARTIAL: Dependencies listed in `generated_reproduction.txt` (but no code to use them)  
+
+**ALL_OK**: No, the reproduction is incomplete.
+2026-03-14 20:15:18.437012 
+2026-03-14 20:15:18.437127 Generating refined code...
+2026-03-14 20:16:33.363310   Updated: generated_reproduction.txt
+2026-03-14 20:16:33.363450 
+2026-03-14 20:16:33.363509 --- Iteration 5: Observe & Refine ---
+2026-03-14 20:16:43.098158 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / incomplete items (relative to the paper)**  
+
+| Status | Requirement from the paper | Notes |
+|--------|-----------------------------|-------|
+| **MISSING** | **LCA distance calculation** – the code must compute the Lowest Common Ancestor distance between the ground‑truth and predicted class using the WordNet hierarchy and the information‑content function \(f(\cdot)\) (tree depth or entropy). | The README only mentions “LCA distance” but no implementation details are shown. |
+| **MISSING** | **Soft‑prediction LCA** – a generalized form that handles a full probability distribution over classes (e.g., softmax outputs). | Paper refers to Appendix D.3; not present. |
+| **MISSING** | **Latent taxonomy construction** – K‑means clustering to build a hierarchy for datasets that lack a predefined taxonomy. | Paper claims this is a key contribution. |
+| **MISSING** | **VLM evaluation** – zero‑shot predictions from Vision‑Language Models (e.g., CLIP, BLIP) and their alignment with the taxonomy. | Only “75 models” are mentioned; no code for VLMs. |
+| **MISSING** | **Correlation analysis** – compute and plot the linear correlation between ID LCA distance and OOD top‑1 accuracy for all 75 models. | Paper’s Figure 1 right plot is central. |
+| **MISSING** | **Effective Robustness / X‑on‑the‑line baselines** – comparison with existing metrics (e.g., Accuracy‑on‑the‑line, Agreement‑on‑the‑line). | Needed to show superiority of LCA‑on‑the‑line. |
+| **MISSING** | **Hyper‑parameter specification** – exact image transforms, batch sizes, learning rates, etc., used for evaluation. | The README does not list them. |
+| **MISSING** | **Hardware / checkpoint details** – how many GPUs, training steps, checkpoint saving, etc. | Not described. |
+| **MISSING** | **Full `reproduce.sh` script** – the script that downloads datasets, runs evaluation, and produces the paper’s tables/figures. | Only a mention of the script exists; content is unknown. |
+| **MISSING** | **Alignment via soft labels / prompt engineering** – code that modifies predictions to better align with the taxonomy. | Paper claims this improves generalization. |
+| **MISSING** | **Evaluation on all five OOD datasets** – ImageNet‑v2, ImageNet‑Sketch, ImageNet‑R, ImageNet‑A, ObjectNet. | README says “five major ImageNet‑based OOD datasets” but no evidence of all five being processed. |
+| **MISSING** | **Statistical significance tests** – e.g., Pearson/Spearman correlation, confidence intervals. | Not mentioned. |
+
+**Incorrect / questionable items**
+
+| Status | Issue | Notes |
+|--------|-------|-------|
+| **INCORRECT** | Use of WordNet hierarchy | The README does not confirm that the WordNet taxonomy is actually loaded or used. |
+| **INCORRECT** | Information‑content function | No evidence that the implementation uses the entropy or depth as described. |
+| **INCORRECT** | Handling of VLM zero‑shot predictions | If present, likely uses a different tokenizer or prompt than the paper’s. |
+
+**Partial items**
+
+| Status | Requirement | Notes |
+|--------|-------------|-------|
+| **PARTIAL** | Dataset download | The script claims to download datasets on‑the‑fly, but no details on preprocessing or split handling. |
+| **PARTIAL** | Correlation statistics | The README mentions “correlation statistics” but no code for computing or visualizing them. |
+
+---
+
+**Conclusion**  
+The provided repository skeleton does **not** yet implement the core contributions of the paper. Key components such as the LCA distance computation, taxonomy construction, VLM evaluation, and correlation analysis are missing or incomplete. The code must be extended to include these elements before it can be considered a faithful reproduction.
+2026-03-14 20:16:43.098419 
+2026-03-14 20:16:43.098568 Generating refined code...
+2026-03-14 20:17:41.475174   Updated: generated_reproduction.txt
+2026-03-14 20:17:41.475305 
+2026-03-14 20:17:41.475348 ======================================================================
+2026-03-14 20:17:41.475385 REACT BASELINE COMPLETE
+2026-03-14 20:17:41.475420 ======================================================================
+2026-03-14 20:17:41.475472 Total iterations: 6
+2026-03-14 20:17:41.475507 API tokens: 40062 completion, 221726 prompt
+2026-03-14 20:17:41.475541 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial3/lca-on-the-line/generated_code_response.txt

@@ -1,0 +1,1 @@
+# Empty file – makes 'fre' a package

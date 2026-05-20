@@ -1,0 +1,144 @@
+2026-03-14 19:44:08.508330 ======================================================================
+2026-03-14 19:44:08.508481 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 19:44:08.508539 ======================================================================
+2026-03-14 19:44:08.508573 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/stay-on-topic-with-classifier-free-guidance/paper.md
+2026-03-14 19:44:08.508603 Log path: paper2code_react5_Gpt-oss-20b_trial4/stay-on-topic-with-classifier-free-guidance
+2026-03-14 19:44:08.508632 Model: Openai/Gpt-oss-20b
+2026-03-14 19:44:08.508660 Max iterations: 5
+2026-03-14 19:44:08.508690 Run reproduce.sh: False
+2026-03-14 19:44:08.508722 Run LLM paper check: True
+2026-03-14 19:44:08.508750 
+2026-03-14 19:44:08.508778 Loading paper...
+2026-03-14 19:44:08.509128 Paper length: 115400 chars (using 115400 for prompt)
+2026-03-14 19:44:08.509166 
+2026-03-14 19:44:08.529177 --- Iteration 0: Initial generation ---
+2026-03-14 19:45:03.712350   Created: generated_reproduction.txt
+2026-03-14 19:45:03.712432 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial4/stay-on-topic-with-classifier-free-guidance/submission (1 files)
+2026-03-14 19:45:03.712468 
+2026-03-14 19:45:03.712500 --- Iteration 1: Observe & Refine ---
+2026-03-14 19:45:10.514053 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / incomplete components in the current repository**
+
+| Category | Item | Status |
+|----------|------|--------|
+| Core method | Implementation of CFG log‑it re‑weighting (Equation 7) for autoregressive LMs | **MISSING** – the code does not show any log‑it adjustment or use of the conditional vs. unconditional logits. |
+| Core method | Negative prompting support (Equation 5) | **MISSING** – no handling of a negative prompt or “negative conditioning” is present. |
+| Experiments – Zero‑shot | Evaluation on the full set of zero‑shot benchmarks from the Language Model Evaluation Harness (LMEH) (e.g., LAMBADA, WSC, BoolQ, etc.) | **MISSING** – the repo only contains a placeholder for GPT‑2; no benchmark loading or scoring logic. |
+| Experiments – Chain‑of‑Thought | Application of CFG to chain‑of‑thought prompts and measurement of accuracy gains | **MISSING** – no code for generating or evaluating chain‑of‑thought reasoning. |
+| Experiments – Assistant prompts | Experiments with system‑level instructions and user prompts (Table 1 style) | **MISSING** – no assistant‑style prompt handling or human‑evaluation scaffolding. |
+| Evaluation | Accuracy / F1 / BLEU / other metrics reported in the paper | **MISSING** – no metric computation or baseline comparison logic. |
+| Hyper‑parameters | Gamma values (e.g., γ = 1, 2, 5, 10) and their effect on performance | **MISSING** – the code does not expose or sweep over γ. |
+| Reproduction script | `reproduce.sh` (or equivalent) that runs the full pipeline and produces the paper’s results | **MISSING** – no script is provided. |
+| Documentation | Clear README or comments explaining how to run experiments and reproduce results | **MISSING** – only a minimal header is present. |
+| Hardware / environment | Specification of GPU/CPU requirements, CUDA version, etc. | **MISSING** – no environment details. |
+
+**Conclusion**
+
+The current repository does **not** contain the essential components required to reproduce the paper’s findings. All the items above are either missing or incomplete. No part of the code currently implements the core CFG algorithm, the benchmark evaluations, or the experimental protocols described in the paper.  
+
+**ALL_OK:** *No – reproduction appears incomplete.*
+2026-03-14 19:45:10.514237 
+2026-03-14 19:45:10.514412 Generating refined code...
+2026-03-14 19:45:47.098349   Updated: generated_reproduction.txt
+2026-03-14 19:45:47.098466 
+2026-03-14 19:45:47.098505 --- Iteration 2: Observe & Refine ---
+2026-03-14 19:45:56.771106 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incorrect / Partial Requirements**
+
+| Status | Requirement (from paper) | Why it’s missing / incorrect / partial |
+|--------|---------------------------|----------------------------------------|
+| **MISSING** | Full implementation of Classifier‑Free Guidance (CFG) for autoregressive language models (logit re‑weighting with γ, negative prompting support). | `cfg_gpt2.py` does not contain the core logit‑combination formula (Eq. 7) or the negative‑prompt extension (Eq. 5). |
+| **MISSING** | Experiments on a wide range of benchmarks (zero‑shot QA, reasoning, chain‑of‑thought, long‑form, assistant prompts). | The repository only contains a single `evaluate.py` that runs a very small subset of tasks; no LM‑Eval harness integration. |
+| **MISSING** | Hyper‑parameter settings (γ values, temperature, top‑k/top‑p, beam‑width, etc.) as reported in the paper. | No explicit γ values are set; defaults are hard‑coded and not aligned with the paper’s recommended range (e.g., γ ≈ 2–5 for GPT‑2). |
+| **MISSING** | Negative prompting (system‑level instructions) and its evaluation. | No code for handling a separate “negative prompt” or for measuring its effect. |
+| **MISSING** | Baseline comparisons (e.g., vanilla sampling, chain‑of‑thought, self‑consistency). | `evaluate.py` only runs CFG; no baseline runs or comparison metrics. |
+| **MISSING** | Evaluation metrics and protocol (accuracy, F1, human‑study results). | The script prints raw logits or token probabilities; no accuracy/F1 computation or human‑study simulation. |
+| **MISSING** | Hardware / compute details (GPU type, batch size, inference FLOPs). | No mention of hardware or profiling in `reproduce.sh`. |
+| **MISSING** | Full reproducibility script (`reproduce.sh`) that downloads models, runs all experiments, and produces the paper’s tables/figures. | `reproduce.sh` only runs a single inference script and writes a placeholder `output.json`. |
+| **PARTIAL** | Use of GPT‑2 only. | The paper evaluates multiple families (Pythia, LLaMA, GPT‑2). The repo only contains GPT‑2. |
+| **PARTIAL** | Implementation of CFG for GPT‑2. | If `cfg_gpt2.py` contains a naive logit re‑weighting, it may be incomplete (e.g., missing conditioning dropout or proper handling of context windows). |
+| **INCORRECT** | Gamma default value. | If the script sets γ = 1 (no guidance) or a very high value (e.g., γ = 10), it does not match the paper’s recommended lower γ for text generation. |
+| **INCORRECT** | Tokenization / detokenization. | If the code uses a different tokenizer than the one used in the paper (e.g., GPT‑2’s BPE vs. LLaMA’s tokenizer), results will not be comparable. |
+| **INCORRECT** | Evaluation of chain‑of‑thought / self‑consistency. | No logic for generating multiple reasoning paths or aggregating them; the script simply samples once. |
+
+**Conclusion**
+
+The current repository does **not** reproduce the core contributions of the paper. It lacks the full CFG algorithm, benchmark suite, hyper‑parameter tuning, negative prompting, baseline comparisons, and a complete reproducibility script.  
+
+**ALL_OK**: *No – the reproduction is incomplete.*
+2026-03-14 19:45:56.771318 
+2026-03-14 19:45:56.771438 Generating refined code...
+2026-03-14 19:47:01.707568   Updated: generated_reproduction.txt
+2026-03-14 19:47:01.707690 
+2026-03-14 19:47:01.707760 --- Iteration 3: Observe & Refine ---
+2026-03-14 19:47:08.717746 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / incomplete components for a faithful reproduction**
+
+| Category | Item | Status |
+|----------|------|--------|
+| Core method | Classifier‑Free Guidance (log‑space re‑weighting of conditioned vs. unconditional logits) | **MISSING** – no code shows the `log P_hat = log P_uncond + γ*(log P_cond – log P_uncond)` operation. |
+| Hyper‑parameters | Guidance strength γ (typical values 1–5), temperature, top‑k/top‑p, max‑length, seed handling | **MISSING** – no explicit γ or sampling hyper‑parameters are defined. |
+| Data / Benchmarks | LAMBADA, WinoGrande, ARC‑Easy/Challenge, etc. (as in the paper’s zero‑shot suite) | **MISSING** – no dataset download, preprocessing, or split logic is present. |
+| Evaluation | Accuracy, F1, BLEU, human‑preference metrics, comparison to baselines (GPT‑2, Pythia, LLaMA‑7B, PaLM‑540B) | **MISSING** – evaluate.py does not compute or report any of the paper’s metrics. |
+| Experimental protocol | Exact inference settings (batch size, GPU/TPU usage, number of samples per prompt) | **MISSING** – no hardware or runtime configuration is specified. |
+| Reproduce.sh | End‑to‑end script that (1) installs deps, (2) downloads models, (3) runs CFG sampling on all benchmarks, (4) aggregates results | **MISSING** – the script is empty/placeholder. |
+| Negative prompting | Ability to supply a “negative prompt” and adjust logits accordingly | **MISSING** – no implementation or API for negative conditioning. |
+| Chain‑of‑Thought / Assistant prompts | Code paths that apply CFG to CoT or system‑instruction prompts | **MISSING** – no special handling for these prompt styles. |
+| Documentation | README explaining how to run the experiments, reproduce the paper’s tables | **PARTIAL** – README exists but lacks detailed instructions. |
+
+**Conclusion**
+
+The current repository does **not** contain the essential components required to reproduce the results reported in the paper. All core algorithmic, data‑handling, evaluation, and reproducibility steps are missing.  
+
+**ALL_OK**: *No – reproduction is incomplete.*
+2026-03-14 19:47:08.717921 
+2026-03-14 19:47:08.718179 Generating refined code...
+2026-03-14 19:48:57.639768   Updated: generated_reproduction.txt
+2026-03-14 19:48:57.639871 
+2026-03-14 19:48:57.639918 --- Iteration 4: Observe & Refine ---
+2026-03-14 19:48:59.328381 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core method/algorithm (Classifier‑Free Guidance implementation for LLMs)  
+MISSING: Hyperparameters (e.g., guidance weight γ, sampling temperature, top‑k/p)  
+MISSING: Data setup (datasets, preprocessing, splits for benchmarks)  
+MISSING: Evaluation (metrics, baseline comparisons, human evaluation protocol)  
+MISSING: Experimental setup (hardware, training steps, checkpointing, inference scripts)  
+MISSING: reproduce.sh (full pipeline to reproduce paper results)
+2026-03-14 19:48:59.328563 
+2026-03-14 19:48:59.328706 Generating refined code...
+2026-03-14 19:49:33.324870   Updated: generated_reproduction.txt
+2026-03-14 19:49:33.324977 
+2026-03-14 19:49:33.325017 --- Iteration 5: Observe & Refine ---
+2026-03-14 19:49:34.968203 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core method/algorithm (Classifier‑Free Guidance for language models)  
+MISSING: Hyperparameters (e.g., guidance weight γ, temperature, top‑k/p sampling settings)  
+MISSING: Data setup (datasets, preprocessing, train/validation splits)  
+MISSING: Evaluation (metrics, benchmark protocols, baseline comparisons)  
+MISSING: Experimental setup (hardware, number of steps, checkpointing)  
+MISSING: reproduce.sh (script to run the full pipeline and generate results)
+2026-03-14 19:49:34.968369 
+2026-03-14 19:49:34.968507 Generating refined code...
+2026-03-14 19:50:15.761686   Updated: README.md
+2026-03-14 19:50:15.761816   Updated: reproduce.sh
+2026-03-14 19:50:15.761881   Updated: main.py
+2026-03-14 19:50:15.761921 
+2026-03-14 19:50:15.762010 ======================================================================
+2026-03-14 19:50:15.762049 REACT BASELINE COMPLETE
+2026-03-14 19:50:15.762083 ======================================================================
+2026-03-14 19:50:15.762118 Total iterations: 6
+2026-03-14 19:50:15.762153 API tokens: 37327 completion, 226753 prompt
+2026-03-14 19:50:15.762188 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial4/stay-on-topic-with-classifier-free-guidance/generated_code_response.txt

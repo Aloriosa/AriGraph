@@ -1,0 +1,42 @@
+# Add running mean/var to RepresentationDescriptor
+class RepresentationDescriptor(nn.Module):
+    def __init__(self, hidden_dim=768, latent_dim=64):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(hidden_dim, latent_dim),
+            nn.ReLU(),
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+        )
+        nn.init.xavier_uniform_(self.encoder[0].weight)
+        nn.init.xavier_uniform_(self.decoder[0].weight)
+        # Running stats
+        self.register_buffer('running_mean', torch.tensor(0.0))
+        self.register_buffer('running_var', torch.tensor(1.0))
+        self.register_buffer('running_count', torch.tensor(0))
+
+    def forward(self, x):
+        z = self.encoder(x)
+        recon = self.decoder(z)
+        return recon
+
+    def loss(self, x):
+        recon = self.forward(x)
+        return nn.functional.mse_loss(recon, x, reduction='mean')
+
+    def update_stats(self, errors):
+        """Update running mean/var with a list of errors."""
+        batch_mean = torch.tensor(errors).mean()
+        batch_var = torch.tensor(errors).var(unbiased=False)
+        batch_count = len(errors)
+        delta = batch_mean - self.running_mean
+        tot_count = self.running_count + batch_count
+        new_mean = self.running_mean + delta * batch_count / tot_count
+        m_a = self.running_var * self.running_count
+        m_b = batch_var * batch_count
+        M2 = m_a + m_b + delta ** 2 * self.running_count * batch_count / tot_count
+        new_var = M2 / tot_count
+        self.running_mean = new_mean
+        self.running_var = new_var
+        self.running_count = tot_count

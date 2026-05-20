@@ -1,0 +1,281 @@
+```json
+{
+  "paper_slug": "all-in-one",
+  "notes": "The SimFormer paper introduces a unified probabilistic diffusion model based on transformers that performs amortized Bayesian inference without requiring fixed priors, likelihoods, or simulator structures. It handles unstructured, missing, and time-dependent data via attention masks encoding domain knowledge, and supports on-the-fly conditioning. The implementation must modularize data generation, tokenization, transformer architecture, diffusion scoring, training, and inference entry points to reflect its novel joint learning of likelihood and posterior, dynamic conditioning, and dependency-aware attention.",
+  "nodes": [
+    {
+      "id": "data.simulator_wrapper",
+      "role": "data",
+      "module_path": "src/data/simulator_wrapper.py",
+      "description": "Wraps ecological, epidemiological, and neuroscience simulators to generate parameter-data pairs with irregular sampling, missing values, and function-valued parameters. Novelty: abstracts simulator interface to output structured tokenizable sequences with metadata.",
+      "deps": [],
+      "public_signatures": [
+        "class SimulatorWrapper:",
+        "def generate_batch(self, batch_size: int, n_params: int) -> dict:"
+      ],
+      "paper_anchor_triplet_ids": [
+        "triplet_00010",
+        "triplet_00011",
+        "triplet_00012",
+        "triplet_00013",
+        "triplet_00028",
+        "triplet_00041",
+        "triplet_00042",
+        "triplet_00090",
+        "triplet_00109",
+        "triplet_00110",
+        "triplet_00222"
+      ],
+      "memory_card_ids": [
+        "memory_card_0025",
+        "memory_card_0026",
+        "memory_card_0053",
+        "memory_card_0090"
+      ]
+    },
+    {
+      "id": "data.tokenizer",
+      "role": "data",
+      "module_path": "src/data/tokenizer.py",
+      "description": "Converts simulator outputs into token sequences where each token encodes variable identity, value, and conditional state (observed/latent). Novelty: uses learnable embeddings for identifiers and condition states, and supports random Fourier embeddings for space/time-dependent parameters.",
+      "deps": ["data.simulator_wrapper"],
+      "public_signatures": [
+        "class Tokenizer:",
+        "def encode(self, sim_output: dict) -> list[dict]:",
+        "def decode(self, tokens: list[dict]) -> dict:"
+      ],
+      "paper_anchor_triplet_ids": [
+        "triplet_00184",
+        "triplet_00196",
+        "triplet_00197",
+        "triplet_00198",
+        "triplet_00199",
+        "triplet_00202",
+        "triplet_00203",
+        "triplet_00206",
+        "triplet_00222"
+      ],
+      "memory_card_ids": [
+        "memory_card_0091",
+        "memory_card_0092",
+        "memory_card_0025",
+        "memory_card_0026"
+      ]
+    },
+    {
+      "id": "arch.attention_mask_builder",
+      "role": "arch",
+      "module_path": "src/arch/attention_mask_builder.py",
+      "description": "Constructs attention masks from domain knowledge to encode simulator dependency structures. Novelty: masks are dynamic, per-batch, and encode conditional independencies to guide transformer attention.",
+      "deps": ["data.simulator_wrapper"],
+      "public_signatures": [
+        "def build_attention_mask(self, sim_metadata: dict) -> torch.Tensor:"
+      ],
+      "paper_anchor_triplet_ids": [
+        "triplet_00124",
+        "triplet_00125",
+        "triplet_00127",
+        "triplet_00144",
+        "triplet_00186",
+        "triplet_00194",
+        "triplet_00213",
+        "triplet_00214",
+        "triplet_00223"
+      ],
+      "memory_card_ids": [
+        "memory_card_0089",
+        "memory_card_0025",
+        "memory_card_0026"
+      ]
+    },
+    {
+      "id": "arch.transformer_score_model",
+      "role": "arch",
+      "module_path": "src/arch/transformer_score_model.py",
+      "description": "Transformer-based score network that takes token sequences and attention masks as input and outputs per-token score estimates for diffusion. Novelty: jointly learns likelihood and posterior scores via masked conditioning and dynamic attention.",
+      "deps": ["arch.attention_mask_builder", "data.tokenizer"],
+      "public_signatures": [
+        "class TransformerScoreModel(nn.Module):",
+        "def forward(self, tokens: torch.Tensor, mask: torch.Tensor, t: torch.Tensor) -> torch.Tensor:"
+      ],
+      "paper_anchor_triplet_ids": [
+        "triplet_00001",
+        "triplet_00113",
+        "triplet_00114",
+        "triplet_00182",
+        "triplet_00183",
+        "triplet_00187",
+        "triplet_00204",
+        "triplet_00215",
+        "triplet_00217"
+      ],
+      "memory_card_ids": [
+        "memory_card_0087",
+        "memory_card_0074",
+        "memory_card_0070"
+      ]
+    },
+    {
+      "id": "train.diffusion_trainer",
+      "role": "train",
+      "module_path": "src/train/diffusion_trainer.py",
+      "description": "Trains the score model using time-dependent denoising score matching on simulated data. Novelty: resamples training masks at every iteration to enable learning arbitrary conditionals without retraining.",
+      "deps": ["arch.transformer_score_model", "data.tokenizer", "data.simulator_wrapper"],
+      "public_signatures": [
+        "class DiffusionTrainer:",
+        "def train_epoch(self, dataloader: DataLoader) -> float:",
+        "def compute_loss(self, x0: torch.Tensor, mask: torch.Tensor, t: torch.Tensor) -> torch.Tensor:"
+      ],
+      "paper_anchor_triplet_ids": [
+        "triplet_00044",
+        "triplet_00169",
+        "triplet_00173",
+        "triplet_00175",
+        "triplet_00176",
+        "triplet_00177",
+        "triplet_00178",
+        "triplet_00193",
+        "triplet_00195"
+      ],
+      "memory_card_ids": [
+        "memory_card_0083",
+        "memory_card_0084",
+        "memory_card_0088"
+      ]
+    },
+    {
+      "id": "eval.sampler",
+      "role": "eval",
+      "module_path": "src/eval/sampler.py",
+      "description": "Implements reverse diffusion sampling conditioned on arbitrary subsets of observed variables. Novelty: enables on-the-fly posterior and likelihood sampling without retraining, guided by learned scores and attention masks.",
+      "deps": ["arch.transformer_score_model", "arch.attention_mask_builder", "data.tokenizer"],
+      "public_signatures": [
+        "def sample_posterior(self, observed_tokens: list[dict], n_samples: int) -> list[dict]:",
+        "def sample_likelihood(self, parameter_tokens: list[dict], n_samples: int) -> list[dict]:"
+      ],
+      "paper_anchor_triplet_ids": [
+        "triplet_00006",
+        "triplet_00007",
+        "triplet_00008",
+        "triplet_00037",
+        "triplet_00038",
+        "triplet_00120",
+        "triplet_00121",
+        "triplet_00122",
+        "triplet_00185",
+        "triplet_00187",
+        "triplet_00216",
+        "triplet_00217",
+        "triplet_00224"
+      ],
+      "memory_card_ids": [
+        "memory_card_0070",
+        "memory_card_0072",
+        "memory_card_0077",
+        "memory_card_0093"
+      ]
+    },
+    {
+      "id": "infra.seed_and_logging",
+      "role": "infra",
+      "module_path": "src/infra/utils.py",
+      "description": "Provides seeding, logging, and device management utilities. Standard but essential for reproducibility and debugging.",
+      "deps": [],
+      "public_signatures": [
+        "def set_seed(seed: int) -> None:",
+        "def setup_logging(log_dir: str) -> logging.Logger:"
+      ],
+      "paper_anchor_triplet_ids": [],
+      "memory_card_ids": []
+    },
+    {
+      "id": "config.training",
+      "role": "config",
+      "module_path": "src/config/training.yaml",
+      "description": "YAML configuration file for training hyperparameters: learning rate, batch size, epochs, loss weighting, and diffusion schedule. Novelty: intentionally omitted in paper; here explicitly defined for reproduction.",
+      "deps": [],
+      "public_signatures": [],
+      "paper_anchor_triplet_ids": [
+        "triplet_00224",
+        "triplet_00225",
+        "triplet_00226",
+        "triplet_00227",
+        "triplet_00228",
+        "triplet_00229",
+        "triplet_00230",
+        "triplet_00231",
+        "triplet_00232",
+        "triplet_00233",
+        "triplet_00234",
+        "triplet_00235",
+        "triplet_00236",
+        "triplet_00237",
+        "triplet_00238",
+        "triplet_00239"
+      ],
+      "memory_card_ids": [
+        "memory_card_0044",
+        "memory_card_0045",
+        "memory_card_0046",
+        "memory_card_0047",
+        "memory_card_0051",
+        "memory_card_0054",
+        "memory_card_0065"
+      ]
+    },
+    {
+      "id": "entry.train",
+      "role": "entry",
+      "module_path": "src/entry/train.py",
+      "description": "Main entry point for training SimFormer. Orchestrates data loading, model initialization, training loop, and checkpointing. Integrates config and infra modules.",
+      "deps": ["train.diffusion_trainer", "data.simulator_wrapper", "data.tokenizer", "arch.attention_mask_builder", "arch.transformer_score_model", "infra.seed_and_logging", "config.training"],
+      "public_signatures": [
+        "def main(config_path: str) -> None:"
+      ],
+      "paper_anchor_triplet_ids": [
+        "triplet_00044",
+        "triplet_00112",
+        "triplet_00142",
+        "triplet_00143",
+        "triplet_00145",
+        "triplet_00146"
+      ],
+      "memory_card_ids": [
+        "memory_card_0094",
+        "memory_card_0063",
+        "memory_card_0065"
+      ]
+    },
+    {
+      "id": "entry.eval",
+      "role": "entry",
+      "module_path": "src/entry/eval.py",
+      "description": "Main entry point for evaluation. Loads trained model, samples posteriors/likelihoods under arbitrary conditions, and computes metrics against baselines. Supports interactive conditioning.",
+      "deps": ["eval.sampler", "data.tokenizer", "arch.attention_mask_builder", "arch.transformer_score_model", "infra.seed_and_logging", "config.training"],
+      "public_signatures": [
+        "def main(model_path: str, config_path: str, condition_spec: dict) -> dict:"
+      ],
+      "paper_anchor_triplet_ids": [
+        "triplet_00006",
+        "triplet_00007",
+        "triplet_00008",
+        "triplet_00021",
+        "triplet_00022",
+        "triplet_00023",
+        "triplet_00036",
+        "triplet_00037",
+        "triplet_00038",
+        "triplet_00123",
+        "triplet_00130",
+        "triplet_00146"
+      ],
+      "memory_card_ids": [
+        "memory_card_0077",
+        "memory_card_0078",
+        "memory_card_0093",
+        "memory_card_0066"
+      ]
+    }
+  ]
+}
+```

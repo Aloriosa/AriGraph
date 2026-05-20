@@ -1,0 +1,414 @@
+#!/usr/bin/env python3
+"""
+FOA (Forward‑Optimization Adaptation) reproduction on CIFAR‑10.
+
+This script demonstrates the core ideas of the paper:
+  • Prompt insertion at the model input.
+  • CMA‑ES optimisation of the prompt using an unsupervised fitness
+    combining prediction entropy and CLS‑token statistics discrepancy.
+  • Forward‑only activation shifting that moves the final CLS token
+    towards the source statistics.
+  • Optional dynamic 8‑bit quantisation of the ViT model.
+
+The script downloads CIFAR‑10, uses the first 32 training samples
+to estimate source statistics, and adapts the ViT‑Base model on the test
+set.  Results are written to `predictions.csv` and accuracy is printed.
+"""
+
+import argparse
+import csv
+import os
+from pathlib import Path
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.utils.data
+import torchvision
+import torchvision.transforms as T
+import timm
+import tqdm
+import cma
+
+# --------------------------------------------------------------------------- #
+# Utility helpers
+# --------------------------------------------------------------------------- #
+def get_device():
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def save_predictions(preds, targets, path):
+    """Write predictions to a CSV file."""
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["index", "pred", "target"])
+        for i, (p, t) in enumerate(zip(preds, targets)):
+            writer.writerow([i, int(p), int(t)])
+
+
+def quantize_model(model):
+    """Dynamic 8‑bit quantisation of all linear layers."""
+    import torch.quantization as quant
+
+    return quant.quantize_dynamic(
+        model,
+        {nn.Linear},
+        dtype=torch.qint8,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# FOA implementation
+# --------------------------------------------------------------------------- #
+class FOA:
+    """
+    Forward‑Optimization Adaptation core implementation.
+
+    Parameters
+    ----------
+    model : nn.Module
+        ViT‑Base model from timm (pre‑trained).
+    device : torch.device
+        Computation device.
+    num_prompts : int
+        Number of prompt embeddings to insert.
+    popsize : int
+        CMA‑ES population size.
+    lambda_ : float
+        Trade‑off between entropy and activation discrepancy.
+    gamma : float
+        Shift step size for activation shifting.
+    use_quantized : bool
+        If True, quantise the model to 8‑bit dynamically.
+    """
+
+    def __init__(
+        self,
+        model,
+        device,
+        num_prompts=3,
+        popsize=28,
+        lambda_=0.4,
+        gamma=1.0,
+        use_quantized=False,
+    ):
+        self.device = device
+        self.model = model.to(device).eval()
+        if use_quantized:
+            self.model = quantize_model(self.model)
+
+        self.num_prompts = num_prompts
+        self.popsize = popsize
+        self.lambda_ = lambda_
+        self.gamma = gamma
+
+        # Prompt tensor (flattened, no grad)
+        self.prompt_shape = (num_prompts, self.model.patch_embed.proj.out_channels)
+        self.prompt_flat = torch.zeros(
+            self.num_prompts * self.model.patch_embed.proj.out_channels,
+            device=self.device,
+        )
+
+        # CMA‑ES initialisation
+        self.es = cma.CMAEvolutionStrategy(
+            self.prompt_flat.tolist(),
+            0.5,  # sigma
+            {"popsize": self.popsize},
+        )
+
+        # Hooks to capture CLS tokens after each block
+        self.cls_tokens = []
+        self._register_hooks()
+
+        # Source statistics (to be computed later)
+        self.source_mu = None
+        self.source_sigma = None
+
+    # ----------------------------------------------------------------------- #
+    # Hook registration
+    # ----------------------------------------------------------------------- #
+    def _hook_fn(self, module, inp, out):
+        # out shape: [B, N+1, D] where index 0 is CLS
+        self.cls_tokens.append(out[:, 0, :].detach().cpu())
+
+    def _register_hooks(self):
+        for blk in self.model.blocks:
+            blk.register_forward_hook(self._hook_fn)
+
+    # ----------------------------------------------------------------------- #
+    # Forward pass with prompt and optional shift
+    # ----------------------------------------------------------------------- #
+    def _forward(self, images, prompt, shift=True):
+        """
+        Forward pass for a batch of images with a given prompt.
+
+        Returns
+        -------
+        cls_tokens : list[Tensor]
+            CLS tokens from each block (length = len(self.model.blocks)).
+        logits : Tensor
+            Class logits after the final head.
+        """
+        self.cls_tokens = []  # clear previous tokens
+
+        B = images.shape[0]
+        # Patch embedding
+        x = self.model.patch_embed(images)  # [B, N, D]
+        # Prepare prompt
+        prompt_exp = prompt.unsqueeze(0).expand(B, -1, -1)  # [B, P, D]
+        # CLS token
+        cls_token = self.model.cls_token.expand(B, -1, -1)  # [B, 1, D]
+        # Position embeddings (extend for prompts)
+        pos_embed = self.model.pos_embed
+        if self.num_prompts > 0:
+            pos_prompt = pos_embed[:, :1, :].repeat(1, self.num_prompts, 1)
+            pos_embed_ext = torch.cat(
+                (pos_embed[:, :1, :], pos_prompt, pos_embed[:, 1:, :]), dim=1
+            )
+        else:
+            pos_embed_ext = pos_embed
+        # Concatenate
+        x = torch.cat((cls_token, prompt_exp, x), dim=1)
+        x = x + pos_embed_ext
+        x = self.model.pos_drop(x)
+
+        # Forward through blocks (CLS tokens captured by hooks)
+        for blk in self.model.blocks:
+            x = blk(x)
+
+        x = self.model.norm(x)
+        cls_final = x[:, 0, :]  # [B, D]
+        if shift:
+            # Shift direction: source mean - current mean of final CLS
+            shift_dir = self.source_mu[-1] - cls_final.mean(dim=0)
+            cls_final = cls_final + self.gamma * shift_dir
+        logits = self.model.head(cls_final)
+
+        return self.cls_tokens, logits
+
+    # ----------------------------------------------------------------------- #
+    # Fitness calculation
+    # ----------------------------------------------------------------------- #
+    def _fitness(self, logits, cls_tokens):
+        """
+        Compute unsupervised fitness:
+            entropy + λ * discrepancy
+        """
+        probs = F.softmax(logits, dim=1)
+        entropy = - (probs * probs.log()).sum(dim=1).mean()
+
+        # Discrepancy over all layers
+        disc = 0.0
+        for i, ct in enumerate(cls_tokens):
+            mu = ct.mean(dim=0)
+            sigma = ct.std(dim=0)
+            disc += F.mse_loss(mu, self.source_mu[i])
+            disc += F.mse_loss(sigma, self.source_sigma[i])
+        return entropy + self.lambda_ * disc
+
+    # ----------------------------------------------------------------------- #
+    # Compute source statistics from a DataLoader
+    # ----------------------------------------------------------------------- #
+    def compute_source_stats(self, loader):
+        """
+        Estimate mean and std of CLS tokens for each layer
+        using a few source samples.
+        """
+        self.source_mu = []
+        self.source_sigma = []
+
+        with torch.no_grad():
+            for images, _ in loader:
+                images = images.to(self.device)
+                # Use zero prompt (no adaptation)
+                prompt = torch.zeros(self.prompt_shape, device=self.device)
+                cls_tokens, _ = self._forward(images, prompt, shift=False)
+                for ct in cls_tokens:
+                    mu = ct.mean(dim=0)
+                    sigma = ct.std(dim=0)
+                    self.source_mu.append(mu)
+                    self.source_sigma.append(sigma)
+                break  # only need first batch (32 samples)
+
+    # ----------------------------------------------------------------------- #
+    # Adaptation over a test DataLoader
+    # ----------------------------------------------------------------------- #
+    def adapt_and_evaluate(self, loader):
+        """
+        Run FOA per batch on the test set and accumulate predictions.
+        Returns:
+            accuracy : float
+            predictions : list[int]
+            targets : list[int]
+        """
+        all_preds = []
+        all_targets = []
+
+        for images, targets in tqdm.tqdm(loader, desc="FOA adaptation"):
+            images = images.to(self.device)
+            targets = targets.to(self.device)
+
+            # CMA‑ES population
+            pop = self.es.ask()  # list of flat vectors
+            best_f = float("inf")
+            best_logits = None
+
+            for vec in pop:
+                prompt = torch.tensor(vec, dtype=torch.float32).view(self.prompt_shape).to(self.device)
+                cls_tokens, logits = self._forward(images, prompt, shift=True)
+                f = self._fitness(logits, cls_tokens).item()
+                self.es.tell(vec, f)
+                if f < best_f:
+                    best_f = f
+                    best_logits = logits.clone()
+
+            # Use best prompt to classify this batch
+            preds = best_logits.argmax(dim=1).cpu().numpy()
+            all_preds.extend(preds.tolist())
+            all_targets.extend(targets.cpu().numpy().tolist())
+
+        accuracy = float(torch.tensor(all_preds).eq(torch.tensor(all_targets)).float().mean())
+        return accuracy, all_preds, all_targets
+
+
+# --------------------------------------------------------------------------- #
+# Main script
+# --------------------------------------------------------------------------- #
+def main(args):
+    device = get_device()
+    print(f"Using device: {device}")
+
+    # --------------------------------------------------------------------- #
+    # Dataset
+    # --------------------------------------------------------------------- #
+    transform = T.Compose(
+        [
+            T.Resize(224),
+            T.ToTensor(),
+            T.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
+            ),
+        ]
+    )
+
+    # Default to CIFAR‑10 if no custom dataset path provided
+    if args.dataset_path:
+        # ImageNet‑C is expected to follow the ImageNet folder layout
+        # with a single `val/` folder containing all images.
+        # The labels are inferred from the folder names.
+        # In practice you would replace this with a proper ImageNet‑C loader.
+        dataset = torchvision.datasets.ImageFolder(
+            root=os.path.join(args.dataset_path, "val"),
+            transform=transform,
+        )
+        num_classes = dataset.classes.__len__()
+    else:
+        # Use CIFAR‑10 as a toy benchmark
+        train_set = torchvision.datasets.CIFAR10(
+            root="data", train=True, download=True, transform=transform
+        )
+        test_set = torchvision.datasets.CIFAR10(
+            root="data", train=False, download=True, transform=transform
+        )
+        dataset = test_set
+        num_classes = 10
+
+    # Source stats loader (32 random samples)
+    source_loader = torch.utils.data.DataLoader(
+        train_set if not args.dataset_path else dataset,
+        batch_size=32,
+        shuffle=True,
+        num_workers=2,
+        pin_memory=True,
+    )
+
+    # Test loader
+    test_loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=True,
+    )
+
+    # --------------------------------------------------------------------- #
+    # Load pre‑trained ViT‑Base
+    # --------------------------------------------------------------------- #
+    model = timm.create_model(
+        "vit_base_patch16_224",
+        pretrained=True,
+        num_classes=num_classes,
+    )
+    model.eval()
+
+    # --------------------------------------------------------------------- #
+    # FOA instance
+    # --------------------------------------------------------------------- #
+    foa = FOA(
+        model=model,
+        device=device,
+        num_prompts=args.num_prompts,
+        popsize=args.popsize,
+        lambda_=args.lambda_,
+        gamma=args.gamma,
+        use_quantized=args.quantize,
+    )
+
+    # --------------------------------------------------------------------- #
+    # Compute source statistics
+    # --------------------------------------------------------------------- #
+    print("Computing source statistics from 32 samples...")
+    foa.compute_source_stats(source_loader)
+
+    # --------------------------------------------------------------------- #
+    # Adaptation and evaluation
+    # --------------------------------------------------------------------- #
+    print("Running FOA on test set...")
+    accuracy, preds, targets = foa.adapt_and_evaluate(test_loader)
+
+    print(f"FOA test accuracy: {accuracy * 100:.2f}%")
+
+    # Save predictions
+    pred_path = Path("predictions.csv")
+    save_predictions(preds, targets, pred_path)
+    print(f"Predictions saved to {pred_path}")
+
+    # Memory usage (for curiosity)
+    if torch.cuda.is_available():
+        mem = torch.cuda.max_memory_allocated(device) / (1024**2)
+        print(f"Peak GPU memory usage: {mem:.1f} MB")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="FOA reproduction on CIFAR‑10 / ImageNet‑C")
+    parser.add_argument(
+        "--batch-size", type=int, default=64,
+        help="Batch size for adaptation (default: 64)"
+    )
+    parser.add_argument(
+        "--num-prompts", type=int, default=3,
+        help="Number of prompt embeddings (default: 3)"
+    )
+    parser.add_argument(
+        "--popsize", type=int, default=28,
+        help="CMA‑ES population size (default: 28)"
+    )
+    parser.add_argument(
+        "--lambda", dest="lambda_", type=float, default=0.4,
+        help="Trade‑off parameter between entropy and discrepancy (default: 0.4)"
+    )
+    parser.add_argument(
+        "--gamma", type=float, default=1.0,
+        help="Shift step size for activation shifting (default: 1.0)"
+    )
+    parser.add_argument(
+        "--quantize", action="store_true",
+        help="Apply dynamic 8‑bit quantisation to the ViT model"
+    )
+    parser.add_argument(
+        "--dataset-path", type=str, default="",
+        help="Path to ImageNet‑C root folder (optional). If omitted, CIFAR‑10 is used."
+    )
+    args = parser.parse_args()
+    main(args)

@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+# ==========================================================
+# Semantic Self‑Consistency Reproduction Pipeline
+# ----------------------------------------------------------
+# Implements baseline self‑consistency, Centroid Proximity
+# Weighting (CPW) and Semantic Consensus Weighting (SCW)
+# on the AQuA‑RAT, SVAMP and StrategyQA datasets.
+# ==========================================================
+
+import os
+import re
+import json
+import math
+import random
+import warnings
+from pathlib import Path
+from collections import Counter, defaultdict
+from typing import List, Tuple, Dict
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+from datasets import load_dataset
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+
+warnings.filterwarnings("ignore", category=UserWarning)
+
+# ------------------------------------------------------------------
+# Global configuration
+# ------------------------------------------------------------------
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+torch.cuda.manual_seed_all(SEED)
+
+# Number of rationales to sample per question
+NUM_SAMPLES = 5
+# Temperature for generation
+TEMP = 0.7
+# Max new tokens for generation
+MAX_NEW_TOKENS = 300
+# Device selection
+DEVICE = 0 if torch.cuda.is_available() else -1
+
+# ------------------------------------------------------------------
+# Models
+# ------------------------------------------------------------------
+# 1) Generator – small GPT‑2 for demonstration (replace with larger LLMs as needed)
+GEN_MODEL_NAME = "gpt2"
+gen_tokenizer = AutoTokenizer.from_pretrained(GEN_MODEL_NAME)
+gen_model = AutoModelForCausalLM.from_pretrained(GEN_MODEL_NAME)
+gen_model.to(DEVICE)
+
+# 2) Featurizers
+#   - SciBERT for math datasets
+#   - RoBERTa for StrategyQA
+SCIBERT = SentenceTransformer("allenai/scibert_scivocab_uncased", device=DEVICE)
+ROBERTA = SentenceTransformer("roberta-base", device=DEVICE)
+
+# ------------------------------------------------------------------
+# Helper functions
+# ------------------------------------------------------------------
+def generate_rationales(
+    question: str,
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    n: int = NUM_SAMPLES,
+    temperature: float = TEMP,
+    max_new_tokens: int = MAX_NEW_TOKENS,
+) -> List[str]:
+    """
+    Generate `n` rationales for a given question using a causal LLM.
+    Returns the raw generated texts (including the answer).
+    """
+    prompt = f"Question: {question}\nAnswer:"
+    # Using the transformers pipeline for generation
+    pipe = pipeline(
+        "text-generation",
+        model=model,
+        tokenizer=tokenizer,
+        device=DEVICE,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        do_sample=True,
+        top_k=50,
+        top_p=0.95,
+        num_return_sequences=n,
+    )
+    outputs = pipe(prompt)
+    return [out["generated_text"] for out in outputs]
+
+
+def parse_answer(text: str, dataset: str) -> str:
+    """
+    Extract the final answer from a generated rationale.
+    For math datasets we capture the last numeric token.
+    For StrategyQA we capture the entire answer after the last period.
+    """
+    if dataset in {"AQuA-RAT", "SVAMP"}:
+        nums = re.findall(r"-?\d+\.?\d*", text)
+        if nums:
+            return nums[-1]
+        # fallback: return empty string
+        return ""
+    else:  # StrategyQA
+        # Assume answer ends after last period or question mark
+        m = re.search(r"Answer:\s*(.*)", text, flags=re.IGNORECASE)
+        if m:
+            return m.group(1).strip().split("\n")[0].strip()
+        # fallback: take the whole text after the last period
+        parts = text.split(".")
+        if len(parts) > 1:
+            return parts[-1].strip()
+        return text.strip()
+
+
+def majority_vote(preds: List[str]) -> str:
+    """Return the most common answer; tie‑break by first occurrence."""
+    counter = Counter(preds)
+    most_common = counter.most_common()
+    if not most_common:
+        return ""
+    top_count = most_common[0][1]
+    top_answers = [ans for ans, cnt in most_common if cnt == top_count]
+    return top_answers[0]
+
+
+def embed_rationales(
+    rationales: List[str],
+    dataset: str,
+    model: SentenceTransformer,
+) -> np.ndarray:
+    """
+    Convert rationales to embeddings using the appropriate featurizer.
+    """
+    return model.encode(rationales, convert_to_numpy=True, show_progress_bar=False)
+
+
+def cpw_weighting(
+    embeddings: np.ndarray,
+    answers: List[str],
+) -> str:
+    """Centroid Proximity Weighting."""
+    centroid = np.mean(embeddings, axis=0)
+    distances = np.linalg.norm(embeddings - centroid, axis=1)
+    # Avoid division by zero
+    distances += 1e-8
+    norm_dist = distances / distances.sum()
+    weights = 1.0 / norm_dist
+    # Aggregate weights per unique answer
+    weight_dict = defaultdict(float)
+    for w, ans in zip(weights, answers):
+        weight_dict[ans] += w
+    # Choose answer with highest total weight
+    return max(weight_dict.items(), key=lambda x: x[1])[0]
+
+
+def scw_weighting(
+    embeddings: np.ndarray,
+    answers: List[str],
+) -> str:
+    """Semantic Consensus Weighting."""
+    sim_matrix = cosine_similarity(embeddings)
+    scores = sim_matrix.sum(axis=1)
+    score_dict = defaultdict(float)
+    for s, ans in zip(scores, answers):
+        score_dict[ans] += s
+    return max(score_dict.items(), key=lambda x: x[1])[0]
+
+
+def outlier_filter(
+    embeddings: np.ndarray,
+    threshold_ratio: float = 1.5,
+) -> Tuple[np.ndarray, List[int]]:
+    """
+    Filter out embeddings whose distance to centroid exceeds
+    `threshold_ratio * median_distance`.
+    Returns filtered embeddings and the indices kept.
+    """
+    centroid = np.mean(embeddings, axis=0)
+    distances = np.linalg.norm(embeddings - centroid, axis=1)
+    median = np.median(distances)
+    mask = distances <= threshold_ratio * median
+    return embeddings[mask], np.where(mask)[0]
+
+
+def evaluate(
+    preds: List[str],
+    golds: List[str],
+) -> float:
+    """Compute accuracy."""
+    correct = sum(p == g for p, g in zip(preds, golds))
+    return correct / len(golds)
+
+
+def process_dataset(
+    name: str,
+    dataset,
+    featurizer: SentenceTransformer,
+) -> Tuple[float, float, float]:
+    """
+    Run the full pipeline for a single dataset.
+    Returns accuracies for baseline, CPW, and SCW.
+    """
+    print(f"\n=== Processing {name} ===")
+    gold_answers = []
+    baseline_preds = []
+    cpw_preds = []
+    scw_preds = []
+
+    for i, example in enumerate(dataset):
+        question = example["question"]
+        gold = example["answer"]
+        gold_answers.append(gold)
+
+        # Generate rationales
+        rationals = generate_rationales(
+            question,
+            model=gen_model,
+            tokenizer=gen_tokenizer,
+            n=NUM_SAMPLES,
+            temperature=TEMP,
+            max_new_tokens=MAX_NEW_TOKENS,
+        )
+
+        # Parse answers
+        parsed = [parse_answer(r, name) for r in rationals]
+
+        # Baseline self‑consistency (majority vote)
+        bas = majority_vote(parsed)
+        baseline_preds.append(bas)
+
+        # Embedding
+        embeds = embed_rationales(rationals, name, featurizer)
+
+        # CPW
+        cpw = cpw_weighting(embeds, parsed)
+        cpw_preds.append(cpw)
+
+        # SCW
+        scw = scw_weighting(embeds, parsed)
+        scw_preds.append(scw)
+
+        if (i + 1) % 50 == 0:
+            print(f"  processed {i + 1} / {len(dataset)}")
+
+    # Compute accuracies
+    bas_acc = evaluate(baseline_preds, gold_answers)
+    cpw_acc = evaluate(cpw_preds, gold_answers)
+    scw_acc = evaluate(scw_preds, gold_answers)
+
+    print(f"  Baseline accuracy: {bas_acc:.4f}")
+    print(f"  CPW accuracy:      {cpw_acc:.4f}")
+    print(f"  SCW accuracy:      {scw_acc:.4f}")
+
+    # Save per‑example results
+    out_path = Path(f"results_{name.lower()}.csv")
+    with out_path.open("w", encoding="utf-8") as f:
+        f.write(
+            "id,gold,baseline,cpw,scw\n"
+        )
+        for idx, (g, b, c, s) in enumerate(
+            zip(gold_answers, baseline_preds, cpw_preds, scw_preds)
+        ):
+            f.write(f"{idx},{g},{b},{c},{s}\n")
+
+    return bas_acc, cpw_acc, scw_acc
+
+
+def main() -> None:
+    # Load datasets
+    datasets = {
+        "AQuA-RAT": load_dataset("openai/aqua_rat", split="validation"),
+        "SVAMP": load_dataset("openai/svamp", split="validation"),
+        "StrategyQA": load_dataset("parlance/strategyqa", split="test"),
+    }
+
+    results = {}
+    for name, ds in datasets.items():
+        featurizer = SCIBERT if name in {"AQuA-RAT", "SVAMP"} else ROBERTA
+        accs = process_dataset(name, ds, featurizer)
+        results[name] = {"baseline": accs[0], "cpw": accs[1], "scw": accs[2]}
+
+    # Summary table
+    print("\n=== Summary ===")
+    print("Dataset\tBaseline\tCPW\tSCW")
+    for name, acc in results.items():
+        print(f"{name}\t{acc['baseline']:.4f}\t{acc['cpw']:.4f}\t{acc['scw']:.4f}")
+
+
+if __name__ == "__main__":
+    main()

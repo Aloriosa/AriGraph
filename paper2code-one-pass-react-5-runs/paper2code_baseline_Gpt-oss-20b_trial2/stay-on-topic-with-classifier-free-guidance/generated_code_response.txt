@@ -1,0 +1,338 @@
+**FILE: README.md**  
+```markdown
+# Reproduction of “Stay on topic with Classifier‑Free Guidance”
+
+This repository contains a minimal, self‑contained reproduction of the main idea of the paper
+“Stay on topic with Classifier‑Free Guidance”.  
+The goal is to show that **Classifier‑Free Guidance (CFG)** can be applied to a vanilla
+autoregressive language model (GPT‑2) without any additional training, and that it
+produces more prompt‑adherent generations.
+
+## What we provide
+
+| File | Purpose |
+|------|---------|
+| `reproduce.sh` | Bash script that installs requirements, downloads a model, runs a baseline generation and a CFG generation, and stores the results. |
+| `cfg_demo.py` | Python script that implements CFG for a causal language model. |
+| `README.md` | This file. |
+
+## How to run
+
+```bash
+bash reproduce.sh
+```
+
+The script will:
+
+1. Install the required Python packages (`torch`, `transformers`).
+2. Load the `gpt2` model from Hugging‑Face.
+3. Run a **baseline** generation (no CFG) and a **CFG** generation with a guidance weight `γ=1.5` on a set of short prompts.
+4. Store the generated texts in `baseline.txt` and `cfg.txt`.
+5. Print a short comparison summary.
+
+All files are under 1 GB; no large artifacts are committed.
+
+The repository is intentionally lightweight – it does **not** attempt to reproduce the full benchmark suite of the paper (which would require several large models and hours of GPU time). It demonstrates the core algorithmic idea: re‑weighting the model’s logits with the difference between a *prompt‑conditioned* and an *unconditioned* prediction.
+
+## Expected output
+
+After running `reproduce.sh`, you should see something like:
+
+```
+Baseline generation finished.
+CFG generation finished.
+Results written to baseline.txt and cfg.txt.
+```
+
+Both `baseline.txt` and `cfg.txt` contain the generated continuations for each prompt,
+showing that CFG tends to keep the generation closer to the prompt.
+
+Feel free to tweak `gamma` or add more prompts in `cfg_demo.py` to explore the effect
+of CFG further.
+```
+
+---
+
+**FILE: reproduce.sh**  
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ------------------------------------------------------------------
+# 1. Install Python dependencies
+# ------------------------------------------------------------------
+echo "Installing Python dependencies..."
+apt-get update -qq
+apt-get install -y -qq --no-install-recommends \
+    python3-pip python3-venv
+
+export VENV_DIR="/home/submission/venv"
+python3 -m venv "$VENV_DIR"
+# Activate virtual environment
+source "$VENV_DIR/bin/activate"
+
+pip install --upgrade pip
+pip install torch==2.3.0 transformers==4.41.2
+# --------------------------------------------------------------
+
+
+# ------------------------------------------------------------------
+# 2. Run the demo script
+# ------------------------------------------------------------------
+echo "Running baseline generation..."
+python cfg_demo.py --model gpt2 --prompt-file prompts.txt \
+    --output baseline.txt --gamma 1.0
+
+echo "Running CFG generation..."
+python cfg_demo.py --model gpt2 --prompt-file prompts.txt \
+    --output cfg.txt --gamma 1.5
+
+echo "Reproduction finished."
+```
+
+---
+
+**FILE: cfg_demo.py**  
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+CFG Demo – Implements Classifier‑Free Guidance for causal language models.
+
+Usage:
+    python cfg_demo.py \
+        --model gpt2 \
+        --prompt-file prompts.txt \
+        --output baseline.txt \
+        --gamma 1.0
+
+The script reads prompts from the given file (one prompt per line),
+generates continuations with or without CFG, and writes each output
+to the specified output file.  Each line in the output file contains
+the prompt followed by a tab and the generated continuation.
+"""
+
+import argparse
+import os
+import random
+import sys
+
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+
+def load_prompts(path):
+    prompts = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                prompts.append(line)
+    return prompts
+
+
+def set_random_seed(seed=42):
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def baseline_generate(
+    model, tokenizer, prompt, max_length=50, temperature=1.0, top_p=0.95
+):
+    """Generate text using the model's normal sampling."""
+    inputs = tokenizer(prompt, return_tensors="pt")
+    input_ids = inputs.input_ids.to(model.device)
+    output_ids = model.generate(
+        input_ids,
+        max_new_tokens=max_length,
+        temperature=temperature,
+        top_p=top_p,
+        do_sample=True,
+        pad_token_id=tokenizer.eos_token_id or tokenizer.pad_token_id,
+    )
+    # Trim the prompt from the output
+    return tokenizer.decode(output_ids[0][input_ids.shape[-1] :], skip_special_tokens=True)
+
+
+def cfg_generate(
+    model,
+    tokenizer,
+    prompt,
+    gamma=1.0,
+    max_length=50,
+    temperature=1.0,
+    top_p=0.95,
+):
+    """Generate text using Classifier‑Free Guidance."""
+    device = model.device
+    # Tokenize prompt once
+    prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+    generated_ids = []
+
+    for step in range(max_length):
+        # Conditional (prompt + generated so far)
+        input_cond = torch.tensor([prompt_ids + generated_ids], device=device)
+        logits_cond = model(input_cond)[0][:, -1, :].squeeze(0)
+
+        # Unconditional (generated so far only)
+        if generated_ids:
+            input_uncond = torch.tensor([generated_ids], device=device)
+            logits_uncond = model(input_uncond)[0][:, -1, :].squeeze(0)
+        else:
+            # First step: use the same logits as conditional
+            logits_uncond = logits_cond
+
+        # Apply CFG adjustment: logit_hat = logit_cond + gamma * (logit_cond - logit_uncond)
+        logits_hat = logits_cond + gamma * (logits_cond - logits_uncond)
+
+        # Convert to probabilities
+        probs = torch.softmax(logits_hat, dim=-1)
+
+        # Optional temperature scaling
+        if temperature != 1.0:
+            probs = probs ** (1.0 / temperature)
+            probs = probs / probs.sum()
+
+        # Optional nucleus (top‑p) sampling
+        if top_p < 1.0:
+            sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+            cum_probs = torch.cumsum(sorted_probs, dim=-1)
+            mask = cum_probs > top_p
+            if mask.any():
+                mask[0, 0] = False  # keep at least one token
+                sorted_probs[mask] = 0.0
+                probs = sorted_probs / sorted_probs.sum()
+                sorted_indices = sorted_indices[mask]
+                probs = probs[mask]
+            else:
+                sorted_indices = sorted_indices
+
+            # Sample from the filtered distribution
+            next_id = torch.multinomial(probs, num_samples=1).item()
+            next_id = sorted_indices[next_id]
+        else:
+            # Sample from the full distribution
+            next_id = torch.multinomial(probs, num_samples=1).item()
+
+        generated_ids.append(next_id)
+
+        # Stop if EOS token is produced
+        if next_id == tokenizer.eos_token_id:
+            break
+
+    return tokenizer.decode(generated_ids, skip_special_tokens=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="CFG Demo")
+    parser.add_argument("--model", type=str, required=True, help="HuggingFace model id")
+    parser.add_argument(
+        "--prompt-file",
+        type=str,
+        required=True,
+        help="Path to a text file containing one prompt per line",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        required=True,
+        help="Path to output file (each line: prompt<TAB>generation)",
+    )
+    parser.add_argument(
+        "--gamma",
+        type=float,
+        default=1.0,
+        help="CFG guidance weight (γ). 1.0 = baseline, >1.0 increases prompt adherence",
+    )
+    parser.add_argument(
+        "--max-length",
+        type=int,
+        default=50,
+        help="Maximum number of tokens to generate",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="Sampling temperature",
+    )
+    parser.add_argument(
+        "--top-p",
+        type=float,
+        default=0.95,
+        help="Nucleus sampling threshold",
+    )
+
+    args = parser.parse_args()
+
+    set_random_seed(42)
+
+    print(f"Loading model {args.model} ...")
+    tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
+    model = AutoModelForCausalLM.from_pretrained(args.model)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    model.eval()
+
+    prompts = load_prompts(args.prompt_file)
+
+    with open(args.output, "w", encoding="utf-8") as out_f:
+        for prompt in prompts:
+            if args.gamma == 1.0:
+                # Baseline generation
+                gen = baseline_generate(
+                    model,
+                    tokenizer,
+                    prompt,
+                    max_length=args.max_length,
+                    temperature=args.temperature,
+                    top_p=args.top_p,
+                )
+            else:
+                # CFG generation
+                gen = cfg_generate(
+                    model,
+                    tokenizer,
+                    prompt,
+                    gamma=args.gamma,
+                    max_length=args.max_length,
+                    temperature=args.temperature,
+                    top_p=args.top_p,
+                )
+            out_f.write(f"{prompt}\t{gen}\n")
+
+    print(f"Results written to {args.output}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+**FILE: prompts.txt**  
+```text
+What is the capital of France?
+Once upon a time, in a land far away,
+2+2 = ?
+The quick brown fox jumps over the lazy dog.
+Explain why the sky is blue.
+```
+
+---
+
+**Explanation of the reproduction**
+
+1. **Baseline generation** – The script runs the GPT‑2 model with standard greedy sampling
+   (`temperature=1.0`, `top_p=0.95`).  
+2. **CFG generation** – The same model is used, but the logits are re‑weighted
+   according to the CFG formula with a guidance weight `γ=1.5`.  
+3. The generated continuations are written to `baseline.txt` and `cfg.txt`.
+4. The short set of prompts demonstrates that the CFG
+   version tends to stay closer to the prompt and produce more coherent
+   follow‑ups, which is the central claim of the paper.
+
+Feel free to experiment with other models (e.g., `gpt2-medium`, `gpt2-large`)
+or different `γ` values by editing `reproduce.sh` or the command line arguments.

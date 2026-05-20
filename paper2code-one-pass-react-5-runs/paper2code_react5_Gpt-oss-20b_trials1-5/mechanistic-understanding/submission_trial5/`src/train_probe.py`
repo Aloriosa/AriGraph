@@ -1,0 +1,73 @@
+#!/usr/bin/env python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from datasets import load_dataset
+from transformers import AutoTokenizer, AutoModel
+import os
+import json
+from src.utils import set_seed, load_gpt2_model, tokenize_batch, save_json
+
+set_seed(42)
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# 1. Load Jigsaw toxic comment dataset (tiny subset)
+dataset = load_dataset("jigsaw-toxic-comment-severity", split="train[:5%]")  # ~30k examples
+
+# Use the 'toxic_comment' field and 'toxic' label
+def preprocess(example):
+    return {"text": example["comment_text"], "label": example["toxic"]}
+
+dataset = dataset.map(preprocess, remove_columns=dataset.column_names)
+dataset = dataset.filter(lambda x: x["text"] is not None and len(x["text"].strip()) > 0)
+
+# 2. Tokenizer and model
+tokenizer, gpt2 = load_gpt2_model(DEVICE)
+max_len = 128
+
+# 3. Define probe: linear layer on last hidden state
+hidden_dim = gpt2.config.hidden_size
+probe = nn.Linear(hidden_dim, 1).to(DEVICE)
+
+criterion = nn.BCEWithLogitsLoss()
+optimizer = optim.AdamW(probe.parameters(), lr=5e-5)
+
+# 4. DataLoader
+def collate_fn(batch):
+    texts = [b["text"] for b in batch]
+    labels = torch.tensor([b["label"] for b in batch], dtype=torch.float).unsqueeze(1).to(DEVICE)
+    enc = tokenizer(texts, truncation=True, padding=True, max_length=max_len, return_tensors="pt")
+    return {**enc, "labels": labels}
+
+loader = DataLoader(dataset, batch_size=16, shuffle=True, collate_fn=collate_fn)
+
+# 5. Training loop (2 epochs)
+probe.train()
+for epoch in range(2):
+    pbar = tqdm(loader, desc=f"Epoch {epoch+1}")
+    for batch in pbar:
+        input_ids = batch["input_ids"].to(DEVICE)
+        attention_mask = batch["attention_mask"].to(DEVICE)
+        labels = batch["labels"]
+        with torch.no_grad():
+            outputs = gpt2(input_ids=input_ids, attention_mask=attention_mask,
+                           output_hidden_states=True)
+            # average last hidden state over tokens
+            hidden = outputs.hidden_states[-1]  # (batch, seq, hidden)
+            hidden_mean = hidden.mean(dim=1)   # (batch, hidden)
+        logits = probe(hidden_mean)          # (batch, 1)
+        loss = criterion(logits, labels)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        pbar.set_postfix(loss=loss.item())
+
+# 6. Save probe
+os.makedirs("probe", exist_ok=True)
+torch.save(probe.state_dict(), "probe/probe.pt")
+torch.save(probe.weight.data, "probe/probe_weight.pt")  # save weight vector for later use
+tokenizer.save_pretrained("probe/tokenizer")
+
+print("Linear probe trained and saved to ./probe")

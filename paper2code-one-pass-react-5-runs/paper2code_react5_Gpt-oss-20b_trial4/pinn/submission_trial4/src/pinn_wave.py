@@ -1,0 +1,350 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Minimal PINN implementation for the 1‑D wave equation.
+
+Author: ChatGPT (reproduction agent)
+"""
+
+from __future__ import annotations
+import argparse
+import json
+import os
+import sys
+from dataclasses import dataclass
+from typing import Tuple, List
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+
+# --------------------------------------------------------------------------- #
+# 1.  Hyper‑parameters & constants
+# --------------------------------------------------------------------------- #
+
+# PDE parameters
+BETA = 5.0  # wave speed multiplier in the analytical solution
+
+# Data generation parameters
+RES_POINTS = 10000  # number of residual points
+BC_POINTS = 101     # boundary points per side
+IC_POINTS = 257     # initial condition points
+
+# Grid resolution for evaluation (as in the paper)
+GRID_X = 255
+GRID_T = 100
+
+# Training settings
+ITERATIONS = 41000
+SWITCH_POINTS = [1000, 11000, 31000]  # Adam→LBFGS switch points
+LEARNING_RATES = [1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
+WIDTHS = [50, 100, 200, 400]
+SEEDS = [0, 1, 2, 3, 4]
+
+# If an environment variable is set, run full 41000 iterations, otherwise
+# reduce to 10k for speed in the execution environment.
+RUN_FULL = os.getenv("FULL_ITERATIONS", "0") == "1"
+MAX_ITER = ITERATIONS if RUN_FULL else 10000
+
+# --------------------------------------------------------------------------- #
+# 2.  Utility functions
+# --------------------------------------------------------------------------- #
+
+def set_global_seed(seed: int) -> None:
+    """Set all random seeds for reproducibility."""
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def analytic_solution(x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    """Analytical solution of the 1‑D wave equation."""
+    return (
+        torch.sin(np.pi * x) * torch.cos(2 * np.pi * t)
+        + 0.5 * torch.sin(BETA * np.pi * x) * torch.cos(2 * BETA * np.pi * t)
+    )
+
+
+def initial_condition(x: torch.Tensor) -> torch.Tensor:
+    """Initial condition u(x,0)."""
+    return torch.sin(np.pi * x) + 0.5 * torch.sin(BETA * np.pi * x)
+
+
+def boundary_condition(x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    """Boundary condition u(0,t)=u(1,t)=0."""
+    return torch.zeros_like(x)
+
+
+# --------------------------------------------------------------------------- #
+# 3.  Network definition
+# --------------------------------------------------------------------------- #
+
+class MLP(nn.Module):
+    """3‑layer MLP with tanh activations."""
+
+    def __init__(self, width: int) -> None:
+        super().__init__()
+        self.fc1 = nn.Linear(2, width)
+        self.fc2 = nn.Linear(width, width)
+        self.fc3 = nn.Linear(width, width)
+        self.out = nn.Linear(width, 1)
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_normal_(m.weight)
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (N,2) where columns are (x,t)
+        h = torch.tanh(self.fc1(x))
+        h = torch.tanh(self.fc2(h))
+        h = torch.tanh(self.fc3(h))
+        return self.out(h).squeeze(-1)  # (N,)
+
+
+# --------------------------------------------------------------------------- #
+# 4.  PDE residual & loss
+# --------------------------------------------------------------------------- #
+
+def compute_residual(u: nn.Module, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    """
+    Compute PDE residual u_tt - 4 u_xx.
+    x, t: (N,) tensors with requires_grad=True
+    """
+    # Ensure gradients are tracked
+    x = x.detach().requires_grad_(True)
+    t = t.detach().requires_grad_(True)
+
+    # Forward pass
+    xt = torch.stack([x, t], dim=1)  # (N,2)
+    u_val = u(xt)  # (N,)
+
+    # First derivatives
+    u_x = torch.autograd.grad(u_val, x, grad_outputs=torch.ones_like(u_val),
+                              create_graph=True, retain_graph=True)[0]
+    u_t = torch.autograd.grad(u_val, t, grad_outputs=torch.ones_like(u_val),
+                              create_graph=True, retain_graph=True)[0]
+
+    # Second derivatives
+    u_xx = torch.autograd.grad(u_x, x, grad_outputs=torch.ones_like(u_x),
+                               create_graph=True, retain_graph=True)[0]
+    u_tt = torch.autograd.grad(u_t, t, grad_outputs=torch.ones_like(u_t),
+                               create_graph=True, retain_graph=True)[0]
+
+    return u_tt - 4 * u_xx  # (N,)
+
+
+def compute_boundary_loss(u: nn.Module, xb: torch.Tensor, tb: torch.Tensor) -> torch.Tensor:
+    """Boundary loss: enforce u(0,t)=u(1,t)=0."""
+    xt = torch.stack([xb, tb], dim=1)
+    return torch.mean(u(xt) ** 2)
+
+
+def compute_initial_loss(u: nn.Module, xi: torch.Tensor) -> torch.Tensor:
+    """Initial condition loss: enforce u(x,0)=given."""
+    xt = torch.stack([xi, torch.zeros_like(xi)], dim=1)
+    return torch.mean((u(xt) - initial_condition(xi)) ** 2)
+
+
+def total_loss(u: nn.Module,
+               x_res: torch.Tensor,
+               t_res: torch.Tensor,
+               xb: torch.Tensor,
+               tb: torch.Tensor,
+               xi: torch.Tensor) -> torch.Tensor:
+    """Full PINN loss."""
+    res = compute_residual(u, x_res, t_res)
+    loss_res = torch.mean(res ** 2)
+    loss_bc = compute_boundary_loss(u, xb, tb)
+    loss_ic = compute_initial_loss(u, xi)
+    return 0.5 * (loss_res + loss_bc + loss_ic)
+
+
+# --------------------------------------------------------------------------- #
+# 5.  Data generation
+# --------------------------------------------------------------------------- #
+
+def generate_data(device: torch.device) -> Tuple[torch.Tensor, ...]:
+    """Generate residual, boundary, and initial points."""
+    # Residual points: sample uniformly from the interior grid
+    xs = torch.linspace(0, 1, GRID_X, device=device)
+    ts = torch.linspace(0, 1, GRID_T, device=device)
+    X, T = torch.meshgrid(xs, ts, indexing="ij")
+    X_flat = X.reshape(-1)
+    T_flat = T.reshape(-1)
+    # Randomly sample RES_POINTS points
+    idx = torch.randperm(X_flat.numel(), device=device)[:RES_POINTS]
+    x_res = X_flat[idx]
+    t_res = T_flat[idx]
+
+    # Boundary points: x=0 and x=1, t equally spaced
+    tb = torch.linspace(0, 1, BC_POINTS, device=device)
+    xb0 = torch.zeros_like(tb)
+    xb1 = torch.ones_like(tb)
+    xb = torch.cat([xb0, xb1])
+    tb = torch.cat([tb, tb])
+
+    # Initial condition points: t=0, x equally spaced
+    xi = torch.linspace(0, 1, IC_POINTS, device=device)
+
+    return x_res, t_res, xb, tb, xi
+
+
+# --------------------------------------------------------------------------- #
+# 6.  L2 relative error computation
+# --------------------------------------------------------------------------- #
+
+def l2_error(u: nn.Module,
+             x_grid: torch.Tensor,
+             t_grid: torch.Tensor,
+             xb: torch.Tensor,
+             tb: torch.Tensor,
+             xi: torch.Tensor) -> float:
+    """Compute L2 relative error over all evaluation points."""
+    with torch.no_grad():
+        # Interior grid
+        xt_interior = torch.stack([x_grid, t_grid], dim=1)
+        u_pred = u(xt_interior).reshape(x_grid.shape)
+        u_true = analytic_solution(x_grid, t_grid)
+        err_interior = torch.mean((u_pred - u_true) ** 2)
+
+        # Boundary points
+        xt_bc = torch.stack([xb, tb], dim=1)
+        u_pred_bc = u(xt_bc)
+        u_true_bc = boundary_condition(xb, tb)
+        err_bc = torch.mean((u_pred_bc - u_true_bc) ** 2)
+
+        # Initial condition
+        xt_ic = torch.stack([xi, torch.zeros_like(xi)], dim=1)
+        u_pred_ic = u(xt_ic)
+        u_true_ic = initial_condition(xi)
+        err_ic = torch.mean((u_pred_ic - u_true_ic) ** 2)
+
+        # Combine
+        err_total = torch.mean(torch.cat([err_interior, err_bc, err_ic]))
+        err_true = torch.mean(torch.cat([u_true, u_true_bc, u_true_ic]) ** 2)
+        return torch.sqrt(err_total / err_true).item()
+
+
+# --------------------------------------------------------------------------- #
+# 7.  Training routine
+# --------------------------------------------------------------------------- #
+
+def train_single(width: int,
+                 seed: int,
+                 switch_point: int,
+                 lr: float,
+                 device: torch.device) -> Tuple[float, float]:
+    """
+    Train a PINN for the wave PDE with specified width, seed and switch point.
+    Returns final loss and L2 relative error.
+    """
+    set_global_seed(seed)
+    # Create model
+    model = MLP(width).to(device)
+
+    # Data
+    x_res, t_res, xb, tb, xi = generate_data(device)
+
+    # Optimizers
+    optimizer_adam = optim.Adam(model.parameters(), lr=lr)
+    # LBFGS requires closure
+    optimizer_lbfgs = optim.LBFGS(model.parameters(),
+                                  lr=1.0,
+                                  max_iter=20,
+                                  max_eval=20,
+                                  history_size=100,
+                                  line_search_fn="strong_wolfe")
+
+    # Training loop
+    for iter in range(MAX_ITER):
+        # Switch to LBFGS after the specified point
+        if iter == switch_point:
+            # Switch optimizer
+            pass  # handled below
+
+        # Define closure for LBFGS
+        def closure():
+            optimizer_lbfgs.zero_grad()
+            loss = total_loss(model, x_res, t_res, xb, tb, xi)
+            loss.backward()
+            return loss
+
+        if iter < switch_point:
+            optimizer_adam.zero_grad()
+            loss = total_loss(model, x_res, t_res, xb, tb, xi)
+            loss.backward()
+            optimizer_adam.step()
+        else:
+            optimizer_lbfgs.step(closure)
+
+        # Optional: print progress every 5000 iterations
+        if (iter + 1) % 5000 == 0 or iter == MAX_ITER - 1:
+            with torch.no_grad():
+                cur_loss = total_loss(model, x_res, t_res, xb, tb, xi).item()
+            print(f"[width={width} | seed={seed} | iter={iter+1}] loss={cur_loss:.6e}")
+
+    # Final metrics
+    final_loss = total_loss(model, x_res, t_res, xb, tb, xi).item()
+
+    # Evaluation grid
+    xs = torch.linspace(0, 1, GRID_X, device=device)
+    ts = torch.linspace(0, 1, GRID_T, device=device)
+    X_grid, T_grid = torch.meshgrid(xs, ts, indexing="ij")
+
+    l2_err = l2_error(model, X_grid, T_grid, xb, tb, xi)
+
+    return final_loss, l2_err
+
+
+# --------------------------------------------------------------------------- #
+# 8.  Main routine
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class Result:
+    width: int
+    seed: int
+    lr: float
+    switch: int
+    final_loss: float
+    l2_re: float
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="PINN Wave Equation Training")
+    parser.add_argument("--output", type=str, default="results.csv",
+                        help="CSV file to write results")
+    args = parser.parse_args()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    results: List[Result] = []
+
+    # For each width, seed, lr, and switch point
+    for width in WIDTHS:
+        for seed in SEEDS:
+            for lr in LEARNING_RATES:
+                for switch in SWITCH_POINTS:
+                    print(f"=== Training width={width} seed={seed} lr={lr} switch={switch} ===")
+                    final_loss, l2_err = train_single(width, seed, switch, lr, device)
+                    results.append(Result(width, seed, lr, switch, final_loss, l2_err))
+
+    # Write CSV
+    os.makedirs(os.path.dirname(args.output), exist_ok=True)
+    with open(args.output, "w") as f:
+        f.write("width,seed,learning_rate,adam_to_lbfgs_switch,final_loss,l2_relative_error\n")
+        for r in results:
+            f.write(f"{r.width},{r.seed},{r.lr},{r.switch},{r.final_loss:.6e},{r.l2_re:.6e}\n")
+
+    print(f"Results written to {args.output}")
+
+
+if __name__ == "__main__":
+    main()

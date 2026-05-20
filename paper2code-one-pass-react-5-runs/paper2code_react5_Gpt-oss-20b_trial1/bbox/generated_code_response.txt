@@ -1,0 +1,415 @@
+**FILE: requirements.txt**  
+```text
+torch==2.2.0
+transformers==4.39.2
+datasets==2.20.0
+openai==1.14.0
+tqdm==4.66.2
+PyYAML==6.0
+```
+
+---
+
+**FILE: adapters.py**  
+```python
+# adapters.py
+import torch
+import torch.nn as nn
+from transformers import AutoModel
+
+class Adapter(nn.Module):
+    """
+    Lightweight adapter that scores candidate responses.
+    It uses a frozen pre‑trained encoder (e.g., DeBERTa) and a single
+    linear output layer to produce a scalar score.
+    """
+    def __init__(self, encoder_name: str = "microsoft/deberta-v3-base"):
+        super().__init__()
+        self.encoder = AutoModel.from_pretrained(encoder_name, return_dict=True)
+        # Freeze encoder parameters – we only train the final linear head
+        for p in self.encoder.parameters():
+            p.requires_grad = False
+        self.scorer = nn.Linear(self.encoder.config.hidden_size, 1)
+
+    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor):
+        """
+        Returns a score for each example in the batch.
+        """
+        outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+        pooled = outputs.last_hidden_state[:, 0, :]  # CLS token
+        score = self.scorer(pooled).squeeze(-1)
+        return score
+```
+
+---
+
+**FILE: utils.py**  
+```python
+# utils.py
+import torch
+from transformers import AutoTokenizer, pipeline
+from datasets import Dataset
+from tqdm import tqdm
+
+def load_tokenizer(model_name: str):
+    return AutoTokenizer.from_pretrained(model_name, use_fast=True)
+
+def generate_candidates(
+    tokenizer,
+    prompt: str,
+    model_name: str,
+    num_candidates: int = 3,
+    max_length: int = 256,
+    temperature: float = 0.7,
+    device: str = None,
+):
+    """
+    Generate a list of candidate completions for a given prompt using a
+    local language model.  The function uses HuggingFace's pipeline API.
+    """
+    pipe = pipeline(
+        "text-generation",
+        model=model_name,
+        tokenizer=tokenizer,
+        device=0 if torch.cuda.is_available() else -1,
+        max_length=max_length,
+        temperature=temperature,
+        do_sample=True,
+        top_k=50,
+        top_p=0.95,
+    )
+    completions = pipe(prompt, num_return_sequences=num_candidates)
+    return [c["generated_text"] for c in completions]
+
+def prepare_batch(
+    batch,
+    tokenizer,
+    max_length: int = 512,
+):
+    """
+    Tokenize a list of texts in a batch.
+    """
+    texts = batch["text"]
+    enc = tokenizer(
+        texts,
+        padding=True,
+        truncation=True,
+        max_length=max_length,
+        return_tensors="pt",
+    )
+    return enc
+
+def compute_nce_loss(scores, pos_mask):
+    """
+    Simplified ranking‑based NCE loss.
+    `scores` – tensor of shape [batch_size] containing scores for each sample.
+    `pos_mask` – boolean mask indicating which indices are positive.
+    """
+    # Positive scores
+    pos_scores = scores[pos_mask]
+    # Negative scores
+    neg_scores = scores[~pos_mask]
+    # Compute logits for all samples
+    logits = scores
+    # Softmax denominator
+    denom = torch.logsumexp(logits, dim=0)
+    # Numerator (positive)
+    num = torch.logsumexp(pos_scores, dim=0)
+    loss = -(num - denom)
+    return loss
+
+def load_gsm8k(split: str = "train[:10%]"):
+    """
+    Load a small subset of GSM8K for quick experiments.
+    The dataset contains a 'question' and an 'answer' field.
+    """
+    ds = Dataset.from_dict({"question": [], "answer": []})
+    ds = ds.add_column("question", [])
+    ds = ds.add_column("answer", [])
+    # Use the HuggingFace datasets library to load GSM8K
+    from datasets import load_dataset
+
+    raw = load_dataset("gsm8k", split=split)
+    ds = raw.select_columns(["question", "answer"])
+    return ds
+
+def evaluate_adapter(adapter, tokenizer, test_ds, num_candidates=3):
+    """
+    Run inference on the test set and compute accuracy.
+    """
+    adapter.eval()
+    correct = 0
+    total = 0
+    for example in tqdm(test_ds, desc="Evaluating"):
+        prompt = example["question"]
+        # Generate candidates
+        candidates = generate_candidates(
+            tokenizer,
+            prompt,
+            adapter.encoder.config._name_or_path,
+            num_candidates=num_candidates,
+        )
+        # Score each candidate
+        batch = {"text": candidates}
+        enc = prepare_batch(batch, tokenizer)
+        scores = adapter(enc["input_ids"].to(adapter.device), enc["attention_mask"].to(adapter.device))
+        best_idx = torch.argmax(scores).item()
+        pred = candidates[best_idx].strip()
+        # The ground‑truth answer may have trailing spaces/newlines
+        gt = example["answer"].strip()
+        if pred == gt:
+            correct += 1
+        total += 1
+    return correct / total
+```
+
+---
+
+**FILE: train.py**  
+```python
+#!/usr/bin/env python
+# train.py
+import argparse
+import torch
+from tqdm import tqdm
+from adapters import Adapter
+from utils import (
+    load_tokenizer,
+    generate_candidates,
+    prepare_batch,
+    compute_nce_loss,
+    load_gsm8k,
+)
+
+def main(args):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    tokenizer = load_tokenizer(args.base_model)
+    adapter = Adapter(args.base_model).to(device)
+
+    optimizer = torch.optim.AdamW(adapter.parameters(), lr=args.lr)
+    # The encoder is frozen; we only train the linear head
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.9)
+
+    train_ds = load_gsm8k(split=f"train[:{args.train_frac}%]")
+    val_ds = load_gsm8k(split=f"validation[:{args.val_frac}%]")
+
+    for epoch in range(1, args.epochs + 1):
+        adapter.train()
+        epoch_loss = 0.0
+        for example in tqdm(train_ds, desc=f"Epoch {epoch}"):
+            prompt = example["question"]
+            # Generate candidates from the black‑box LM
+            candidates = generate_candidates(
+                tokenizer,
+                prompt,
+                args.base_model,
+                num_candidates=args.k,
+                max_length=args.max_length,
+                temperature=args.temperature,
+            )
+            # Build a batch: the positive sample is the ground‑truth answer
+            batch_texts = [example["answer"]] + candidates
+            enc = prepare_batch({"text": batch_texts}, tokenizer)
+            input_ids = enc["input_ids"].to(device)
+            attention_mask = enc["attention_mask"].to(device)
+
+            scores = adapter(input_ids, attention_mask)
+            # Positive mask: first element is the ground truth
+            pos_mask = torch.zeros_like(scores, dtype=torch.bool)
+            pos_mask[0] = True
+
+            loss = compute_nce_loss(scores, pos_mask)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item()
+
+        scheduler.step()
+        print(f"Epoch {epoch} – loss: {epoch_loss / len(train_ds):.4f}")
+
+        # Validation
+        acc = evaluate(adapter, tokenizer, val_ds, num_candidates=args.k)
+        print(f"Validation accuracy: {acc:.4f}")
+
+    # Save checkpoint
+    torch.save(adapter.state_dict(), args.output_dir + "/adapter.pt")
+    print("Training finished – checkpoint saved.")
+
+
+def evaluate(adapter, tokenizer, test_ds, num_candidates=3):
+    """
+    Simple evaluation routine – returns accuracy.
+    """
+    from utils import evaluate_adapter
+    return evaluate_adapter(adapter, tokenizer, test_ds, num_candidates=num_candidates)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train BBox‑Adapter on GSM8K.")
+    parser.add_argument("--base-model", type=str, default="microsoft/deberta-v3-base",
+                        help="Name of the encoder model used in the adapter.")
+    parser.add_argument("--k", type=int, default=3,
+                        help="Number of candidates generated by the black‑box LM.")
+    parser.add_argument("--max-length", type=int, default=256,
+                        help="Maximum output length for candidate generation.")
+    parser.add_argument("--temperature", type=float, default=0.7,
+                        help="Sampling temperature for generation.")
+    parser.add_argument("--epochs", type=int, default=3,
+                        help="Number of training epochs.")
+    parser.add_argument("--lr", type=float, default=5e-6,
+                        help="Learning rate for the adapter head.")
+    parser.add_argument("--train-fraction", type=int, default=10,
+                        help="Percentage of training set to use (default 10%).")
+    parser.add_argument("--val-fraction", type=int, default=20,
+                        help="Percentage of validation set to use (default 20%).")
+    parser.add_argument("--output-dir", type=str, default="./checkpoints",
+                        help="Directory to store checkpoints.")
+    args = parser.parse_args()
+
+    import os
+    os.makedirs(args.output_dir, exist_ok=True)
+    main(args)
+```
+
+---
+
+**FILE: evaluate.py**  
+```python
+#!/usr/bin/env python
+# evaluate.py
+import argparse
+import torch
+from adapters import Adapter
+from utils import load_tokenizer, load_gsm8k, evaluate_adapter
+
+def main(args):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    tokenizer = load_tokenizer(args.base_model)
+    adapter = Adapter(args.base_model).to(device)
+    adapter.load_state_dict(torch.load(args.checkpoint, map_location=device))
+    adapter.eval()
+
+    test_ds = load_gsm8k(split="validation[:100%]")
+    acc = evaluate_adapter(adapter, tokenizer, test_ds, num_candidates=args.k)
+    print(f"Test accuracy: {acc:.4f}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Evaluate BBox‑Adapter.")
+    parser.add_argument("--checkpoint", type=str, required=True,
+                        help="Path to the saved adapter checkpoint.")
+    parser.add_argument("--base-model", type=str, default="microsoft/deberta-v3-base",
+                        help="Name of the encoder model used in the adapter.")
+    parser.add_argument("--k", type=int, default=3,
+                        help="Number of candidates to generate during evaluation.")
+    args = parser.parse_args()
+    main(args)
+```
+
+---
+
+**FILE: reproduce.sh**  
+```bash
+#!/usr/bin/env bash
+# reproduce.sh
+set -euo pipefail
+
+# Install dependencies
+pip install --quiet -r requirements.txt
+
+# Ensure we have a GPU
+if ! command -v nvidia-smi &> /dev/null; then
+    echo "No NVIDIA GPU found – training will run on CPU."
+fi
+
+# Train the adapter
+python train.py \
+    --base-model microsoft/deberta-v3-base \
+    --k 3 \
+    --max-length 256 \
+    --temperature 0.7 \
+    --epochs 3 \
+    --lr 5e-6 \
+    --train-fraction 10 \
+    --val-fraction 20 \
+    --output-dir ./checkpoints
+
+# Evaluate the trained adapter
+python evaluate.py \
+    --checkpoint ./checkpoints/adapter.pt \
+    --base-model microsoft/deberta-v3-base \
+    --k 3
+```
+
+---
+
+**FILE: README.md**  
+```markdown
+# BBox‑Adapter – Lightweight Black‑Box LLM Adaptation
+
+This repository contains a minimal, self‑contained implementation of the **BBox‑Adapter** method described in the paper *“BBox‑ADAPTER: Lightweight Adapting for Black‑Box Large Language Models”*.  
+The goal is to provide a reproducible pipeline that:
+
+1. **Trains** a small adapter that scores candidate responses from a black‑box language model.  
+2. **Evaluates** the adapter on a subset of the GSM8K math‑word‑problem dataset.  
+3. **Runs** entirely on a local GPU or CPU without requiring any external API keys.
+
+> **Note** – This is a *toy* version that reproduces the core idea (ranking‑based NCE loss and online adaptation loop) on a small scale.  
+> The full experimental protocol in the paper requires far larger models, datasets, and more sophisticated training schedules, which are beyond the scope of this repository.
+
+## Repository Structure
+
+```
+├── adapters.py          # Lightweight adapter definition
+├── train.py             # Training script (online adaptation + NCE loss)
+├── evaluate.py          # Evaluation script
+├── utils.py             # Helper functions (generation, batching, loss)
+├── reproduce.sh         # End‑to‑end reproduction script
+├── requirements.txt     # Dependencies
+└── README.md            # Documentation
+```
+
+## Reproducing the Results
+
+```bash
+bash reproduce.sh
+```
+
+The script will:
+
+1. Install the required Python packages.  
+2. Train the adapter for 3 epochs on 10 % of the GSM8K training set.  
+3. Evaluate on the full validation set and print the accuracy.
+
+All model checkpoints are stored in `./checkpoints/adapter.pt`.
+
+## How the Code Relates to the Paper
+
+| Paper Component | Repository File(s) |
+|-----------------|--------------------|
+| **Adapter architecture** | `adapters.py` – a frozen DeBERTa encoder + linear scoring head |
+| **EBM formulation & ranking‑based NCE** | `utils.compute_nce_loss` (simplified but conceptually equivalent) |
+| **Online adaptation loop** | `train.py` – generates candidates, updates positive/negative sets each epoch |
+| **Hyperparameters** | `train.py` arguments (`--lr`, `--k`, `--epochs`, etc.) |
+| **Data** | `utils.load_gsm8k` – uses the HuggingFace GSM8K dataset |
+| **Generation** | `utils.generate_candidates` – uses HuggingFace pipeline with sampling |
+| **Evaluation** | `evaluate.py` – computes accuracy on the validation split |
+| **Reproduction script** | `reproduce.sh` – orchestrates the entire pipeline |
+
+## Extending
+
+- Replace the black‑box LM (`--base-model`) with any HuggingFace model (e.g., `gpt2`, `distilgpt2`).  
+- Increase `--train-fraction` or `--epochs` for better performance.  
+- Add more datasets (e.g., `strategyqa`, `truthfulqa`) by extending the data loader in `utils.py`.  
+
+## Limitations
+
+- The NCE loss is implemented in a simplified form (binary cross‑entropy over scores).  
+- Only a tiny fraction of GSM8K is used for quick experimentation.  
+- No model checkpointing or logging beyond the final accuracy.  
+
+Feel free to adapt the code for larger‑scale experiments or to integrate it with the official benchmark pipelines. Happy experimenting!

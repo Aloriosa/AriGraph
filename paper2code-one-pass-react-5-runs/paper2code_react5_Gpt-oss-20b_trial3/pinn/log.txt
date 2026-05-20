@@ -1,0 +1,84 @@
+2026-03-14 12:22:12.778221 ======================================================================
+2026-03-14 12:22:12.778341 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 12:22:12.778383 ======================================================================
+2026-03-14 12:22:12.778414 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/pinn/paper.md
+2026-03-14 12:22:12.778442 Log path: paper2code_react5_Gpt-oss-20b_trial3/pinn
+2026-03-14 12:22:12.778469 Model: Openai/Gpt-oss-20b
+2026-03-14 12:22:12.778496 Max iterations: 5
+2026-03-14 12:22:12.778539 Run reproduce.sh: False
+2026-03-14 12:22:12.778571 Run LLM paper check: True
+2026-03-14 12:22:12.778599 
+2026-03-14 12:22:12.778625 Loading paper...
+2026-03-14 12:22:12.779021 Paper length: 124168 chars (using 124168 for prompt)
+2026-03-14 12:22:12.779071 
+2026-03-14 12:22:12.798197 --- Iteration 0: Initial generation ---
+2026-03-14 12:23:30.582074   Created: generated_reproduction.txt
+2026-03-14 12:23:30.582170 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial3/pinn/submission (1 files)
+2026-03-14 12:23:30.582208 
+2026-03-14 12:23:30.582241 --- Iteration 1: Observe & Refine ---
+2026-03-14 12:23:37.054588 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / incomplete items (based on the paper’s requirements)**  
+
+- **MLP architecture** – 3 hidden layers with tanh activations and widths 50, 100, 200, 400.  
+- **Weight initialization** – Xavier normal initialization; biases set to zero.  
+- **Residual point sampling** – 10 000 points uniformly from a 255 × 100 interior grid.  
+- **Boundary / initial point sampling** – 257 equally spaced points for initial conditions and 101 for each boundary.  
+- **Loss definition** – Least‑squares PDE residual plus boundary/initial terms as in Eq. (2).  
+- **Optimizer hyper‑parameters** –  
+  - Adam: learning‑rate grid \{1e‑5, 1e‑4, 1e‑3, 1e‑2, 1e‑1\}.  
+  - L‑BFGS: learning‑rate = 1.0, memory = 100, strong Wolfe line search.  
+  - Adam+L‑BFGS: Adam learning‑rate as above, switch to L‑BFGS after 1 k, 11 k, or 31 k iterations.  
+- **Training schedule** – 41 000 total iterations for each run.  
+- **Random seeds** – 5 independent seeds per PDE/optimizer/architecture combination.  
+- **Evaluation metric** – L2 relative error (L2RE) computed over the full 255 × 100 interior grid plus boundary/initial points.  
+- **Hardware / environment** – Single NVIDIA Titan V GPU, CUDA 11.8, PyTorch 2.0.0, Python 3.10.12.  
+- **Reproducibility script** – `reproduce.sh` (or equivalent) that runs all experiments and outputs the figures/tables from the paper.  
+
+**Status**  
+All of the above items are **MISSING** from the provided code snippet. No evidence of the required architecture, sampling, loss, optimizer settings, training loop, evaluation, or reproducibility script is present.  
+
+**Recommendation**  
+Implement the missing components in the repository, ensuring that the hyper‑parameters and experimental protocol match those described in the paper. Once added, re‑run the experiments to verify that the results align with the figures and tables in the publication.
+2026-03-14 12:23:37.054796 
+2026-03-14 12:23:37.055058 Generating refined code...
+2026-03-14 12:24:40.258822   Updated: generated_reproduction.txt
+2026-03-14 12:24:40.258908 
+2026-03-14 12:24:40.258946 --- Iteration 2: Observe & Refine ---
+2026-03-14 12:24:49.922899 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING / INCOMPLETE IMPLEMENTATION ITEMS**
+
+| # | Requirement from paper | Status in provided code | Action needed |
+|---|------------------------|------------------------|---------------|
+| 1 | **PINN model definition** – MLP with 3 hidden layers, tanh activations, widths 50/100/200/400, Xavier normal init, zero biases | Not present in the snippet | Add a `PINN` class that builds the MLP with the specified architecture and initialization. |
+| 2 | **Differential operator implementation** for the three PDEs (convection, wave, reaction ODE) | Not shown | Implement the operators `D[u, x]` and `B[u, x]` for each PDE, using autograd to compute derivatives. |
+| 3 | **Sampling of residual and boundary points** – 10 000 interior points from a 255×100 grid, 257 init points, 101 each boundary | Not shown | Write a data‑generation routine that creates these point sets and stores them as tensors. |
+| 4 | **Loss function** – least‑squares residual + boundary terms, with correct weighting (1/(2*n_res) etc.) | Not shown | Implement the loss as described in Eq. (2). |
+| 5 | **Optimizer configuration** – Adam (grid search over 1e‑5…1e‑1), L‑BFGS (lr = 1.0, memory = 100, strong Wolfe), Adam+L‑BFGS (switch at 1k/11k/31k) | Not shown | Code the training loop that switches from Adam to L‑BFGS at the specified iteration counts. |
+| 6 | **Training schedule** – total 41 000 iterations, with correct handling of L‑BFGS line search and convergence criteria | Not shown | Ensure the loop runs exactly 41 000 steps and that L‑BFGS is invoked only after the switch point. |
+| 7 | **Evaluation metric** – L2 relative error over the full 255×100 grid plus boundary/initial points | Not shown | Compute L2RE as defined in the paper and log it per epoch/iteration. |
+| 8 | **Random seed handling** – 5 random seeds per experiment, reproducible results | Not shown | Set `torch.manual_seed(seed)` and `np.random.seed(seed)` for each run. |
+| 9 | **Hardware specification** – GPU Titan V, CUDA 11.8, PyTorch 2.0.0 | Not enforced | Add a check for CUDA availability and document GPU requirement. |
+|10 | **Reproduce.sh** – script that runs all experiments, collects results, and reproduces the figures/tables | Only a header comment is present | Write a shell script that iterates over PDEs, architectures, optimizers, seeds, and saves outputs. |
+|11 | **Logging / checkpointing** – store training curves, final weights, and L2RE values | Not shown | Implement a logger (e.g., TensorBoard or CSV) and checkpoint mechanism. |
+|12 | **Hyperparameter grid search** – for Adam learning rates | Not shown | Automate the grid search over the five learning rates. |
+|13 | **Strong Wolfe line search** for L‑BFGS | Not shown | Use `torch.optim.LBFGS` with `line_search_fn='strong_wolfe'` or implement custom line search. |
+|14 | **Memory size 100 for L‑BFGS** | Not shown | Pass `history_size=100` to the optimizer. |
+|15 | **Code for NysNewtonCG (NNCG)** – the novel second‑order optimizer | Not present | Implement NNCG as described in the paper and integrate it after Adam+L‑BFGS. |
+|16 | **Visualization of Hessian spectrum** (Section 5) | Not present | Add code to compute and plot eigenvalues of the Hessian at selected checkpoints. |
+|17 | **Theoretical proofs** (Section 8) | Not required for reproduction | No code needed. |
+|18 | **Documentation / README** – clear instructions, dependencies, and how to run | Not present | Provide a comprehensive README. |
+
+**Summary**
+
+The current code skeleton only contains a header comment; none of the core experimental components (model, PDE operators, data sampling, loss, optimizers, training loop, evaluation, reproducibility, and the new NNCG optimizer) are implemented. All listed items are **MISSING** and must be added to achieve a faithful reproduction of the paper’s experiments.
+2026-03-14 12:24:49.923081 
+2026-03-14 12:24:49.923196 Generating refined code...
+2026-03-14 12:26:14.975441   Updated: generated_reproduction.txt
+2026-03-14 12:26:14.975532 
+2026-03-14 12:26:14.975568 --- Iteration 3: Observe & Refine ---

@@ -1,0 +1,430 @@
+FILE: requirements.txt
+```text
+gymnasium==0.28.1
+torch==2.0.1
+stable-baselines3==2.3.2
+numpy==1.24.4
+tqdm==4.66.0
+```
+
+FILE: src/mask_network.py
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MaskNet(nn.Module):
+    """
+    Simple feed‑forward network that outputs the probability of masking (i.e., 1)
+    for each state.  The output is a single sigmoid value per state.
+    """
+    def __init__(self, state_dim: int, hidden_dim: int = 128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        """
+        Parameters
+        ----------
+        state : torch.Tensor
+            Shape (batch, state_dim)
+
+        Returns
+        -------
+        torch.Tensor
+            Shape (batch, 1) – probability that the step should be masked.
+        """
+        return self.net(state)
+```
+
+FILE: src/rnd.py
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class RNDTarget(nn.Module):
+    """
+    Random Network Distillation target network – fixed, randomly initialized.
+    """
+    def __init__(self, state_dim: int, hidden_dim: int = 128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        return self.net(state)
+
+
+class RNDPredictor(nn.Module):
+    """
+    RND predictor network – learns to match the output of the target network.
+    """
+    def __init__(self, state_dim: int, hidden_dim: int = 128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        return self.net(state)
+```
+
+FILE: src/env_utils.py
+```python
+"""
+Utility functions for manipulating Gymnasium environments.
+"""
+
+def set_env_state(env, state):
+    """
+    Set the internal state of a Gymnasium environment that exposes a `state` attribute.
+    Works for most classic control environments (e.g., CartPole, MountainCar).
+
+    Parameters
+    ----------
+    env : gymnasium.Env
+        The environment instance.
+    state : np.ndarray
+        State array to set.
+    """
+    # unwrap TimeLimit wrapper if present
+    if hasattr(env, "env"):
+        env = env.env
+    if hasattr(env, "state"):
+        env.state = state
+    else:
+        raise RuntimeError("The environment does not expose an internal `state` attribute.")
+```
+
+FILE: src/rice.py
+```python
+import os
+import numpy as np
+import torch
+import torch.optim as optim
+from tqdm import tqdm
+import gymnasium as gym
+from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import DummyVecEnv
+from .mask_network import MaskNet
+from .rnd import RNDTarget, RNDPredictor
+from .env_utils import set_env_state
+
+class RICE:
+    """
+    A minimal implementation of the RICE framework that demonstrates
+    the core ideas:
+        * Pre‑train a PPO policy.
+        * Train a mask network that predicts the importance of each step.
+        * Use Random Network Distillation to provide an exploration bonus.
+        * Refine the policy by resetting the environment to a mixture of
+          default initial states and critical states identified by the mask.
+    The implementation is intentionally lightweight and focuses on
+    reproducibility rather than matching the full experimental protocol.
+    """
+
+    def __init__(
+        self,
+        env_name: str,
+        pretrained_path: str | None = None,
+        lr: float = 3e-4,
+        batch_size: int = 64,
+        gamma: float = 0.99,
+        p: float = 0.25,
+        lam: float = 0.01,
+        alpha: float = 0.0001,
+        device: str = "cpu",
+        seed: int | None = None,
+    ):
+        self.env_name = env_name
+        self.device = torch.device(device)
+        self.p = p
+        self.lam = lam
+        self.alpha = alpha
+
+        # Vectorised environment for Stable‑Baselines3
+        self.env = DummyVecEnv([lambda: gym.make(env_name)])
+        self.env.seed(seed)  # reproducibility
+
+        # Policy – PPO with a small MLP
+        self.policy = PPO(
+            "MlpPolicy",
+            self.env,
+            learning_rate=lr,
+            batch_size=batch_size,
+            gamma=gamma,
+            verbose=0,
+            device=self.device,
+        )
+        if pretrained_path and os.path.exists(pretrained_path):
+            self.policy.load(pretrained_path)
+
+        # Dimensions
+        obs_space = self.env.observation_space
+        act_space = self.env.action_space
+        self.state_dim = obs_space.shape[0]
+        self.action_dim = (
+            act_space.n if isinstance(act_space, gym.spaces.Discrete) else act_space.shape[0]
+        )
+
+        # Mask network
+        self.mask_net = MaskNet(self.state_dim).to(self.device)
+        self.mask_opt = optim.Adam(self.mask_net.parameters(), lr=lr)
+
+        # RND
+        self.rnd_target = RNDTarget(self.state_dim).to(self.device)
+        for p_ in self.rnd_target.parameters():
+            p_.requires_grad = False
+        self.rnd_pred = RNDPredictor(self.state_dim).to(self.device)
+        self.rnd_opt = optim.Adam(self.rnd_pred.parameters(), lr=lr)
+
+    # ------------------------------------------------------------------
+    # Utility: collect a single trajectory
+    # ------------------------------------------------------------------
+    def _sample_trajectory(self, max_steps: int = 200):
+        obs = self.env.reset()
+        traj = []
+        for _ in tqdm(range(max_steps), leave=False):
+            action, _ = self.policy.predict(obs, deterministic=True)
+            next_obs, reward, terminated, truncated, info = self.env.step(action)
+            traj.append((obs[0], action[0], reward[0], next_obs[0]))
+            obs = next_obs
+            if terminated or truncated:
+                break
+        return traj
+
+    # ------------------------------------------------------------------
+    # Train the mask network (simple surrogate objective)
+    # ------------------------------------------------------------------
+    def train_mask(self, epochs: int = 5, samples_per_epoch: int = 500):
+        for epoch in range(epochs):
+            traj = self._sample_trajectory()
+            states = torch.tensor([t[0] for t in traj], dtype=torch.float32).to(self.device)
+            rewards = torch.tensor([t[2] for t in traj], dtype=torch.float32).to(self.device)
+
+            # Mask probabilities
+            mask_probs = self.mask_net(states).squeeze()
+            # Sample binary mask
+            mask_sample = torch.bernoulli(mask_probs).detach()
+
+            # RND bonus
+            next_states = torch.tensor([t[3] for t in traj], dtype=torch.float32).to(self.device)
+            with torch.no_grad():
+                target_feat = self.rnd_target(next_states)
+            pred_feat = self.rnd_pred(next_states)
+            rnd_bonus = ((pred_feat - target_feat) ** 2).mean(dim=1)
+
+            # Objective: maximize (reward + alpha * mask) - lam * rnd_bonus
+            total_reward = rewards + self.alpha * mask_sample
+            loss = -(total_reward.mean() - self.lam * rnd_bonus.mean())
+
+            self.mask_opt.zero_grad()
+            loss.backward()
+            self.mask_opt.step()
+
+    # ------------------------------------------------------------------
+    # Pick a critical state from a trajectory
+    # ------------------------------------------------------------------
+    def _pick_critical_state(self, traj):
+        states = torch.tensor([t[0] for t in traj], dtype=torch.float32).to(self.device)
+        mask_probs = self.mask_net(states).squeeze()
+        idx = mask_probs.argmax().item()
+        return traj[idx][0]
+
+    # ------------------------------------------------------------------
+    # Main refinement loop
+    # ------------------------------------------------------------------
+    def refine(self, iter_steps: int = 200, num_iters: int = 200):
+        for it in tqdm(range(num_iters), desc="RICE refinement"):
+            # Decide whether to reset to a critical state
+            if np.random.rand() < self.p:
+                traj = self._sample_trajectory()
+                crit_state = self._pick_critical_state(traj)
+                try:
+                    set_env_state(self.env.envs[0], crit_state)
+                    self.env.reset()
+                except Exception:
+                    # Fallback to normal reset
+                    self.env.reset()
+            else:
+                self.env.reset()
+
+            # Collect a batch of experiences
+            obs = self.env.reset()
+            for _ in range(iter_steps):
+                action, _ = self.policy.predict(obs, deterministic=False)
+                next_obs, reward, terminated, truncated, info = self.env.step(action)
+
+                # RND exploration bonus
+                state_next = torch.tensor(next_obs[0], dtype=torch.float32).to(self.device)
+                with torch.no_grad():
+                    target_feat = self.rnd_target(state_next)
+                pred_feat = self.rnd_pred(state_next)
+                rnd_bonus = ((pred_feat - target_feat) ** 2).mean()
+                reward = reward + self.lam * rnd_bonus.item()
+
+                # Store transition in the replay buffer
+                self.policy.replay_buffer.add(
+                    obs[0], action[0], reward[0], next_obs[0], terminated[0]
+                )
+                obs = next_obs
+                if terminated or truncated:
+                    break
+
+            # One PPO update step
+            self.policy.train()
+
+        # Save the refined policy
+        self.policy.save("rice_refined.zip")
+        return self.policy
+
+    # ------------------------------------------------------------------
+    # Evaluation helper
+    # ------------------------------------------------------------------
+    def evaluate(self, episodes: int = 10):
+        total = 0.0
+        for _ in range(episodes):
+            obs = self.env.reset()
+            done = False
+            ep_ret = 0.0
+            while not done:
+                action, _ = self.policy.predict(obs, deterministic=True)
+                obs, reward, terminated, truncated, info = self.env.step(action)
+                ep_ret += reward[0]
+                done = terminated or truncated
+            total += ep_ret
+        return total / episodes
+```
+
+FILE: scripts/reproduce.sh
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Create output directory
+mkdir -p logs
+
+# Train a pre‑trained policy (10k steps for demo purposes)
+python - <<'PY'
+import os
+import gymnasium as gym
+from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import DummyVecEnv
+
+env_name="CartPole-v1"
+env = DummyVecEnv([lambda: gym.make(env_name)])
+model = PPO("MlpPolicy", env, learning_rate=3e-4, batch_size=64, verbose=0)
+model.learn(total_timesteps=10000)
+model.save("pretrained_cartpole.zip")
+print("Pre‑trained policy saved.")
+PY
+
+# Run RICE refinement
+python - <<'PY'
+import os
+from src.rice import RICE
+
+env_name = "CartPole-v1"
+rice = RICE(env_name, pretrained_path="pretrained_cartpole.zip", seed=42)
+print("Training mask network...")
+rice.train_mask(epochs=3, samples_per_epoch=200)
+print("Refining policy...")
+rice.refine(iter_steps=200, num_iters=50)
+print("Evaluating refined policy...")
+avg_reward = rice.evaluate(episodes=20)
+print(f"Average reward after refinement: {avg_reward:.2f}")
+PY
+
+echo "Reproduction finished."
+```
+
+FILE: README.md
+```markdown
+# RICE – Refining Reinforcement Learning with Explanation
+
+This repository contains a **minimal, self‑contained** implementation of the RICE framework described in the paper *“RICE: Breaking Through the Training Bottlenecks of Reinforcement Learning with Explanation”*.  
+The goal is to provide code that:
+
+1. **Pre‑trains** a PPO policy on a simple Gymnasium environment (CartPole-v1 by default).  
+2. **Trains a mask network** that learns which time‑steps are most critical for the agent’s performance.  
+3. **Refines** the policy by resetting the environment to a mixture of the default initial state and the identified critical states, while adding an exploration bonus from Random Network Distillation (RND).  
+4. **Evaluates** the final policy and reports the average return.
+
+> **NOTE**: This is a **toy implementation** that demonstrates the core ideas of RICE. It is **not** a full replication of the experiments in the paper (which involve MuJoCo, cryptocurrency mining, cyber‑defense, autonomous driving, and malware mutation). The implementation focuses on correctness, reproducibility, and easy extension to other environments.
+
+## Directory Structure
+
+```
+├── requirements.txt          # Python dependencies
+├── scripts/
+│   └── reproduce.sh          # Full reproduction script
+├── src/
+│   ├── env_utils.py          # Helper to set environment state
+│   ├── mask_network.py       # Mask network (step‑importance predictor)
+│   ├── rnd.py                # RND modules
+│   └── rice.py               # RICE algorithm
+└── README.md
+```
+
+## How to Run
+
+```bash
+# 1. Install dependencies
+pip install -r requirements.txt
+
+# 2. Run the full reproduction script
+bash scripts/reproduce.sh
+```
+
+The script will:
+
+1. Train a PPO policy for 10,000 timesteps (pre‑training).  
+2. Train the mask network for 3 epochs.  
+3. Refine the policy for 50 iterations (each collects ~200 steps).  
+4. Evaluate the refined policy over 20 episodes and print the average reward.
+
+All output (logs, intermediate models) are stored in the repository root.
+
+## Extending to Other Environments
+
+1. **Change the environment**: Edit `env_name` in `scripts/reproduce.sh` and `scripts/reproduce.sh` (the Python block that creates the pre‑trained policy).  
+2. **Adjust hyper‑parameters**: `RICE.__init__` accepts `p`, `lam`, `alpha`, etc.  
+3. **Handle state resetting**: The current `set_env_state` works for environments that expose a `state` attribute (e.g., CartPole, MountainCar). For custom environments, extend `env_utils.set_env_state` accordingly.
+
+## Code Overview
+
+- **`src/mask_network.py`** – A lightweight MLP that outputs a mask probability for each state.  
+- **`src/rnd.py`** – Implements the target and predictor networks used in Random Network Distillation.  
+- **`src/env_utils.py`** – Helper to directly set the internal state of an environment.  
+- **`src/rice.py`** – Orchestrates the entire pipeline: pre‑training, mask training, refinement, and evaluation.  
+- **`scripts/reproduce.sh`** – The glue script that ties everything together and ensures reproducibility.
+
+## Limitations
+
+- Only works with environments that expose a mutable `state` attribute (e.g., CartPole, MountainCar).  
+- The mask training objective is a simplified surrogate of the original StateMask algorithm.  
+- No external baselines (JSRL, StateMask‑R, PPO++) are included; the focus is on illustrating the RICE workflow.  
+- The implementation uses a very small number of training steps to keep runtime short.
+
+Feel free to extend this repository to add full experimental pipelines, additional environments, or baseline comparisons as needed. Happy experimenting!
+```

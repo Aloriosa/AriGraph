@@ -1,0 +1,109 @@
+#!/usr/bin/env python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import json
+import os
+from tqdm.auto import tqdm
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from src.utils import load_json, set_seed, to_device, load_gpt2_model
+import numpy as np
+
+set_seed(42)
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Load tokenizer
+tokenizer = AutoTokenizer.from_pretrained("gpt2-medium")
+
+# Load reference (frozen) GPT2
+ref_tokenizer, ref_model = load_gpt2_model(DEVICE)
+for p in ref_model.parameters():
+    p.requires_grad = False
+
+# Load fine‑tune GPT2 copy
+ft_model = AutoModelForCausalLM.from_pretrained("gpt2-medium").to(DEVICE)
+
+# Load pairwise data
+pairs = load_json("data/pairs.json")
+
+# Hyperparameters
+BATCH_SIZE = 4
+LR = 1e-6
+BETA = 0.1
+MAX_TOKENS = 30   # include prompt + continuation
+
+# Prepare dataset
+class PairDataset(torch.utils.data.Dataset):
+    def __init__(self, pairs, tokenizer, max_len):
+        self.pairs = pairs
+        self.tokenizer = tokenizer
+        self.max_len = max_len
+    def __len__(self):
+        return len(self.pairs)
+    def __getitem__(self, idx):
+        pair = self.pairs[idx]
+        # Encode prompt + positive
+        pos_input = self.tokenizer(pair["prompt"], pair["positive"],
+                                  truncation=True, max_length=self.max_len,
+                                  return_tensors="pt")
+        # Encode prompt + negative
+        neg_input = self.tokenizer(pair["prompt"], pair["negative"],
+                                  truncation=True, max_length=self.max_len,
+                                  return_tensors="pt")
+        return {"pos_ids": pos_input["input_ids"].squeeze(),
+                "pos_mask": pos_input["attention_mask"].squeeze(),
+                "neg_ids": neg_input["input_ids"].squeeze(),
+                "neg_mask": neg_input["attention_mask"].squeeze()}
+
+dataset = PairDataset(pairs, tokenizer, MAX_TOKENS)
+loader = torch.utils.data.DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+
+optimizer = optim.AdamW(ft_model.parameters(), lr=LR)
+
+ft_model.train()
+for epoch in range(1):  # single epoch for quick demo
+    pbar = tqdm(loader, desc=f"Epoch {epoch+1}")
+    for batch in pbar:
+        pos_ids = batch["pos_ids"].to(DEVICE)
+        pos_mask = batch["pos_mask"].to(DEVICE)
+        neg_ids = batch["neg_ids"].to(DEVICE)
+        neg_mask = batch["neg_mask"].to(DEVICE)
+
+        # Forward for positive
+        with torch.no_grad():
+            ref_pos = ref_model(input_ids=pos_ids, attention_mask=pos_mask,
+                                labels=pos_ids).loss
+            # compute log prob of entire sequence
+            ref_pos_logp = -ref_pos * pos_ids.shape[1]  # approximate: loss * seq_len
+
+        # Forward for negative
+        with torch.no_grad():
+            ref_neg = ref_model(input_ids=neg_ids, attention_mask=neg_mask,
+                                labels=neg_ids).loss
+            ref_neg_logp = -ref_neg * neg_ids.shape[1]
+
+        # Forward for fine‑tuned model
+        ft_pos = ft_model(input_ids=pos_ids, attention_mask=pos_mask,
+                          labels=pos_ids).loss
+        ft_pos_logp = -ft_pos * pos_ids.shape[1]
+
+        ft_neg = ft_model(input_ids=neg_ids, attention_mask=neg_mask,
+                          labels=neg_ids).loss
+        ft_neg_logp = -ft_neg * neg_ids.shape[1]
+
+        # DPO loss
+        P = torch.exp(ft_pos_logp - ref_pos_logp)
+        N = torch.exp(ft_neg_logp - ref_neg_logp)
+        logits = BETA * (torch.log(P) - torch.log(N))
+        loss = -torch.mean(torch.log(torch.sigmoid(logits)))
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        pbar.set_postfix(loss=loss.item())
+
+# Save fine‑tuned model
+os.makedirs("models", exist_ok=True)
+ft_model.save_pretrained("models/gpt2_dpo")
+tokenizer.save_pretrained("models/gpt2_dpo")
+print("Fine‑tuned DPO model saved to models/gpt2_dpo")

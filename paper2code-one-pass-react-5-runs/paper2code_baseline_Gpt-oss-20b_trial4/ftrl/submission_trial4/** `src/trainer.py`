@@ -1,0 +1,125 @@
+import numpy as np
+import torch
+import torch.nn.functional as F
+from torch.optim import Adam
+from .env import TwoStateMDP
+from .policy import PolicyNet
+from .ewc import EWC
+from .bc import BCBuffer, BCLoss
+
+class Trainer:
+    """
+    Handles pre‑training and fine‑tuning using REINFORCE.
+    """
+    def __init__(self, lr=1e-2, gamma=0.99, device="cpu"):
+        self.device = device
+        self.gamma = gamma
+        self.lr = lr
+
+    def _collect_episode(self, env, policy, deterministic=False):
+        states, actions, rewards = [], [], []
+        state = env.reset()
+        done = False
+        while not done:
+            s = torch.tensor(state, dtype=torch.long, device=self.device)
+            action = policy.get_action(s, deterministic=deterministic)
+            next_state, reward, done, _ = env.step(action.item())
+            states.append(state)
+            actions.append(action.item())
+            rewards.append(reward)
+            state = next_state
+        return states, actions, rewards
+
+    def _compute_returns(self, rewards):
+        G = 0.0
+        returns = []
+        for r in reversed(rewards):
+            G = r + self.gamma * G
+            returns.insert(0, G)
+        return returns
+
+    def pretrain(self, env, policy, episodes=200, log_every=50):
+        """
+        Train on the far state only (state 1).
+        """
+        optimizer = Adam(policy.parameters(), lr=self.lr)
+        pretrain_data = {"states": [], "actions": []}
+        for ep in range(1, episodes + 1):
+            # Force start in state 1
+            env.state = 1
+            env.step_count = 0
+            states, actions, rewards = self._collect_episode(env, policy)
+            returns = self._compute_returns(rewards)
+
+            # REINFORCE loss
+            loss = 0.0
+            for s, a, G in zip(states, actions, returns):
+                s_tensor = torch.tensor(s, dtype=torch.long, device=self.device)
+                logits = policy(s_tensor)
+                log_prob = F.log_softmax(logits, dim=-1)[a]
+                loss -= log_prob * G
+            loss = loss / len(states)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            # Store data for BC
+            pretrain_data["states"].extend(states)
+            pretrain_data["actions"].extend(actions)
+
+            if ep % log_every == 0:
+                avg_ret = np.mean([sum(r) for r in pretrain_data["rewards"]]) if "rewards" in pretrain_data else 0
+                print(f"[Pretrain] ep {ep:3d} | loss {loss.item():.4f}")
+
+        bc_buffer = BCBuffer(pretrain_data["states"], pretrain_data["actions"])
+        return bc_buffer, policy.state_dict()
+
+    def finetune(self, env, policy, teacher_state, bc_buffer=None,
+                 ewc=None, method="vanilla", epochs=400, log_every=50):
+        """
+        Fine‑tune on the full environment.
+        method: 'vanilla', 'ewc', or 'bc'
+        """
+        policy.load_state_dict(teacher_state)
+        optimizer = Adam(policy.parameters(), lr=self.lr)
+        if method == "bc" and bc_buffer is not None:
+            bc_loss_fn = BCLoss(teacher=PolicyNet().load_state_dict(teacher_state),
+                                student=policy, alpha=1.0)
+        elif method == "ewc" and ewc is not None:
+            pass
+        else:
+            bc_loss_fn = None
+
+        returns_log = []
+
+        for ep in range(1, epochs + 1):
+            states, actions, rewards = self._collect_episode(env, policy)
+            returns = self._compute_returns(rewards)
+            avg_return = sum(rewards)
+            returns_log.append(avg_return)
+
+            # REINFORCE loss
+            loss = 0.0
+            for s, a, G in zip(states, actions, returns):
+                s_tensor = torch.tensor(s, dtype=torch.long, device=self.device)
+                logits = policy(s_tensor)
+                log_prob = F.log_softmax(logits, dim=-1)[a]
+                loss -= log_prob * G
+            loss = loss / len(states)
+
+            # Add auxiliary loss if needed
+            if method == "bc" and bc_loss_fn is not None:
+                batch_states, _ = bc_buffer.sample(32)
+                loss += bc_loss_fn(batch_states)
+            if method == "ewc" and ewc is not None:
+                loss += ewc.penalty(policy.state_dict())
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            if ep % log_every == 0:
+                print(f"[Fine‑tune {method}] ep {ep:3d} | avg ret {avg_return:.3f} | loss {loss.item():.4f}")
+
+        return returns_log

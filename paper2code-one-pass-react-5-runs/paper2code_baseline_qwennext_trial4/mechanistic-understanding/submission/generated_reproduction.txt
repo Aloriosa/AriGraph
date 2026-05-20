@@ -1,0 +1,27 @@
+# Mechanistic Understanding of Alignment Algorithms (Reproduction)
+
+This repository contains a minimal, fully‑automated reproduction of the key experiments from the paper
+> *A Mechanistic Understanding of Alignment Algorithms: A Case Study on DPO and Toxicity*  
+> Andrew Lee, Xiaoyan Bai, Itamar Pres, Martin Wattenberg, Jonathan K. Kummerfeld, Rada Mihalcea
+
+The reproduction focuses on the following core components:
+
+1. **Toxicity Probe** – Train a linear probe on the last hidden layer of a pretrained language model
+   (GPT‑2 medium) to obtain a “toxicity” direction vector `W_Toxic`.
+2. **Toxic Vector Extraction** – Identify the most toxic value vectors in the MLP blocks by cosine
+   similarity with `W_Toxic`.
+3. **DPO Fine‑Tuning** – Fine‑tune GPT‑2 medium with Direct Preference Optimization (DPO) on a
+   pairwise dataset constructed from WikiText‑2 prompts.
+4. **Evaluation** – Measure toxicity (via a local BERT toxicity classifier), perplexity on
+   WikiText‑2, and a simple F1‑style overlap metric on a small Wikipedia sentence set.
+
+The script `reproduce.sh` installs all dependencies, downloads the required models and datasets,
+runs the full pipeline, and outputs a `results.json` file in the repository root.
+
+> **Note**  
+> The full paper reports results on GPT‑2 medium *and* Llama‑2‑7B. To keep the reproduction
+> lightweight and runnable on a single NVIDIA A10 GPU (24 GB VRAM), we only fine‑tune and
+> evaluate GPT‑2 medium. The same pipeline can be applied to Llama‑2‑7B by replacing the model
+> name in `main.py`.
+
+## Quick Start

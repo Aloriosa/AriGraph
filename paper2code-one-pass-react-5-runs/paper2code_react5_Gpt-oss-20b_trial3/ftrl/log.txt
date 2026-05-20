@@ -1,0 +1,205 @@
+2026-03-14 18:32:40.019209 ======================================================================
+2026-03-14 18:32:40.019353 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 18:32:40.019402 ======================================================================
+2026-03-14 18:32:40.019442 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/ftrl/paper.md
+2026-03-14 18:32:40.019479 Log path: paper2code_react5_Gpt-oss-20b_trial3/ftrl
+2026-03-14 18:32:40.019515 Model: Openai/Gpt-oss-20b
+2026-03-14 18:32:40.019550 Max iterations: 5
+2026-03-14 18:32:40.019587 Run reproduce.sh: False
+2026-03-14 18:32:40.019626 Run LLM paper check: True
+2026-03-14 18:32:40.019661 
+2026-03-14 18:32:40.019695 Loading paper...
+2026-03-14 18:32:40.020124 Paper length: 111960 chars (using 111960 for prompt)
+2026-03-14 18:32:40.020202 
+2026-03-14 18:32:40.040589 --- Iteration 0: Initial generation ---
+2026-03-14 18:33:23.479210   Created: generated_reproduction.txt
+2026-03-14 18:33:23.479319 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial3/ftrl/submission (1 files)
+2026-03-14 18:33:23.479365 
+2026-03-14 18:33:23.479404 --- Iteration 1: Observe & Refine ---
+2026-03-14 18:33:32.564855 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Implementation of the target environments (NetHack, Montezuma’s Revenge, RoboticSequence).  
+- Pre‑trained policy from the paper’s large‑scale dataset (e.g., Tuyls et al. 2023).  
+- Knowledge‑retention methods other than BC (EWC, Kick‑starting, Episodic Memory).  
+- Asynchronous PPO (APPO) training loop used in the paper.  
+- Exact hyper‑parameter settings (learning rate, batch size, entropy weight, etc.) reported in the paper.  
+- Detailed network architecture (e.g., convolutional layers, recurrent modules) used for the NetHack policy.  
+- Replay‑buffer handling for off‑policy methods.  
+- Evaluation metrics (NetHack score, Montezuma’s Revenge cumulative reward, etc.) and logging format.  
+- Baselines: training from scratch, vanilla fine‑tuning, and all retention‑method variants.  
+- Checkpointing and hardware configuration (GPU/CPU, training steps).  
+
+**INCORRECT**  
+- Uses REINFORCE on CartPole instead of the paper’s PPO/APPO.  
+- Employs a toy CartPole environment rather than the complex, procedurally generated tasks in the paper.  
+- BC loss is applied only to a small buffer of pre‑training states, not to the full KL‑based BC used in the paper.  
+- The reward modification to simulate a state‑coverage gap is not described in the paper.  
+- The code does not implement EWC, Kick‑starting, or Episodic Memory as described.  
+
+**PARTIAL**  
+- BC is present but not fully aligned with the paper’s BC implementation (pre‑training buffer, KL loss, weighting).  
+- The script `reproduce.sh` runs a single experiment but does not reproduce the full experimental pipeline (multiple environments, baselines, retention methods).  
+
+**Conclusion**  
+ALL components required to faithfully reproduce the paper’s experiments are missing or incorrectly implemented. The current code only demonstrates a toy example that loosely mirrors the forgetting phenomenon but does not match the paper’s methodology or results.
+2026-03-14 18:33:32.565046 
+2026-03-14 18:33:32.565258 Generating refined code...
+2026-03-14 18:34:53.222959   Updated: generated_reproduction.txt
+2026-03-14 18:34:53.223053 
+2026-03-14 18:34:53.223097 --- Iteration 2: Observe & Refine ---
+2026-03-14 18:34:55.299763 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core method/algorithm (fine‑tuning with PPO, EWC, BC, KS, EM)  
+MISSING: Hyperparameters (learning rate, batch size, PPO clip ratio, etc.)  
+MISSING: Data setup (pre‑training dataset, state/observation preprocessing, buffer construction)  
+MISSING: Evaluation protocol (metrics, evaluation frequency, baselines, checkpointing)  
+MISSING: Experimental setup (hardware specs, training steps, random seeds, logging)  
+MISSING: reproduce.sh (script to run the full pipeline and reproduce the paper’s results)  
+
+ALL_OK: Reproduction appears incomplete.
+2026-03-14 18:34:55.299945 
+2026-03-14 18:34:55.300064 Generating refined code...
+2026-03-14 18:35:48.045787   Updated: generated_reproduction.txt
+2026-03-14 18:35:48.045907 
+2026-03-14 18:35:48.045981 --- Iteration 3: Observe & Refine ---
+2026-03-14 18:35:50.332722 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core method/algorithm (PPO fine‑tuning, EWC, BC, KS, EM, etc.)  
+MISSING: Hyperparameters (learning rate, batch size, PPO clip, etc.)  
+MISSING: Data setup (NetHack Human Monk, Montezuma’s Revenge, RoboticSequence environments, pre‑training data, replay buffers)  
+MISSING: Evaluation protocol (metrics, baselines, score reporting)  
+MISSING: Experimental setup (hardware, training steps, checkpoints, logging)  
+MISSING: reproduce.sh (script to run the full pipeline and generate the paper’s results)
+2026-03-14 18:35:50.332898 
+2026-03-14 18:35:50.333117 Generating refined code...
+2026-03-14 18:36:57.590650   Updated: requirements.txt
+2026-03-14 18:36:57.590817   Updated: README.md
+2026-03-14 18:36:57.590925   Updated: reproduce.sh
+2026-03-14 18:36:57.590991   Updated: envs/apple_retrieval.py
+2026-03-14 18:36:57.591067   Updated: envs/two_state_mdp.py
+2026-03-14 18:36:57.591129   Updated: algo/ppo.py
+2026-03-14 18:36:57.591190   Updated: algo/ewc.py
+2026-03-14 18:36:57.591252   Updated: algo/bc.py
+2026-03-14 18:36:57.591312   Updated: algo/ks.py
+2026-03-14 18:36:57.591371   Updated: algo/em.py
+2026-03-14 18:36:57.591429   Updated: train.py
+2026-03-14 18:36:57.591470 
+2026-03-14 18:36:57.591508 --- Iteration 4: Observe & Refine ---
+2026-03-14 18:37:19.098980 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Full NetHack, Montezuma’s Revenge, and Meta‑World experiments (the paper’s core benchmarks).  
+- Pre‑training on a *subset* of the downstream environment (e.g., only early rooms in Montezuma’s Revenge).  
+- The pre‑trained policy from Tuyls et al. (2023) or any realistic offline dataset; the code uses a hand‑crafted rule policy.  
+- Asynchronous PPO (APPO) as used in the paper; the implementation is synchronous.  
+- Explicit definition and use of the “CLOSE” and “FAR” state sets to demonstrate state‑coverage and imperfect‑cloning gaps.  
+- Correct KL‑divergence loss for BC, KS, and EM (the code only uses the log‑prob of the current policy).  
+- Correct EWC penalty: the paper uses  
+  \[
+  \mathcal{L}_{\text{aux}}(\theta)=\sum_i F^i(\theta_*^i-\theta^i)^2
+  \]  
+  but the code squares the term twice.  
+- Correct computation of the Fisher matrix (the code sums squared gradients but does not average properly).  
+- Correct handling of the critic (the paper explicitly does not apply retention to the critic).  
+- Correct hyper‑parameters from the paper (learning rate, gamma, clip ratio, epochs, batch size, vf_coef, ent_coef, EWC λ, BC/KS weights, EM buffer size, etc.).  
+- Correct reward shaping and episode termination logic for NetHack/Montezuma’s Revenge.  
+- Proper evaluation protocol (score, success rate, number of evaluation episodes, checkpointing).  
+- Use of GPU (the paper reports training on A10 GPUs).  
+- Saving and loading of the pre‑trained policy and its buffer in a reproducible format.  
+
+**INCORRECT**  
+- **EWC**: penalty is computed as \((F \cdot (\theta-\theta_*))^2\) instead of \(F \cdot (\theta-\theta_*)^2\).  
+- **BC, KS, EM**: loss is \(-\log p_{\theta}(a|s)\) instead of the KL divergence \(\text{KL}(\pi_* \| \pi_{\theta})\).  
+- **Pre‑training**: uses a deterministic rule policy rather than a pre‑trained neural policy.  
+- **Fine‑tuning action selection**: uses deterministic argmax instead of sampling from the policy distribution.  
+- **Fisher computation**: uses a custom loader but does not average over the dataset; the implementation is incomplete.  
+- **Buffer usage**: BC and EM buffers contain only (obs, action) tuples, not the full pre‑trained policy distribution.  
+- **Training loop**: collects a single step at a time instead of trajectories, thus GAE and PPO updates are not correctly applied.  
+- **Evaluation**: success rate is computed as \(\mathbb{1}\{r>0\}\) which does not reflect the paper’s success criteria.  
+
+**PARTIAL**  
+- **PPO implementation**: basic structure exists but lacks trajectory collection, GAE, and proper entropy regularization as in the paper.  
+- **BC, KS, EM wrappers**: exist but use incorrect loss formulations and incomplete buffer handling.  
+- **EWC wrapper**: exists but the penalty and Fisher calculation are incomplete.  
+- **Environment wrappers**: toy environments (AppleRetrieval, TwoStateMDP) are provided but do not capture the complexity of NetHack or Montezuma’s Revenge.  
+- **Training script (`train.py`)**: runs a loop but does not implement the full pipeline (pre‑train → fine‑tune → evaluation) with the correct hyper‑parameters and data splits.  
+- **`reproduce.sh`**: orchestrates the toy experiments but does not reproduce the paper’s results or benchmarks.  
+
+**OK**  
+- Basic PPO, BC, KS, EM, and EWC classes are defined.  
+- Toy environments (`AppleRetrieval`, `TwoStateMDP`) are implemented.  
+- A simple training loop and evaluation routine are present.  
+
+**Conclusion**  
+The current codebase does **not** reproduce the key contributions, experiments, or results of the paper. Significant corrections and additions are required.
+2026-03-14 18:37:19.099244 
+2026-03-14 18:37:19.099392 Generating refined code...
+2026-03-14 18:38:46.831583   Updated: generated_reproduction.txt
+2026-03-14 18:38:46.831679 
+2026-03-14 18:38:46.831724 --- Iteration 5: Observe & Refine ---
+2026-03-14 18:39:21.607356 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Pre‑trained policy obtained by behavioral cloning on a large (≈115 B) dataset (paper).  
+- Use of the real downstream environments (NetHack, Montezuma’s Revenge, RoboticSequence).  
+- Evaluation metrics and protocol exactly as in the paper (score, success‑rate, etc.).  
+- Baseline “train‑from‑scratch” and “vanilla fine‑tune” runs.  
+- GPU‑based training (paper uses A10 GPUs).  
+- Checkpointing / model saving.  
+- Correct implementation of the EWC penalty (Fisher‑based quadratic term).  
+- Correct KL‑based losses for BC and KS.  
+- Explicit exclusion of the critic from knowledge‑retention regularisation.  
+- The same neural‑network architecture used for pre‑training and fine‑tuning.  
+- The same hyper‑parameter values (learning‑rate, batch‑size, gamma, clip‑ratio, etc.) as reported.  
+- The same number of training steps / epochs as in the paper.  
+- The same data splits / pre‑training data used to construct the BC buffer.  
+
+**INCORRECT**  
+- The “pre‑trained” policy is a simple rule‑based controller, not a behavioral‑cloned policy.  
+- The wrappers for EWC, BC, KS, EM are defined but never invoked in the training loop.  
+- PPO is a vanilla implementation, not the asynchronous PPO (APPO) used in the paper.  
+- Hyper‑parameters are default values (lr = 3e‑4, batch = 64, etc.) and do not match the paper.  
+- The BC loss is cross‑entropy, not a KL divergence against the pre‑trained policy.  
+- The KS loss is cross‑entropy on the current policy’s actions, not a KL divergence to the pre‑trained policy.  
+- The EWC penalty is computed as `(fisher * (param‑pre))**2` instead of `F*(θ‑θ*)²`.  
+- The EM module samples from the buffer but does not mix pre‑trained transitions with new ones in the same way as the paper.  
+- The critic is not exempted from the retention losses.  
+- The network architecture is a tiny 2‑layer MLP, whereas the paper uses a larger, task‑specific architecture.  
+- Training is performed on toy environments (AppleRetrieval, TwoStateMDP) instead of NetHack, etc.  
+- The number of training steps (20 k) is far below the paper’s scale.  
+- The evaluation protocol is a simple average return over 10 episodes, not the detailed metrics reported.  
+
+**PARTIAL**  
+- Knowledge‑retention wrappers exist but are not integrated into the training loop.  
+- The training script (`train.py`) loads a pre‑training buffer and passes it to the wrappers, but the wrappers are never called.  
+- The `reproduce.sh` script orchestrates pre‑training and fine‑tuning, but the experiments are toy‑scale and do not reproduce the paper’s results.  
+- The code prints “Average return” and “Success rate”, but these metrics are not the same as those reported in the paper.  
+
+**OK**  
+- Basic PPO implementation and training loop are present.  
+- Toy environments (`AppleRetrieval`, `TwoStateMDP`) are defined.  
+- The repository structure and `reproduce.sh` script run end‑to‑end (though on toy data).  
+
+**Conclusion**  
+The current codebase does **not** reproduce the key experimental findings of the paper. Significant portions of the methodology (pre‑training, knowledge‑retention, environment, hyper‑parameters, evaluation) are missing or incorrectly implemented. The repository would need a comprehensive rewrite to match the paper’s experimental protocol.
+2026-03-14 18:39:21.607590 
+2026-03-14 18:39:21.607749 Generating refined code...
+2026-03-14 18:41:17.426955   Updated: generated_reproduction.txt
+2026-03-14 18:41:17.427076 
+2026-03-14 18:41:17.427140 ======================================================================
+2026-03-14 18:41:17.427180 REACT BASELINE COMPLETE
+2026-03-14 18:41:17.427233 ======================================================================
+2026-03-14 18:41:17.427270 Total iterations: 6
+2026-03-14 18:41:17.427306 API tokens: 53494 completion, 215395 prompt
+2026-03-14 18:41:17.427344 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial3/ftrl/generated_code_response.txt

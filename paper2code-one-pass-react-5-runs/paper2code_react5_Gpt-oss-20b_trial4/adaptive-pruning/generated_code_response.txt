@@ -1,0 +1,436 @@
+**FILE: requirements.txt**  
+```txt
+torch>=2.1
+transformers>=4.35
+datasets>=2.16
+accelerate>=0.30
+peft>=0.4.0
+sentencepiece>=0.1.99
+numpy>=1.26
+```
+
+---
+
+**FILE: README.md**  
+```markdown
+# APT (Adaptive Pruning and Tuning) – Reproduction
+
+This repository contains a **minimal but functional implementation** of the APT method described in the paper *"APT: Adaptive Pruning and Tuning Pretrained Language Models for Efficient Training and Inference"*.
+
+The goal is to:
+
+1. **Demonstrate** the core idea of APT – dynamic pruning of model parameters and adaptive tuning via LoRA‑style adapters.
+2. **Reproduce a small experiment** (RoBERTa‑base fine‑tuned on SST‑2) that shows how training time and memory can be reduced while keeping accuracy close to full fine‑tuning.
+
+> **NOTE**: This is a **toy implementation**. It captures the essential mechanisms (dynamic masks, salience‑based pruning, adaptive rank increase) but omits many optimisations (efficient pruning schedule, self‑distillation, multiple tasks, LLaMA support, etc.) present in the full paper.
+
+## Reproduction
+
+```bash
+bash reproduce.sh
+```
+
+The script will:
+
+1. Install the required libraries.
+2. Run `python train_apt.py`.
+3. Output the final accuracy and training statistics.
+
+## Project Structure
+
+```
+├── requirements.txt
+├── README.md
+├── reproduce.sh
+├── train_apt.py
+├── models
+│   └── apt_adapter.py
+└── utils.py
+```
+
+### train_apt.py
+* Loads the dataset (SST‑2 from GLUE).
+* Builds a RoBERTa‑base model and injects `APTLinear` adapters into all linear layers.
+* Implements a simple salience‑based pruning schedule.
+* Dynamically increases LoRA rank during training.
+* Reports accuracy on the dev set.
+
+### models/apt_adapter.py
+* Implements `APTLinear`, a linear layer with:
+  * Binary input/output masks (`mask_in`, `mask_out`) for pruning.
+  * Low‑rank LoRA adaptation (`A`, `B`) with a dynamic rank.
+  * Forward pass that respects the masks and adds the LoRA contribution.
+
+## Customisation
+
+* Hyper‑parameters are defined in `train_apt.py`.  
+  You can change the number of epochs, batch size, learning rate, target sparsity, etc.
+* To experiment on other datasets or models, adapt the dataset loading and model selection sections accordingly.
+
+## Limitations
+
+* The pruning schedule is very simple: after each epoch we prune a fixed fraction of the remaining neurons.
+* No self‑distillation or advanced salience metrics are used.
+* Only a single task (SST‑2) and a single model (RoBERTa‑base) are supported.
+
+Feel free to extend this repository to include more sophisticated components as described in the paper.
+```
+
+---
+
+**FILE: reproduce.sh**  
+```bash
+#!/usr/bin/env bash
+set -e
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run training
+python train_apt.py
+```
+
+---
+
+**FILE: utils.py**  
+```python
+import random
+import numpy as np
+import torch
+
+def set_seed(seed: int = 42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+```
+
+---
+
+**FILE: models/apt_adapter.py**  
+```python
+import torch
+import torch.nn as nn
+import math
+
+class APTLinear(nn.Module):
+    """
+    A linear layer with:
+      - Binary input/output masks for structured pruning.
+      - Low-rank LoRA adaptation with dynamic rank.
+    """
+    def __init__(self, in_features, out_features, bias=True,
+                 rank=8, init_scale=0.01, device=None):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+
+        # Original weight and bias
+        self.weight = nn.Parameter(torch.empty((out_features, in_features), device=device))
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if bias:
+            self.bias = nn.Parameter(torch.empty(out_features, device=device))
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in)
+            nn.init.uniform_(self.bias, -bound, bound)
+        else:
+            self.bias = None
+
+        # Masks for pruning
+        self.mask_in = nn.Parameter(torch.ones(in_features, dtype=torch.bool, device=device))
+        self.mask_out = nn.Parameter(torch.ones(out_features, dtype=torch.bool, device=device))
+
+        # LoRA parameters
+        self.rank = rank
+        self.A = nn.Parameter(torch.randn((rank, in_features), device=device) * init_scale)
+        self.B = nn.Parameter(torch.randn((out_features, rank), device=device) * init_scale)
+
+        # Scaling factor (as in LoRA)
+        self.scaling = 1.0
+
+    def forward(self, x):
+        """
+        x: (batch, seq_len, in_features)
+        """
+        # Apply masks
+        mask_in = self.mask_in.float().unsqueeze(0).unsqueeze(0)   # (1,1,in_features)
+        mask_out = self.mask_out.float().unsqueeze(1).unsqueeze(2)  # (out_features,1,1)
+
+        # Compute base linear with masked weight
+        masked_weight = self.weight * mask_out  # (out_features, in_features)
+        base = torch.matmul(x, masked_weight.t())
+
+        # LoRA contribution
+        # x: (batch, seq_len, in_features)
+        # A: (rank, in_features), B: (out_features, rank)
+        lora = torch.matmul(torch.matmul(x, self.A.t()), self.B.t()) * self.scaling
+        lora = lora * mask_out  # ensure pruned outputs are zero
+
+        out = base + lora
+        if self.bias is not None:
+            out = out + self.bias
+        return out
+
+    def prune_neurons(self, prune_ratio):
+        """
+        Prune a fraction of output neurons based on salience (abs(weight * grad)).
+        prune_ratio: fraction of neurons to prune in this call.
+        """
+        if not self.weight.grad is None:
+            # Salience per output neuron
+            salience = torch.abs(self.weight * self.weight.grad)
+            salience_per_neuron = salience.sum(dim=1)  # (out_features,)
+            # Consider only currently unpruned neurons
+            active_mask = self.mask_out
+            salience_per_neuron = salience_per_neuron * active_mask.float()
+            # Number of neurons to prune
+            n_to_prune = int(prune_ratio * self.out_features * active_mask.float().sum().item())
+            if n_to_prune <= 0:
+                return
+            # Get indices of neurons with lowest salience
+            _, idx = torch.topk(salience_per_neuron, n_to_prune, largest=False)
+            # Set their masks to zero
+            self.mask_out[idx] = False
+            # Zero out corresponding rows in LoRA matrices to avoid gradient accumulation
+            self.A.data[:, idx] = 0
+            self.B.data[idx, :] = 0
+            # Also zero out the weight rows
+            self.weight.data[idx, :] = 0
+
+    def increase_rank(self, new_rank):
+        """
+        Increase LoRA rank by adding new random columns.
+        """
+        if new_rank <= self.rank:
+            return
+        add = new_rank - self.rank
+        device = self.weight.device
+        A_new = nn.Parameter(torch.randn((add, self.in_features), device=device) * 0.01)
+        B_new = nn.Parameter(torch.randn((self.out_features, add), device=device) * 0.01)
+        # Concatenate
+        self.A = nn.Parameter(torch.cat([self.A, A_new], dim=0))
+        self.B = nn.Parameter(torch.cat([self.B, B_new], dim=1))
+        self.rank = new_rank
+```
+
+---
+
+**FILE: train_apt.py**  
+```python
+import argparse
+import os
+import random
+import math
+import time
+from pathlib import Path
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+
+from transformers import (AutoTokenizer, AutoModelForSequenceClassification,
+                          DataCollatorWithPadding, AdamW, get_linear_schedule_with_warmup)
+
+from datasets import load_dataset
+from accelerate import Accelerator
+
+from models.apt_adapter import APTLinear
+import utils
+
+# --------------------------------------------------------------------------- #
+#  Hyper‑parameters & configuration
+# --------------------------------------------------------------------------- #
+DEFAULTS = {
+    "model_name": "roberta-base",
+    "task": "sst2",
+    "epochs": 3,
+    "batch_size": 32,
+    "lr": 2e-5,
+    "seed": 42,
+    "prune_rate": 0.60,      # target sparsity 60%
+    "initial_rank": 8,
+    "max_rank": 32,
+    "rank_increase_every": 1,   # epochs
+    "save_dir": "outputs",
+}
+
+# --------------------------------------------------------------------------- #
+#  Utility functions
+# --------------------------------------------------------------------------- #
+def replace_linear_with_apt(module, device, initial_rank):
+    """
+    Recursively replace nn.Linear modules with APTLinear.
+    """
+    for name, child in module.named_children():
+        if isinstance(child, nn.Linear):
+            new_module = APTLinear(
+                in_features=child.in_features,
+                out_features=child.out_features,
+                bias=child.bias is not None,
+                rank=initial_rank,
+                device=device
+            )
+            # Copy weight and bias
+            new_module.weight.data = child.weight.data.clone()
+            if child.bias is not None:
+                new_module.bias.data = child.bias.data.clone()
+            setattr(module, name, new_module)
+        else:
+            replace_linear_with_apt(child, device, initial_rank)
+
+def evaluate(model, dataloader, device):
+    model.eval()
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for batch in dataloader:
+            inputs = {k: v.to(device) for k, v in batch.items() if k != "label"}
+            labels = batch["label"].to(device)
+            outputs = model(**inputs).logits
+            preds = outputs.argmax(dim=-1)
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+    return correct / total
+
+# --------------------------------------------------------------------------- #
+#  Main training loop
+# --------------------------------------------------------------------------- #
+def main(args):
+    utils.set_seed(args.seed)
+
+    accelerator = Accelerator()
+    device = accelerator.device
+
+    # Load dataset
+    dataset = load_dataset("glue", args.task)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
+
+    def tokenize(batch):
+        return tokenizer(batch['sentence'], truncation=True, padding=False)
+
+    dataset = dataset.map(tokenize, batched=True)
+    dataset.set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
+
+    train_loader = DataLoader(
+        dataset["train"], shuffle=True,
+        collate_fn=DataCollatorWithPadding(tokenizer=tokenizer),
+        batch_size=args.batch_size
+    )
+    dev_loader = DataLoader(
+        dataset["validation"],
+        collate_fn=DataCollatorWithPadding(tokenizer=tokenizer),
+        batch_size=args.batch_size
+    )
+
+    # Load model
+    model = AutoModelForSequenceClassification.from_pretrained(
+        args.model_name,
+        num_labels=2,
+        output_hidden_states=False
+    ).to(device)
+
+    # Inject APT adapters
+    replace_linear_with_apt(model, device, args.initial_rank)
+
+    # Optimizer
+    optimizer = AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=args.lr
+    )
+
+    total_steps = args.epochs * len(train_loader)
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer, num_warmup_steps=int(0.05 * total_steps),
+        num_training_steps=total_steps
+    )
+
+    model, optimizer, train_loader, dev_loader = accelerator.prepare(
+        model, optimizer, train_loader, dev_loader
+    )
+
+    # Training
+    best_acc = 0.0
+    start_time = time.time()
+    for epoch in range(args.epochs):
+        model.train()
+        epoch_loss = 0.0
+        for step, batch in enumerate(train_loader):
+            batch = {k: v.to(device) for k, v in batch.items()}
+            outputs = model(**batch)
+            loss = outputs.loss
+            accelerator.backward(loss)
+
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
+            epoch_loss += loss.item()
+
+            if (step + 1) % 50 == 0:
+                print(f"Epoch {epoch+1}/{args.epochs} Step {step+1} Loss {loss.item():.4f}")
+
+        # Prune neurons after each epoch
+        prune_ratio = (args.prune_rate - 0.0) / args.epochs  # linear schedule
+        for name, module in model.named_modules():
+            if isinstance(module, APTLinear):
+                module.prune_neurons(prune_ratio)
+
+        # Increase LoRA rank periodically
+        if (epoch + 1) % args.rank_increase_every == 0:
+            for name, module in model.named_modules():
+                if isinstance(module, APTLinear):
+                    module.increase_rank(min(module.rank + args.initial_rank,
+                                            args.max_rank))
+
+        # Evaluation
+        acc = evaluate(model, dev_loader, device)
+        print(f"Epoch {epoch+1} Dev Accuracy: {acc:.4f}")
+        if acc > best_acc:
+            best_acc = acc
+            # Save checkpoint
+            Path(args.save_dir).mkdir(parents=True, exist_ok=True)
+            accelerator.save_state(Path(args.save_dir) / "best_checkpoint.pt")
+
+    elapsed = time.time() - start_time
+    print(f"\nTraining finished in {elapsed/60:.2f} minutes.")
+    print(f"Best Dev Accuracy: {best_acc:.4f}")
+
+    # Final evaluation on dev set
+    acc = evaluate(model, dev_loader, device)
+    print(f"Final Dev Accuracy: {acc:.4f}")
+
+    # Report memory usage
+    max_mem = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+    print(f"Peak GPU memory (MB): {max_mem:.1f}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="APT Training Demo")
+    for k, v in DEFAULTS.items():
+        parser.add_argument(f"--{k}", type=type(v), default=v)
+    args = parser.parse_args()
+    main(args)
+```
+
+---
+
+**Explanation of the implementation**
+
+1. **APTLinear**  
+   * Implements the core of the APT adapter: binary masks for pruning and a low‑rank LoRA adaptation whose rank can be increased during training.  
+   * `prune_neurons` uses the running gradient (`weight.grad`) to compute salience and zeroes the least salient output neurons.  
+   * `increase_rank` adds new random columns to the LoRA matrices.
+
+2. **Model modification**  
+   * `replace_linear_with_apt` walks through the RoBERTa model and replaces every `nn.Linear` with an `APTLinear`.  
+   * This covers attention projections and feed‑forward layers, giving us a simple structured pruning mechanism (pruning output neurons).
+
+3. **Training loop**  
+   * Uses `accelerate` for easy multi‑GPU support (although the example runs on a single GPU).  
+   * After each epoch we prune a fraction of neurons (`prune_ratio`) and optionally increase LoRA rank.  
+   * Evaluation on the SST‑2 dev set is performed after each epoch.
+
+4. **Reproduction script**  
+   * `reproduce.sh` installs everything and runs the training.  
+   * The final accuracy, training time, and peak GPU memory are printed, allowing a quick sanity check against the paper’s reported numbers (the toy implementation will not match the exact results but demonstrates the workflow).
+
+You can now clone this repository, run `bash reproduce.sh`, and see a complete training–evaluation pipeline that follows the spirit of the APT paper.

@@ -1,0 +1,31 @@
+# Reproduction of “A Mechanistic Understanding of Alignment Algorithms:
+# A Case Study on DPO and Toxicity”
+
+This repository implements the experimental pipeline described in the paper.
+It focuses on GPT‑2‑medium and, optionally, LLaMA‑2‑7b.
+
+## Experimental pipeline
+
+1. **Train a linear probe** (`train_probe.py`) on the Jigsaw Toxic Comment
+   Classification dataset.
+2. **Extract toxic value vectors** (`extract_toxic_vectors.py`) – the
+   script now extracts all MLP value vectors, keeps the top 16 384
+   by cosine similarity with the probe.
+3. **Compute an SVD basis** (`svd_toxic_vectors.py`) of the toxic vectors.
+4. **Generate a pairwise dataset** (`prepare_pairs_pplm.py`) using a
+   lightweight PPLM guided by the probe.
+5. **Fine‑tune GPT‑2 with DPO** (`dpo_train.py`).
+6. **Evaluate** (`evaluate.py`) on RealToxicityPrompts with Perspective API
+   or a profanity fallback.
+7. **Analyse weight shifts** (`analysis_shift.py`) – prints cosine
+   similarity and L2 norm difference per parameter.
+8. **Re‑align GPT‑2** (`realign_gpt2.py`) by scaling the 7 most toxic
+   key vectors.
+9. **Optional LLaMA‑2‑7b gating analysis** (`llm_gating_analysis.py`).
+10. **Optional LLaMA‑2‑7b re‑alignment** (`llm_realign.py`).
+
+All scripts are self‑contained and use only source code and public
+datasets.  The repository does **not** ship any large model checkpoints;
+they are downloaded on demand from HuggingFace.
+
+## Running the full reproduction

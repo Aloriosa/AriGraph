@@ -1,0 +1,55 @@
+import os
+import json
+import random
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+from datasets import load_dataset
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModel
+from tqdm.auto import tqdm
+
+def set_seed(seed: int = 42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+def save_json(obj, path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(obj, f, indent=2)
+
+def load_json(path):
+    with open(path) as f:
+        return json.load(f)
+
+def to_device(tensors, device):
+    if isinstance(tensors, torch.Tensor):
+        return tensors.to(device)
+    return {k: v.to(device) for k, v in tensors.items()}
+
+def get_token_embeddings(tokenizer, model):
+    # Returns a dict mapping token id -> embedding vector (float32)
+    with torch.no_grad():
+        embedding = model.get_input_embeddings().weight.data.cpu()
+    return {i: embedding[i].numpy() for i in range(len(embedding))}
+
+def compute_perplexity(model, tokenizer, texts, device):
+    model.eval()
+    ppls = []
+    for text in tqdm(texts, desc="Perplexity"):
+        inputs = tokenizer(text, return_tensors="pt").to(device)
+        with torch.no_grad():
+            outputs = model(**inputs, labels=inputs["input_ids"])
+            ppl = torch.exp(outputs.loss).item()
+        ppls.append(ppl)
+    return np.mean(ppls)
+
+def tokenize_batch(batch, tokenizer, max_len=128):
+    return tokenizer(batch, truncation=True, padding=True, max_length=max_len, return_tensors="pt")
+
+def load_gpt2_model(device):
+    tokenizer = AutoTokenizer.from_pretrained("gpt2-medium")
+    model = AutoModelForCausalLM.from_pretrained("gpt2-medium")
+    model.to(device)
+    return tokenizer, model

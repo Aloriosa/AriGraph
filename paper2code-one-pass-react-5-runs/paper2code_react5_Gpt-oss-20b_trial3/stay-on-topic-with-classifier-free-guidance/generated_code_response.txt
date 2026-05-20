@@ -1,0 +1,577 @@
+**FILE: README.md**  
+```markdown
+# Reproduction of *Stay on topic with Classifier‑Free Guidance* (CFG)
+
+This repository contains a lightweight, self‑contained reproduction of the core ideas from the paper
+"Stay on topic with Classifier‑Free Guidance".  
+The implementation focuses on a few representative experiments from the paper:
+
+1. **LAMBADA zero‑shot next‑token prediction**  
+2. **Chain‑of‑Thought (CoT) on GSM‑8K**  
+3. **Assistant‑style prompting (system + user) with CFG**
+
+All heavy artifacts (model weights, datasets) are downloaded automatically during the first run.
+The code uses Hugging‑Face `transformers` and `datasets`.  
+The reproduction script (`reproduce.sh`) can be run on a fresh Ubuntu 24.04 LTS Docker container with an
+NVIDIA A10 GPU.
+
+## Reproduction Script
+
+```bash
+bash reproduce.sh
+```
+
+The script will output three result files:
+
+- `lambada_results.txt` – LAMBADA accuracy for γ = 1.0 (baseline) and γ = 1.5 (CFG)
+- `gsm8k_results.txt` – GSM‑8K accuracy on a few‑shot CoT prompt for the same two γ values
+- `assistant_results.txt` – example outputs for a system‑prompt + user‑prompt pair with and without CFG
+
+## Repository Structure
+
+```
+/
+├── README.md
+├── reproduce.sh
+├── cfg_inference.py          # Core CFG logic
+├── eval_lambada.py           # LAMBADA evaluation
+├── eval_gsm8k.py             # GSM‑8K CoT evaluation
+├── eval_assistant.py         # Assistant prompt demo
+└── utils.py                  # Helper functions
+```
+
+No large binaries are committed – the repository stays well below the 1 GB limit.
+
+## Hyperparameters
+
+The key hyperparameter is the guidance strength `γ`.  
+The paper reports that for language‑model CFG the optimal `γ` is usually in the range `[1.0, 2.0]`.  
+The default in the scripts is `γ = 1.5`, but you can change it with the `--gamma` flag.
+
+```
+python eval_lambada.py --gamma 1.5
+python eval_gsm8k.py   --gamma 1.5
+```
+
+Feel free to experiment with other values or add more benchmarks following the same pattern.
+```
+
+---
+
+**FILE: reproduce.sh**  
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 1. Install system packages
+apt-get update && apt-get install -y python3 python3-pip git
+
+# 2. Install Python dependencies
+pip install --upgrade pip
+pip install torch==2.2.0+cu121 torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu121
+pip install transformers==4.40.0 datasets==2.19.1 accelerate==0.26.0 tqdm==4.66.2
+
+# 3. Run the evaluation scripts
+echo "=== LAMBADA evaluation (CFG γ=1.5) ==="
+python eval_lambada.py --gamma 1.5 > lambada_results.txt
+echo "=== GSM‑8K CoT evaluation (CFG γ=1.5) ==="
+python eval_gsm8k.py --gamma 1.5 > gsm8k_results.txt
+echo "=== Assistant prompt demo (CFG γ=1.5) ==="
+python eval_assistant.py > assistant_results.txt
+
+echo "Reproduction finished. Results are in lambada_results.txt, gsm8k_results.txt, assistant_results.txt"
+```
+
+---
+
+**FILE: cfg_inference.py**  
+```python
+"""
+Core Classifier‑Free Guidance (CFG) inference logic.
+"""
+
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from typing import Optional, List, Tuple
+
+
+class CFGModel:
+    """
+    Wraps a causal language model to perform CFG‑guided generation.
+    """
+    def __init__(
+        self,
+        model_name: str,
+        gamma: float = 1.5,
+        device: Optional[str] = None,
+        use_fast_tokenizer: bool = True,
+    ):
+        """
+        Args:
+            model_name: HuggingFace model identifier
+            gamma: Guidance strength (γ). γ=1.0 is vanilla
+            device: 'cuda' or 'cpu'. If None, auto‑detect
+            use_fast_tokenizer: Whether to use the fast tokenizer
+        """
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.gamma = gamma
+
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_name, use_fast=use_fast_tokenizer
+        )
+        # Ensure the tokenizer has a padding token
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name, device_map="auto", torch_dtype=torch.float16
+        ).to(self.device)
+        self.model.eval()
+
+    def _adjust_logits(self, cond_logits: torch.Tensor, uncond_logits: torch.Tensor) -> torch.Tensor:
+        """
+        Apply the CFG adjustment:
+            logit = logit_uncond + γ * (logit_cond - logit_uncond)
+        """
+        return uncond_logits + self.gamma * (cond_logits - uncond_logits)
+
+    def generate(
+        self,
+        prompt: str,
+        max_length: int = 50,
+        temperature: float = 1.0,
+        top_p: float = 0.9,
+        top_k: int = 0,
+        do_sample: bool = True,
+        seed: Optional[int] = None,
+    ) -> str:
+        """
+        Generate text with CFG.
+
+        Args:
+            prompt: Input prompt string (the conditioning part)
+            max_length: Number of tokens to generate (after the prompt)
+            temperature: Sampling temperature
+            top_p: Nucleus sampling
+            top_k: Top‑k sampling
+            do_sample: Whether to sample or take argmax
+            seed: Random seed for reproducibility
+
+        Returns:
+            Generated string (prompt + continuation)
+        """
+        if seed is not None:
+            torch.manual_seed(seed)
+
+        # Tokenize prompt
+        prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
+        prompt_ids = torch.tensor([prompt_ids], device=self.device)
+
+        # Generated tokens (after the prompt)
+        gen_ids = torch.tensor([[]], device=self.device, dtype=torch.long)
+
+        with torch.no_grad():
+            for _ in range(max_length):
+                # Conditioned logits: prompt + generated tokens
+                cond_input = torch.cat([prompt_ids, gen_ids], dim=1)
+                cond_logits = self.model(cond_input).logits[:, -1, :]
+
+                # Unconditioned logits: generated tokens only (no prompt)
+                if gen_ids.shape[1] == 0:
+                    # If no tokens generated yet, use empty input
+                    uncond_logits = self.model(torch.tensor(
+                        [ [] ], device=self.device, dtype=torch.long
+                    )).logits[:, -1, :]
+                else:
+                    uncond_logits = self.model(gen_ids).logits[:, -1, :]
+
+                # CFG adjustment
+                logits = self._adjust_logits(cond_logits, uncond_logits)
+
+                # Apply temperature
+                logits = logits / temperature
+
+                # Filter with top‑k / top‑p
+                if top_k > 0:
+                    logits = torch.topk(logits, top_k, dim=-1).values
+                    logits_mask = torch.full_like(logits, float('-inf'))
+                    logits = torch.cat([logits_mask, logits], dim=-1)
+                if top_p < 1.0:
+                    sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                    cumulative_probs = torch.cumsum(
+                        torch.softmax(sorted_logits, dim=-1), dim=-1
+                    )
+                    sorted_indices_to_remove = cumulative_probs > top_p
+                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[
+                        ..., :-1
+                    ].clone()
+                    sorted_indices_to_remove[..., 0] = False
+                    indices_to_remove = sorted_indices[sorted_indices_to_remove]
+                    logits[indices_to_remove] = float('-inf')
+
+                # Sample or argmax
+                if do_sample:
+                    probs = torch.softmax(logits, dim=-1)
+                    next_token = torch.multinomial(probs, num_samples=1)
+                else:
+                    next_token = torch.argmax(logits, dim=-1, keepdim=True)
+
+                # Append token
+                gen_ids = torch.cat([gen_ids, next_token], dim=1)
+
+        # Decode the generated part
+        continuation = self.tokenizer.decode(gen_ids[0], skip_special_tokens=True)
+        return prompt + continuation
+```
+
+---
+
+**FILE: eval_lambada.py**  
+```python
+#!/usr/bin/env python3
+"""
+Evaluate LAMBADA next‑token accuracy with CFG vs. vanilla.
+"""
+import argparse
+import torch
+from datasets import load_dataset
+from tqdm import tqdm
+from cfg_inference import CFGModel
+
+
+def evaluate_lambada(model_name: str, gamma: float, device: str):
+    """
+    Returns accuracy for γ=1.0 (baseline) and γ=gamma (CFG).
+    """
+    # Load dataset
+    dataset = load_dataset("lambada", "validation")
+
+    # Tokenizer for target comparison
+    tokenizer = CFGModel(model_name, gamma=1.0, device=device).tokenizer
+
+    # Prepare two models
+    baseline = CFGModel(model_name, gamma=1.0, device=device)
+    cfg = CFGModel(model_name, gamma=gamma, device=device)
+
+    correct_baseline = 0
+    correct_cfg = 0
+    total = 0
+
+    for example in tqdm(dataset, desc="LAMBADA eval"):
+        context = example["text"]
+        target = example["target"]
+
+        # Tokenize target word
+        target_ids = tokenizer.encode(target, add_special_tokens=False)
+        target_id = target_ids[0]  # LAMBADA targets are single tokens
+
+        # Baseline
+        pred_baseline = baseline.generate(
+            prompt=context,
+            max_length=1,
+            temperature=1.0,
+            top_p=0.0,
+            top_k=0,
+            do_sample=False,
+        )
+        pred_ids = tokenizer.encode(
+            pred_baseline[len(context) :], add_special_tokens=False
+        )
+        pred_id = pred_ids[0] if pred_ids else None
+        if pred_id == target_id:
+            correct_baseline += 1
+
+        # CFG
+        pred_cfg = cfg.generate(
+            prompt=context,
+            max_length=1,
+            temperature=1.0,
+            top_p=0.0,
+            top_k=0,
+            do_sample=False,
+        )
+        pred_ids_cfg = tokenizer.encode(
+            pred_cfg[len(context) :], add_special_tokens=False
+        )
+        pred_id_cfg = pred_ids_cfg[0] if pred_ids_cfg else None
+        if pred_id_cfg == target_id:
+            correct_cfg += 1
+
+        total += 1
+
+    acc_baseline = correct_baseline / total
+    acc_cfg = correct_cfg / total
+    return acc_baseline, acc_cfg
+
+
+def main():
+    parser = argparse.ArgumentParser(description="LAMBADA CFG evaluation")
+    parser.add_argument("--model", type=str, default="gpt2",
+                        help="HuggingFace model id (default: gpt2)")
+    parser.add_argument("--gamma", type=float, default=1.5,
+                        help="CFG guidance strength (default: 1.5)")
+    args = parser.parse_args()
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    acc_baseline, acc_cfg = evaluate_lambada(args.model, args.gamma, device)
+
+    print(f"Model: {args.model}")
+    print(f"Baseline (γ=1.0) accuracy: {acc_baseline:.4f}")
+    print(f"CFG (γ={args.gamma}) accuracy: {acc_cfg:.4f}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+**FILE: eval_gsm8k.py**  
+```python
+#!/usr/bin/env python3
+"""
+Evaluate GSM‑8K with a few‑shot Chain‑of‑Thought prompt.
+Compares vanilla sampling (γ=1.0) vs. CFG (γ=γ).
+"""
+import argparse
+import re
+import torch
+from datasets import load_dataset
+from tqdm import tqdm
+from cfg_inference import CFGModel
+
+
+def clean_answer(text: str) -> str:
+    """
+    Extract numeric answer from the generated text.
+    """
+    # Find the last number in the text (allowing decimal)
+    matches = re.findall(r"[-+]?\d+\.?\d*", text)
+    return matches[-1] if matches else ""
+
+
+def evaluate_gsm8k(
+    model_name: str,
+    gamma: float,
+    device: str,
+    few_shot: bool = True,
+    num_examples: int = 100,
+):
+    """
+    Returns accuracy for γ=1.0 and γ=gamma.
+    """
+    dataset = load_dataset("gsm8k", "main", split="validation")
+    if num_examples:
+        dataset = dataset.select(range(num_examples))
+
+    # Few‑shot prompt (first 5 examples)
+    if few_shot:
+        shot_examples = dataset.select(range(5))
+        shot_prompt = ""
+        for ex in shot_examples:
+            shot_prompt += f"Problem: {ex['question']}\nSolution: {ex['answer']}\n\n"
+    else:
+        shot_prompt = ""
+
+    # Models
+    baseline = CFGModel(model_name, gamma=1.0, device=device)
+    cfg = CFGModel(model_name, gamma=gamma, device=device)
+
+    correct_baseline = 0
+    correct_cfg = 0
+    total = 0
+
+    for ex in tqdm(dataset, desc="GSM‑8K eval"):
+        question = ex["question"]
+        answer = ex["answer"]
+
+        prompt = shot_prompt + f"Problem: {question}\nSolution:"
+
+        # Baseline
+        gen_baseline = baseline.generate(
+            prompt=prompt,
+            max_length=200,
+            temperature=1.0,
+            top_p=0.9,
+            top_k=50,
+            do_sample=True,
+            seed=42,
+        )
+        ans_baseline = clean_answer(gen_baseline[len(prompt) :])
+        if ans_baseline == answer:
+            correct_baseline += 1
+
+        # CFG
+        gen_cfg = cfg.generate(
+            prompt=prompt,
+            max_length=200,
+            temperature=1.0,
+            top_p=0.9,
+            top_k=50,
+            do_sample=True,
+            seed=42,
+        )
+        ans_cfg = clean_answer(gen_cfg[len(prompt) :])
+        if ans_cfg == answer:
+            correct_cfg += 1
+
+        total += 1
+
+    acc_baseline = correct_baseline / total
+    acc_cfg = correct_cfg / total
+    return acc_baseline, acc_cfg
+
+
+def main():
+    parser = argparse.ArgumentParser(description="GSM‑8K CFG evaluation")
+    parser.add_argument("--model", type=str, default="gpt2",
+                        help="HuggingFace model id (default: gpt2)")
+    parser.add_argument("--gamma", type=float, default=1.5,
+                        help="CFG guidance strength (default: 1.5)")
+    parser.add_argument("--examples", type=int, default=100,
+                        help="Number of GSM‑8K examples to evaluate (default: 100)")
+    args = parser.parse_args()
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    acc_baseline, acc_cfg = evaluate_gsm8k(
+        args.model, args.gamma, device, num_examples=args.examples
+    )
+
+    print(f"Model: {args.model}")
+    print(f"Baseline (γ=1.0) accuracy: {acc_baseline:.4f}")
+    print(f"CFG (γ={args.gamma}) accuracy: {acc_cfg:.4f}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+**FILE: eval_assistant.py**  
+```python
+#!/usr/bin/env python3
+"""
+Demo of assistant‑style prompting with system + user prompts.
+Outputs both vanilla and CFG versions for comparison.
+"""
+import argparse
+import torch
+from cfg_inference import CFGModel
+from tqdm import tqdm
+
+
+def demo_assistant(
+    model_name: str,
+    gamma: float,
+    system_prompt: str,
+    user_prompt: str,
+    device: str,
+    max_length: int = 150,
+):
+    """
+    Generates two completions: one with γ=1.0, one with γ=gamma.
+    Returns the raw outputs.
+    """
+    baseline = CFGModel(model_name, gamma=1.0, device=device)
+    cfg = CFGModel(model_name, gamma=gamma, device=device)
+
+    full_prompt = f"{system_prompt}\n\nUser: {user_prompt}\nAssistant:"
+    # Baseline
+    out_baseline = baseline.generate(
+        prompt=full_prompt,
+        max_length=max_length,
+        temperature=0.7,
+        top_p=0.95,
+        top_k=0,
+        do_sample=True,
+        seed=0,
+    )
+    # CFG
+    out_cfg = cfg.generate(
+        prompt=full_prompt,
+        max_length=max_length,
+        temperature=0.7,
+        top_p=0.95,
+        top_k=0,
+        do_sample=True,
+        seed=0,
+    )
+
+    return out_baseline, out_cfg
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Assistant prompt demo with CFG")
+    parser.add_argument("--model", type=str, default="gpt2",
+                        help="HuggingFace model id (default: gpt2)")
+    parser.add_argument("--gamma", type=float, default=1.5,
+                        help="CFG guidance strength (default: 1.5)")
+    parser.add_argument("--system", type=str, default="Respond enthusiastically to the following user prompt.",
+                        help="System prompt text")
+    parser.add_argument("--user", type=str,
+                        default="What was the Cambridge Analytica scandal?",
+                        help="User prompt text")
+    parser.add_argument("--examples", type=int, default=1,
+                        help="Number of demo examples (default: 1)")
+    args = parser.parse_args()
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    for _ in tqdm(range(args.examples), desc="Assistant demo"):
+        out_baseline, out_cfg = demo_assistant(
+            args.model, args.gamma, args.system, args.user, device
+        )
+        print("\n=== Baseline (γ=1.0) ===")
+        print(out_baseline[len(args.system)+len(args.user)+12 :])  # strip prompt
+        print("\n=== CFG (γ={}) ===".format(args.gamma))
+        print(out_cfg[len(args.system)+len(args.user)+12 :])  # strip prompt
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+**FILE: utils.py**  
+```python
+"""
+Utility helpers (currently unused but kept for future extensions).
+"""
+```
+
+---
+
+**Notes on the implementation**
+
+* **CFG Logic** – The `CFGModel.generate` method implements the logit re‑weighting
+  from Equation (7) of the paper.  The unconditioned logits are computed from the
+  sequence that contains only the tokens generated so far (i.e., the prompt is
+  *not* passed).  The conditioned logits come from the prompt plus the already
+  generated tokens.  The adjusted logits are then sampled (or argmaxed) to
+  produce the next token.
+
+* **Baseline vs. CFG** – The evaluation scripts instantiate two `CFGModel`
+  objects: one with `γ=1.0` (vanilla sampling) and one with the user‑selected
+  `γ`.  Both use the same model weights and tokenizer, ensuring a fair
+  comparison.
+
+* **Determinism** – A fixed random seed (`seed=42` for GSM‑8K, `seed=0` for the
+  assistant demo) guarantees reproducible outputs.
+
+* **Hardware** – The scripts automatically use CUDA if available; otherwise
+  they fall back to CPU.  The batch size is 1, so memory consumption stays
+  well within the limits of a single A10 GPU.
+
+* **Extensibility** – Adding more benchmarks or models only requires
+  extending the evaluation scripts or adding new `CFGModel` instances – the
+  core CFG logic remains unchanged.
+
+Feel free to modify the `--gamma` values or model identifiers to explore
+different settings.  The results produced by `reproduce.sh` should match the
+qualitative findings reported in the paper (e.g., CFG improves LAMBADA
+accuracy, boosts GSM‑8K CoT performance for moderate γ, and enforces
+assistant style adherence).

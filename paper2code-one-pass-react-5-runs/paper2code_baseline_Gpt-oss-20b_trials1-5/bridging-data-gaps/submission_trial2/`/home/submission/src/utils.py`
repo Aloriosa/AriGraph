@@ -1,0 +1,27 @@
+import numpy as np
+import torch
+
+def cosine_beta_schedule(timesteps: int, s: float = 0.008):
+    """
+    Cosine beta schedule from https://arxiv.org/abs/2102.09672
+    """
+    steps = timesteps + 1
+    x = np.linspace(0, timesteps, steps)
+    alphas_cumprod = np.cos(((x / timesteps) + s) / (1 + s) * np.pi * 0.5) ** 2
+    alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
+    betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
+    betas = np.clip(betas, 0, 0.999)
+    return betas
+
+def get_alphas(betas):
+    alphas = 1.0 - betas
+    alphas_cumprod = np.cumprod(alphas)
+    sqrt_alphas_cumprod = np.sqrt(alphas_cumprod)
+    sqrt_one_minus_alphas_cumprod = np.sqrt(1 - alphas_cumprod)
+    return {
+        "betas": torch.tensor(betas, dtype=torch.float32),
+        "alphas": torch.tensor(alphas, dtype=torch.float32),
+        "alphas_cumprod": torch.tensor(alphas_cumprod, dtype=torch.float32),
+        "sqrt_alphas_cumprod": torch.tensor(sqrt_alphas_cumprod, dtype=torch.float32),
+        "sqrt_one_minus_alphas_cumprod": torch.tensor(sqrt_one_minus_alphas_cumprod, dtype=torch.float32),
+    }

@@ -1,0 +1,629 @@
+**FILE: fre/functional_reward_encoding.py**  
+```python
+"""
+Functional Reward Encoding (FRE) implementation.
+
+This module implements the encoder/decoder architecture described in the paper.
+The encoder is a transformer that consumes a set of (state, reward) pairs
+and produces a latent distribution p(z | context).  The decoder predicts
+the reward for a new state given the latent code.
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import Tuple, List
+
+
+class RewardPrior:
+    """
+    Sample random reward functions from a mixture of
+    goal‑reaching, linear, and MLP types.
+    """
+
+    def __init__(self, state_dim: int, device: torch.device):
+        self.state_dim = state_dim
+        self.device = device
+        self.mlp_dim = 32
+        # Pre‑generate random MLP weights
+        self.mlp_weights = [
+            (
+                torch.randn(state_dim, self.mlp_dim, device=device) * 0.5,
+                torch.randn(self.mlp_dim, 1, device=device) * 0.5,
+            )
+            for _ in range(5)
+        ]
+
+    def sample(self) -> Tuple[callable, str]:
+        """Return a reward function and its type."""
+        rtype = random.choice(["goal", "linear", "mlp"])
+        if rtype == "goal":
+            goal = torch.randn(self.state_dim, device=self.device)
+
+            def fn(states: torch.Tensor) -> torch.Tensor:
+                # states: (N, state_dim)
+                dist = torch.norm(states - goal, dim=-1)
+                return torch.where(dist > 0.2,
+                                   torch.full_like(dist, -1.0),
+                                   torch.full_like(dist, 0.0))
+
+            return fn, "goal"
+
+        elif rtype == "linear":
+            w = torch.randn(self.state_dim, device=self.device)
+            b = torch.randn(1, device=self.device)
+
+            def fn(states: torch.Tensor) -> torch.Tensor:
+                return (states @ w.unsqueeze(-1)).squeeze(-1) + b
+
+            return fn, "linear"
+
+        else:
+            w1, w2 = random.choice(self.mlp_weights)
+
+            def fn(states: torch.Tensor) -> torch.Tensor:
+                h = torch.tanh(states @ w1)
+                out = torch.tanh(h @ w2)
+                return out.squeeze(-1)
+
+            return fn, "mlp"
+
+
+class Encoder(nn.Module):
+    """
+    Transformer‑based encoder that maps a set of (state, reward)
+    pairs to a latent distribution p(z | context).
+    """
+
+    def __init__(
+        self,
+        state_dim: int,
+        latent_dim: int,
+        n_layers: int = 4,
+        n_heads: int = 4,
+        dim_feedforward: int = 256,
+        dropout: float = 0.1,
+        device: torch.device = torch.device("cpu"),
+    ):
+        super().__init__()
+        self.state_dim = state_dim
+        self.latent_dim = latent_dim
+        self.device = device
+
+        # Project (state, reward) into transformer space
+        # We concatenate reward as a scalar
+        self.input_proj = nn.Linear(state_dim + 1, dim_feedforward)
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=dim_feedforward,
+            nhead=n_heads,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+
+        # Latent mean & logvar
+        self.fc_mu = nn.Linear(dim_feedforward, latent_dim)
+        self.fc_logvar = nn.Linear(dim_feedforward, latent_dim)
+
+    def forward(
+        self, states: torch.Tensor, rewards: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        states: (B, K, state_dim)
+        rewards: (B, K)
+        """
+        B, K, _ = states.shape
+        # concatenate reward
+        r_exp = rewards.unsqueeze(-1)  # (B, K, 1)
+        x = torch.cat([states, r_exp], dim=-1)  # (B, K, state_dim+1)
+        x = self.input_proj(x)  # (B, K, d_ff)
+        x = self.transformer(x)  # (B, K, d_ff)
+        x = x.mean(dim=1)  # (B, d_ff)
+        mu = self.fc_mu(x)
+        logvar = self.fc_logvar(x)
+        return mu, logvar
+
+
+class Decoder(nn.Module):
+    """
+    MLP that predicts rewards given a state and latent code.
+    """
+
+    def __init__(
+        self,
+        state_dim: int,
+        latent_dim: int,
+        hidden_dims: List[int] = [512, 512, 512],
+    ):
+        super().__init__()
+        layers = []
+        dim_in = state_dim + latent_dim
+        for h in hidden_dims:
+            layers.append(nn.Linear(dim_in, h))
+            layers.append(nn.ReLU())
+            dim_in = h
+        layers.append(nn.Linear(dim_in, 1))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, states: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        """
+        states: (B, K, state_dim)
+        z: (B, latent_dim) -> expand to (B, K, latent_dim)
+        """
+        B, K, _ = states.shape
+        z_exp = z.unsqueeze(1).expand(-1, K, -1)
+        inp = torch.cat([states, z_exp], dim=-1)
+        out = self.net(inp)  # (B, K, 1)
+        return out.squeeze(-1)  # (B, K)
+
+
+class FRE(nn.Module):
+    """
+    Wrapper that contains the encoder and decoder.
+    """
+
+    def __init__(
+        self,
+        state_dim: int,
+        latent_dim: int = 32,
+        n_layers: int = 4,
+        n_heads: int = 4,
+        dim_feedforward: int = 256,
+        device: torch.device = torch.device("cpu"),
+    ):
+        super().__init__()
+        self.encoder = Encoder(
+            state_dim,
+            latent_dim,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            dim_feedforward=dim_feedforward,
+            device=device,
+        )
+        self.decoder = Decoder(state_dim, latent_dim)
+
+    def encode(
+        self, states: torch.Tensor, rewards: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Returns (z, mu, logvar)
+        """
+        mu, logvar = self.encoder(states, rewards)
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        z = mu + eps * std
+        return z, mu, logvar
+
+    def decode(self, states: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        return self.decoder(states, z)
+
+    def forward(
+        self,
+        states_enc: torch.Tensor,
+        rewards_enc: torch.Tensor,
+        states_dec: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Forward pass for training: encode context, decode on separate set.
+        """
+        z, mu, logvar = self.encode(states_enc, rewards_enc)
+        preds = self.decode(states_dec, z)
+        return preds, mu, logvar
+```
+
+---
+
+**FILE: rl/offline_rl.py**  
+```python
+"""
+Simple offline RL using IQL-style updates.
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+from typing import Tuple
+import random
+
+
+class QNetwork(nn.Module):
+    def __init__(self, state_dim: int, latent_dim: int, action_dim: int,
+                 hidden_dims=[512,512,512]):
+        super().__init__()
+        dims = [state_dim + latent_dim + action_dim] + hidden_dims + [1]
+        layers = []
+        for i in range(len(dims)-1):
+            layers.append(nn.Linear(dims[i], dims[i+1]))
+            if i < len(dims)-2:
+                layers.append(nn.ReLU())
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, s: torch.Tensor, a: torch.Tensor, z: torch.Tensor):
+        inp = torch.cat([s, z, a], dim=-1)
+        return self.net(inp)
+
+class ValueNetwork(nn.Module):
+    def __init__(self, state_dim: int, latent_dim: int,
+                 hidden_dims=[512,512,512]):
+        super().__init__()
+        dims = [state_dim + latent_dim] + hidden_dims + [1]
+        layers = []
+        for i in range(len(dims)-1):
+            layers.append(nn.Linear(dims[i], dims[i+1]))
+            if i < len(dims)-2:
+                layers.append(nn.ReLU())
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, s: torch.Tensor, z: torch.Tensor):
+        inp = torch.cat([s, z], dim=-1)
+        return self.net(inp)
+
+class PolicyNetwork(nn.Module):
+    def __init__(self, state_dim: int, latent_dim: int, action_dim: int,
+                 hidden_dims=[512,512,512]):
+        super().__init__()
+        dims = [state_dim + latent_dim] + hidden_dims + [action_dim]
+        layers = []
+        for i in range(len(dims)-1):
+            layers.append(nn.Linear(dims[i], dims[i+1]))
+            if i < len(dims)-2:
+                layers.append(nn.ReLU())
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, s: torch.Tensor, z: torch.Tensor):
+        inp = torch.cat([s, z], dim=-1)
+        return self.net(inp)  # mean action
+
+class IQLAgent:
+    def __init__(self,
+                 state_dim: int,
+                 action_dim: int,
+                 latent_dim: int,
+                 device: torch.device = torch.device("cpu"),
+                 gamma: float = 0.99,
+                 lr: float = 3e-4,
+                 expectile: float = 0.8):
+        self.device = device
+        self.gamma = gamma
+
+        self.q1 = QNetwork(state_dim, latent_dim, action_dim).to(device)
+        self.q2 = QNetwork(state_dim, latent_dim, action_dim).to(device)
+        self.value = ValueNetwork(state_dim, latent_dim).to(device)
+        self.policy = PolicyNetwork(state_dim, latent_dim, action_dim).to(device)
+
+        self.q1_target = QNetwork(state_dim, latent_dim, action_dim).to(device)
+        self.q2_target = QNetwork(state_dim, latent_dim, action_dim).to(device)
+        self.q1_target.load_state_dict(self.q1.state_dict())
+        self.q2_target.load_state_dict(self.q2.state_dict())
+
+        self.q1_optim = torch.optim.Adam(self.q1.parameters(), lr=lr)
+        self.q2_optim = torch.optim.Adam(self.q2.parameters(), lr=lr)
+        self.value_optim = torch.optim.Adam(self.value.parameters(), lr=lr)
+        self.policy_optim = torch.optim.Adam(self.policy.parameters(), lr=lr)
+
+        self.expectile = expectile
+
+    @torch.no_grad()
+    def update_targets(self, tau=0.005):
+        for p_t, p_s in zip(self.q1_target.parameters(), self.q1.parameters()):
+            p_t.data.copy_(tau * p_s.data + (1 - tau) * p_t.data)
+        for p_t, p_s in zip(self.q2_target.parameters(), self.q2.parameters()):
+            p_t.data.copy_(tau * p_s.data + (1 - tau) * p_t.data)
+
+    def train_step(self,
+                   s: torch.Tensor,
+                   a: torch.Tensor,
+                   r: torch.Tensor,
+                   s_next: torch.Tensor,
+                   z: torch.Tensor):
+        """
+        One training step for IQL.
+        s, a, r, s_next: (B, ...). z: (B, latent_dim)
+        """
+        with torch.no_grad():
+            # Target Q
+            a_next = self.policy(s_next, z)
+            q1_next = self.q1_target(s_next, a_next, z).squeeze(-1)
+            q2_next = self.q2_target(s_next, a_next, z).squeeze(-1)
+            q_next = torch.min(q1_next, q2_next)
+            target_q = r + self.gamma * q_next
+
+        # Q loss
+        q1_pred = self.q1(s, a, z).squeeze(-1)
+        q2_pred = self.q2(s, a, z).squeeze(-1)
+        q1_loss = F.mse_loss(q1_pred, target_q)
+        q2_loss = F.mse_loss(q2_pred, target_q)
+
+        # Value loss (expectile regression)
+        v_pred = self.value(s, z).squeeze(-1)
+        q_tilde = torch.min(q1_pred, q2_pred)
+        weight = (q_tilde > v_pred).float()
+        value_loss = (weight * (v_pred - q_tilde).pow(2) +
+                      (1 - weight) * (v_pred - q_tilde).pow(2) * self.expectile).mean()
+
+        # Policy loss (advantage weighting)
+        advantage = q1_pred - v_pred
+        # Advantage weighting: exp(advantage)
+        weight_policy = torch.exp(advantage).clamp(max=10.0)
+        policy_loss = -(advantage * weight_policy).mean()
+
+        # Optimize
+        self.q1_optim.zero_grad()
+        q1_loss.backward()
+        self.q1_optim.step()
+
+        self.q2_optim.zero_grad()
+        q2_loss.backward()
+        self.q2_optim.step()
+
+        self.value_optim.zero_grad()
+        value_loss.backward()
+        self.value_optim.step()
+
+        self.policy_optim.zero_grad()
+        policy_loss.backward()
+        self.policy_optim.step()
+
+        self.update_targets()
+```
+
+---
+
+**FILE: train_fre_and_policy.py**  
+```python
+"""
+Training script for FRE and policy on a D4RL offline dataset.
+Usage: python train_fre_and_policy.py --env antmaze-large-diverse-v2
+"""
+
+import argparse
+import os
+import random
+import numpy as np
+import torch
+import gymnasium as gym
+import d4rl
+from tqdm import tqdm
+from fre.functional_reward_encoding import FRE, RewardPrior
+from rl.offline_rl import IQLAgent
+
+
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def load_dataset(env_name: str):
+    env = gym.make(env_name)
+    dataset = env.get_dataset()
+    return env, dataset
+
+
+def sample_minibatch(dataset, batch_size: int):
+    idx = np.random.choice(len(dataset['observations']), size=batch_size, replace=False)
+    s = torch.tensor(dataset['observations'][idx], dtype=torch.float32)
+    a = torch.tensor(dataset['actions'][idx], dtype=torch.float32)
+    s_next = torch.tensor(dataset['next_observations'][idx], dtype=torch.float32)
+    return s, a, s_next
+
+
+def reward_prior_sample(prior: RewardPrior, dataset, batch: int, K: int):
+    """
+    Sample K context states from the dataset for each batch element,
+    evaluate the sampled reward function on them.
+    """
+    state_dim = prior.state_dim
+    all_idx = np.random.choice(len(dataset['observations']), size=batch * K, replace=False)
+    states = torch.tensor(dataset['observations'][all_idx], dtype=torch.float32)
+    states = states.reshape(batch, K, state_dim)
+
+    rewards = torch.empty(batch, K, device=states.device)
+    for b in range(batch):
+        fn, _ = prior.sample()
+        rewards[b] = fn(states[b])
+
+    return states, rewards
+
+
+def train_fre(env_name: str, device: torch.device):
+    print(f"Training FRE on {env_name}")
+    env, dataset = load_dataset(env_name)
+    state_dim = dataset['observations'].shape[1]
+    fre = FRE(state_dim, latent_dim=32, n_layers=4, n_heads=4, dim_feedforward=256).to(device)
+    prior = RewardPrior(state_dim, device)
+    optimizer = torch.optim.Adam(fre.parameters(), lr=1e-4)
+    beta = 0.01
+    K_enc = 32
+    K_dec = 8
+    steps = 150000
+    batch_size = 64
+    for step in tqdm(range(steps)):
+        # Encoder-decoder batch
+        s_enc, r_enc = reward_prior_sample(prior, dataset, batch_size, K_enc)
+        s_dec, r_dec = reward_prior_sample(prior, dataset, batch_size, K_dec)
+        s_enc, r_enc = s_enc.to(device), r_enc.to(device)
+        s_dec, r_dec = s_dec.to(device), r_dec.to(device)
+
+        preds, mu, logvar = fre(s_enc, r_enc, s_dec)
+        mse = F.mse_loss(preds, r_dec)
+        kl = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+        loss = mse + beta * kl
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        if step % 10000 == 0:
+            print(f"Step {step} loss {loss.item():.4f}")
+
+    torch.save(fre.state_dict(), "fre_checkpoint.pt")
+    return fre, env, dataset
+
+
+def train_policy(fre: FRE, env, dataset, device: torch.device):
+    print("Training policy")
+    state_dim = dataset['observations'].shape[1]
+    action_dim = dataset['actions'].shape[1]
+    agent = IQLAgent(state_dim, action_dim, latent_dim=32, device=device)
+    prior = RewardPrior(state_dim, device)
+    batch_size = 256
+    steps = 850000
+    K_enc = 32
+    for step in tqdm(range(steps)):
+        # Sample reward function
+        fn, _ = prior.sample()
+        # Sample batch from dataset
+        s, a, s_next = sample_minibatch(dataset, batch_size)
+        s, a, s_next = s.to(device), a.to(device), s_next.to(device)
+        # Evaluate reward
+        r = fn(s).to(device)
+
+        # Encode context: use K_enc random states from dataset
+        idx = np.random.choice(len(dataset['observations']), size=K_enc, replace=False)
+        s_enc = torch.tensor(dataset['observations'][idx], dtype=torch.float32, device=device)
+        r_enc = fn(s_enc).to(device)
+        with torch.no_grad():
+            z, _, _ = fre.encode(s_enc.unsqueeze(0), r_enc.unsqueeze(0))
+            z = z.squeeze(0).detach()
+
+        agent.train_step(s, a, r, s_next, z)
+
+        if step % 5000 == 0:
+            print(f"Policy step {step}")
+
+    torch.save({
+        "q1": agent.q1.state_dict(),
+        "q2": agent.q2.state_dict(),
+        "value": agent.value.state_dict(),
+        "policy": agent.policy.state_dict(),
+    }, "policy_checkpoint.pt")
+    return agent
+
+
+def evaluate_agent(agent, fre, env, dataset, device, n_episodes=10):
+    fre.eval()
+    env = gym.make(env.unwrapped.spec.id)  # fresh env
+    results = []
+    prior = RewardPrior(env.observation_space.shape[0], device)
+    for ep in range(n_episodes):
+        # Sample a downstream task: e.g., goal-reaching
+        fn, _ = prior.sample()
+        # Sample 32 context states from dataset
+        idx = np.random.choice(len(dataset['observations']), size=32, replace=False)
+        s_ctx = torch.tensor(dataset['observations'][idx], dtype=torch.float32, device=device)
+        r_ctx = fn(s_ctx).to(device)
+        with torch.no_grad():
+            z, _, _ = fre.encode(s_ctx.unsqueeze(0), r_ctx.unsqueeze(0))
+            z = z.squeeze(0).detach()
+
+        obs, _ = env.reset()
+        total_r = 0.0
+        for t in range(2000):
+            obs_t = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+            with torch.no_grad():
+                a = agent.policy(obs_t, z)
+                a = a.squeeze(0).cpu().numpy()
+            # clip action to bounds
+            a = np.clip(a, env.action_space.low, env.action_space.high)
+            obs, rew, terminated, truncated, _ = env.step(a)
+            total_r += rew
+            if terminated or truncated:
+                break
+        results.append(total_r)
+    return np.mean(results), np.std(results)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--env", type=str, default="antmaze-large-diverse-v2")
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+    set_seed(args.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    fre, env, dataset = train_fre(args.env, device)
+    agent = train_policy(fre, env, dataset, device)
+    mean, std = evaluate_agent(agent, fre, env, dataset, device)
+    print(f"Zero-shot evaluation mean reward: {mean:.2f} ± {std:.2f}")
+    with open("output.txt", "w") as f:
+        f.write(f"Zero-shot mean reward: {mean:.2f} +/- {std:.2f}\n")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+**FILE: reproduce.sh**  
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+# Install dependencies
+pip install --quiet -r requirements.txt
+
+# Run training and evaluation
+python train_fre_and_policy.py --env antmaze-large-diverse-v2
+
+echo "Reproduction complete. Results written to output.txt"
+```
+
+---
+
+**FILE: requirements.txt**  
+```txt
+torch>=2.0
+torchvision
+numpy
+tqdm
+gymnasium>=0.28.1
+d4rl
+```
+
+---
+
+**FILE: README.md**  
+```markdown
+# Unsupervised Zero‑Shot Reinforcement Learning via Functional Reward Encodings (FRE)
+
+This repository contains a minimal implementation of the FRE method described in the paper *Unsupervised Zero‑Shot Reinforcement Learning via Functional Reward Encodings*.  
+The goal is to provide a reproducible pipeline that trains a Functional Reward Encoder on a random reward prior and a latent‑conditioned policy using an offline RL algorithm, then evaluates the zero‑shot policy on downstream tasks.
+
+## Files
+
+- `fre/functional_reward_encoding.py` – Encoder (transformer‑based) + Decoder (MLP) for functional reward encoding.  
+- `rl/offline_rl.py` – A lightweight IQL‑style offline RL agent.  
+- `train_fre_and_policy.py` – Orchestrates training of the FRE encoder and policy, then evaluates on a downstream task.  
+- `reproduce.sh` – Shell script that installs dependencies, runs the training script, and outputs the mean reward.  
+- `requirements.txt` – Python dependencies.  
+- `README.md` – This documentation.
+
+## Reproduction
+
+From the repository root run:
+
+```bash
+bash reproduce.sh
+```
+
+The script will train the FRE encoder, train the policy, evaluate it on a zero‑shot downstream task, and write the mean reward to `output.txt`.
+
+The entire pipeline can be executed on a CPU machine; a GPU will accelerate training but is not required.
+
+The implementation follows the algorithmic details of the paper:
+- Random reward priors (goal‑reaching, linear, MLP) are sampled and evaluated on states from the offline dataset.
+- The encoder uses a permutation‑invariant transformer to produce a latent representation of the reward function.
+- The decoder predicts rewards for new states given the latent code.
+- The policy is trained with IQL updates conditioned on the latent reward code.
+- Zero‑shot evaluation encodes a small set of reward samples and runs the policy without further training.
+
+Feel free to adjust hyper‑parameters, dataset, or environment to explore different settings.
+```
+
+---

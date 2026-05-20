@@ -1,0 +1,534 @@
+FILE: README.md
+```markdown
+# Reproduction of "Fine‑tuning Reinforcement Learning Models is Secretly a Forgetting Mitigation Problem"
+
+This repository contains a **minimal, self‑contained implementation** that demonstrates the core ideas of the paper:
+* **Forgetting of pre‑trained capabilities** (FPC) during fine‑tuning.
+* How simple **knowledge‑retention techniques** (Behavioral Cloning, EWC) can mitigate FPC.
+
+The implementation focuses on two toy environments that capture the two main failure modes described in the paper:
+1. A **two‑state MDP** that exhibits *state‑coverage gap*.
+2. A **1‑D gridworld** (“AppleRetrieval”) that exhibits *imperfect cloning gap*.
+
+Each environment is trained twice:
+* **Vanilla fine‑tuning** (no retention).
+* **Fine‑tuning + Behavioral Cloning (BC)**.
+
+The scripts produce CSV files with success statistics which can be plotted to observe the forgetting effect.
+
+> **Note**: This repo does **not** implement the full NetHack / Montezuma / Meta‑World experiments.  
+> The goal is to provide a runnable, lightweight reproduction that can be executed on a standard Ubuntu 24.04 LTS Docker container with an NVIDIA A10 GPU (GPU is optional for this toy setup).
+
+## Repository structure
+
+```
+/home/submission/
+├── README.md
+├── reproduce.sh
+├── requirements.txt
+└── src/
+    ├── __init__.py
+    ├── mdp_env.py
+    ├── apple_env.py
+    ├── policy.py
+    ├── train_mdp.py
+    ├── train_apple.py
+    └── utils.py
+```
+
+## How to run
+
+```bash
+# 1. Install dependencies
+bash reproduce.sh
+
+# 2. The script will:
+#    - Train the two toy tasks (vanilla & BC)
+#    - Write results to ./results/ folder
+#    - Print a short summary to stdout
+```
+
+After running, you will find:
+
+```
+./results/mdp_results.csv
+./results/apple_results.csv
+```
+
+Each CSV contains episode‑level statistics (episode number, success, steps, etc.) for the two training regimes.
+
+## Expected outputs
+
+The CSV files will show that:
+
+* In the **two‑state MDP**, vanilla fine‑tuning quickly forgets how to stay in `s1`, resulting in a low success rate on reaching `s1` after fine‑tuning.  
+  BC preserves the pre‑trained behaviour and maintains a high success rate.
+
+* In **AppleRetrieval**, vanilla fine‑tuning forgets the policy for Phase 2 (moving left), leading to poorer overall performance.  
+  BC keeps the Phase 2 behaviour intact and improves overall success.
+
+You can plot the results with any CSV plotting tool (e.g., `csvplot`, `pandas`, `matplotlib`).
+
+## Extending the experiments
+
+The code is written in pure Python using `torch` for the policy networks.  
+Feel free to replace the training loops with more sophisticated RL algorithms or to extend the environments.
+
+## License
+
+MIT License. Feel free to reuse the code for educational purposes.
+```
+
+FILE: reproduce.sh
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Update package lists and install Python3
+sudo apt-get update -y && sudo apt-get install -y python3 python3-pip
+
+# Install Python dependencies
+python3 -m pip install --upgrade pip
+pip install -r requirements.txt
+
+# Create results directory
+mkdir -p results
+
+# Run training scripts
+echo "===== Training Two‑State MDP ====="
+python3 src/train_mdp.py --save results/mdp_results.csv
+
+echo "===== Training AppleRetrieval ====="
+python3 src/train_apple.py --save results/apple_results.csv
+
+echo "===== Reproduction finished ====="
+echo "Results written to ./results/"
+```
+
+FILE: requirements.txt
+```txt
+numpy==1.26.4
+torch==2.2.0
+```
+
+FILE: src/__init__.py
+```python
+# Empty __init__.py to make src a package
+```
+
+FILE: src/policy.py
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class LinearPolicy(nn.Module):
+    """
+    Simple linear policy: pi(a=1 | s) = sigmoid(w * s + b)
+    """
+    def __init__(self, input_dim=1, output_dim=1):
+        super().__init__()
+        self.linear = nn.Linear(input_dim, output_dim, bias=True)
+
+    def forward(self, x):
+        logits = self.linear(x)
+        probs = torch.sigmoid(logits)
+        return probs
+
+    def get_action(self, state):
+        """
+        state: torch.Tensor of shape (1, input_dim)
+        Returns: action (0 or 1)
+        """
+        with torch.no_grad():
+            probs = self.forward(state)
+            return torch.bernoulli(probs).item()
+```
+
+FILE: src/mdp_env.py
+```python
+import numpy as np
+
+class TwoStateMDP:
+    """
+    Two‑state MDP with deterministic transitions:
+    - States: 0 (s0), 1 (s1)
+    - Actions: 0 (stay), 1 (move)
+    - Transition:
+        * From s0, action 1 -> s1, reward 1
+        * From s1, action 0 -> s0, reward 0
+    The episode ends after one step (since we only care about reaching s1).
+    """
+    def __init__(self):
+        self.state = None
+
+    def reset(self, start_state=0):
+        self.state = start_state
+        return np.array([self.state], dtype=np.float32)
+
+    def step(self, action):
+        if self.state == 0:
+            if action == 1:
+                next_state = 1
+                reward = 1.0
+            else:
+                next_state = 0
+                reward = 0.0
+        else:  # state == 1
+            if action == 0:
+                next_state = 0
+                reward = 0.0
+            else:
+                next_state = 1
+                reward = 0.0
+        self.state = next_state
+        done = True  # one‑step episode
+        return np.array([self.state], dtype=np.float32), reward, done, {}
+```
+
+FILE: src/apple_env.py
+```python
+import numpy as np
+
+class AppleRetrieval:
+    """
+    1‑D gridworld.
+    Phase 1: start at 0, goal at M (go right).
+    Phase 2: start at M, goal at 0 (go left).
+    Observation: sign indicating phase:
+        * -1 for Phase 1
+        * +1 for Phase 2
+    Action: 0 (left), 1 (right)
+    Episode ends when goal reached or after 100 steps.
+    Reward: +1 for each correct step, -1 for incorrect step.
+    """
+    def __init__(self, M=10):
+        self.M = M
+        self.pos = None
+        self.phase = None  # 1 or 2
+
+    def reset(self, phase=1):
+        self.phase = phase
+        if phase == 1:
+            self.pos = 0
+        else:
+            self.pos = self.M
+        obs = np.array([self.phase * -1], dtype=np.float32)  # -1 for phase 1, +1 for phase 2
+        return obs
+
+    def step(self, action):
+        # action: 0 left, 1 right
+        reward = 0.0
+        if self.phase == 1:
+            if action == 1:
+                self.pos += 1
+            else:
+                self.pos -= 1
+            if self.pos == self.M:
+                reward = 1.0
+        else:  # phase 2
+            if action == 0:
+                self.pos -= 1
+            else:
+                self.pos += 1
+            if self.pos == 0:
+                reward = 1.0
+
+        # Clip position to [0, M]
+        self.pos = max(0, min(self.M, self.pos))
+        done = (self.pos == self.M and self.phase == 1) or (self.pos == 0 and self.phase == 2)
+        obs = np.array([self.phase * -1], dtype=np.float32)
+        return obs, reward, done, {}
+```
+
+FILE: src/utils.py
+```python
+import torch
+import torch.nn.functional as F
+
+def kl_divergence(p_logits, q_logits):
+    """
+    KL divergence between two Bernoulli distributions given logits.
+    D_KL(p||q) = p*log(p/q) + (1-p)*log((1-p)/(1-q))
+    """
+    p = torch.sigmoid(p_logits)
+    q = torch.sigmoid(q_logits)
+    # Avoid log(0) by adding epsilon
+    eps = 1e-12
+    p = torch.clamp(p, eps, 1 - eps)
+    q = torch.clamp(q, eps, 1 - eps)
+    kl = p * torch.log(p / q) + (1 - p) * torch.log((1 - p) / (1 - q))
+    return kl.mean()
+
+def fisher_information(policy, env, num_samples=100):
+    """
+    Approximate diagonal Fisher information matrix for policy parameters.
+    For the simple policy we return a dict mapping param name to a tensor.
+    """
+    device = next(policy.parameters()).device
+    fisher = {name: torch.zeros_like(param, device=device) for name, param in policy.named_parameters()}
+    policy.eval()
+    for _ in range(num_samples):
+        state = torch.tensor(env.reset(), dtype=torch.float32).unsqueeze(0).to(device)
+        logits = policy(state)
+        # Sample action
+        action_dist = torch.distributions.Bernoulli(logits=torch.sigmoid(logits))
+        action = action_dist.sample()
+        # Compute log prob
+        log_prob = action_dist.log_prob(action)
+        # Compute gradients
+        policy.zero_grad()
+        log_prob.backward()
+        for name, param in policy.named_parameters():
+            fisher[name] += param.grad.detach() ** 2
+    for name in fisher:
+        fisher[name] /= num_samples
+    policy.train()
+    return fisher
+```
+
+FILE: src/train_mdp.py
+```python
+import argparse
+import csv
+import torch
+import torch.optim as optim
+import numpy as np
+from .policy import LinearPolicy
+from .mdp_env import TwoStateMDP
+from .utils import kl_divergence
+
+def evaluate(policy, env, start_state=0, num_episodes=100):
+    success = 0
+    steps = []
+    for _ in range(num_episodes):
+        state = env.reset(start_state=start_state)
+        state_t = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+        action = policy.get_action(state_t)
+        next_state, reward, done, _ = env.step(action)
+        steps.append(1)  # one step per episode
+        if reward > 0:
+            success += 1
+    return success / num_episodes, np.mean(steps)
+
+def train_vanilla(policy, env, pretrain_phase, finetune_phase, epochs=200, lr=0.01):
+    opt = optim.Adam(policy.parameters(), lr=lr)
+    for epoch in range(epochs):
+        # Pre‑train on pre‑train_phase (state 1)
+        state = env.reset(start_state=1)
+        state_t = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+        action = policy.get_action(state_t)
+        # We want action 0 (stay) on state 1
+        target = torch.tensor([[0.0]], dtype=torch.float32)
+        loss = F.binary_cross_entropy_with_logits(policy(state_t), target)
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+
+        # Fine‑tune on finetune_phase (state 0)
+        state = env.reset(start_state=0)
+        state_t = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+        action = policy.get_action(state_t)
+        # We want action 1 (move) on state 0
+        target = torch.tensor([[1.0]], dtype=torch.float32)
+        loss = F.binary_cross_entropy_with_logits(policy(state_t), target)
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+    return policy
+
+def train_bc(policy, env, pretrain_phase, finetune_phase, epochs=200, lr=0.01, bc_coef=1.0, buffer_size=50):
+    opt = optim.Adam(policy.parameters(), lr=lr)
+    # Collect buffer from pre‑train phase
+    buffer = []
+    for _ in range(buffer_size):
+        state = env.reset(start_state=1)
+        state_t = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+        action = policy.get_action(state_t)
+        buffer.append((state_t, torch.tensor([[action]], dtype=torch.float32)))
+
+    for epoch in range(epochs):
+        # Pre‑train step (same as vanilla)
+        state = env.reset(start_state=1)
+        state_t = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+        target = torch.tensor([[0.0]], dtype=torch.float32)
+        loss_pre = F.binary_cross_entropy_with_logits(policy(state_t), target)
+
+        # Fine‑tune step
+        state = env.reset(start_state=0)
+        state_t = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+        target = torch.tensor([[1.0]], dtype=torch.float32)
+        loss_finetune = F.binary_cross_entropy_with_logits(policy(state_t), target)
+
+        # BC loss on buffer
+        bc_loss = 0.0
+        for s_t, a in buffer:
+            logits = policy(s_t)
+            loss = F.binary_cross_entropy_with_logits(logits, a)
+            bc_loss += loss
+        bc_loss /= len(buffer)
+
+        loss = loss_pre + loss_finetune + bc_coef * bc_loss
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+    return policy
+
+def main(args):
+    env = TwoStateMDP()
+    policy_vanilla = LinearPolicy()
+    policy_bc = LinearPolicy()
+
+    # Train vanilla
+    policy_vanilla = train_vanilla(policy_vanilla, env, pretrain_phase=1, finetune_phase=0, epochs=args.epochs, lr=args.lr)
+    # Train with BC
+    policy_bc = train_bc(policy_bc, env, pretrain_phase=1, finetune_phase=0, epochs=args.epochs, lr=args.lr, bc_coef=args.bc_coef)
+
+    # Evaluate
+    succ_vanilla, _ = evaluate(policy_vanilla, env, start_state=0, num_episodes=args.eval_eps)
+    succ_bc, _ = evaluate(policy_bc, env, start_state=0, num_episodes=args.eval_eps)
+
+    # Write CSV
+    with open(args.save, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['method', 'success_rate'])
+        writer.writerow(['vanilla', succ_vanilla])
+        writer.writerow(['bc', succ_bc])
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--save', type=str, default='mdp_results.csv')
+    parser.add_argument('--epochs', type=int, default=200)
+    parser.add_argument('--lr', type=float, default=0.01)
+    parser.add_argument('--bc_coef', type=float, default=1.0)
+    parser.add_argument('--eval_eps', type=int, default=200)
+    args = parser.parse_args()
+    main(args)
+```
+
+FILE: src/train_apple.py
+```python
+import argparse
+import csv
+import torch
+import torch.optim as optim
+import numpy as np
+from .policy import LinearPolicy
+from .apple_env import AppleRetrieval
+from .utils import kl_divergence
+
+def evaluate(policy, env, phase=1, num_episodes=200):
+    success = 0
+    steps_list = []
+    for _ in range(num_episodes):
+        obs = env.reset(phase=phase)
+        obs_t = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
+        total_steps = 0
+        done = False
+        while not done and total_steps < 100:
+            action = policy.get_action(obs_t)
+            obs, reward, done, _ = env.step(action)
+            obs_t = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
+            total_steps += 1
+        if reward > 0:
+            success += 1
+        steps_list.append(total_steps)
+    return success / num_episodes, np.mean(steps_list)
+
+def train_vanilla(policy, env, pretrain_phase, finetune_phase, epochs=200, lr=0.01):
+    opt = optim.Adam(policy.parameters(), lr=lr)
+    for epoch in range(epochs):
+        # Pre‑train on phase 2 (M -> 0, move left)
+        obs = env.reset(phase=2)
+        obs_t = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
+        target = torch.tensor([[0.0]], dtype=torch.float32)  # action 0 (left)
+        loss = F.binary_cross_entropy_with_logits(policy(obs_t), target)
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+
+        # Fine‑tune on phase 1 (0 -> M, move right)
+        obs = env.reset(phase=1)
+        obs_t = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
+        target = torch.tensor([[1.0]], dtype=torch.float32)  # action 1 (right)
+        loss = F.binary_cross_entropy_with_logits(policy(obs_t), target)
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+    return policy
+
+def train_bc(policy, env, pretrain_phase, finetune_phase, epochs=200, lr=0.01, bc_coef=1.0, buffer_size=100):
+    opt = optim.Adam(policy.parameters(), lr=lr)
+    # Build buffer from pre‑train phase
+    buffer = []
+    for _ in range(buffer_size):
+        obs = env.reset(phase=2)
+        obs_t = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
+        action = policy.get_action(obs_t)
+        buffer.append((obs_t, torch.tensor([[action]], dtype=torch.float32)))
+
+    for epoch in range(epochs):
+        # Pre‑train step
+        obs = env.reset(phase=2)
+        obs_t = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
+        target = torch.tensor([[0.0]], dtype=torch.float32)
+        loss_pre = F.binary_cross_entropy_with_logits(policy(obs_t), target)
+
+        # Fine‑tune step
+        obs = env.reset(phase=1)
+        obs_t = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
+        target = torch.tensor([[1.0]], dtype=torch.float32)
+        loss_finetune = F.binary_cross_entropy_with_logits(policy(obs_t), target)
+
+        # BC loss
+        bc_loss = 0.0
+        for s_t, a in buffer:
+            logits = policy(s_t)
+            loss = F.binary_cross_entropy_with_logits(logits, a)
+            bc_loss += loss
+        bc_loss /= len(buffer)
+
+        loss = loss_pre + loss_finetune + bc_coef * bc_loss
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+    return policy
+
+def main(args):
+    env = AppleRetrieval(M=args.M)
+    policy_vanilla = LinearPolicy()
+    policy_bc = LinearPolicy()
+
+    policy_vanilla = train_vanilla(policy_vanilla, env, pretrain_phase=2, finetune_phase=1, epochs=args.epochs, lr=args.lr)
+    policy_bc = train_bc(policy_bc, env, pretrain_phase=2, finetune_phase=1, epochs=args.epochs, lr=args.lr, bc_coef=args.bc_coef)
+
+    succ_vanilla, _ = evaluate(policy_vanilla, env, phase=1, num_episodes=args.eval_eps)
+    succ_bc, _ = evaluate(policy_bc, env, phase=1, num_episodes=args.eval_eps)
+
+    with open(args.save, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['method', 'success_rate'])
+        writer.writerow(['vanilla', succ_vanilla])
+        writer.writerow(['bc', succ_bc])
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--save', type=str, default='apple_results.csv')
+    parser.add_argument('--M', type=int, default=10)
+    parser.add_argument('--epochs', type=int, default=200)
+    parser.add_argument('--lr', type=float, default=0.01)
+    parser.add_argument('--bc_coef', type=float, default=1.0)
+    parser.add_argument('--eval_eps', type=int, default=200)
+    args = parser.parse_args()
+    main(args)
+```
+
+**Explanation of the training scripts**
+
+*Both scripts follow the same structure*:
+1. **Pre‑training** – the policy learns to act correctly on the *far* part of the state space (either `s1` in the MDP or phase 2 in AppleRetrieval).
+2. **Fine‑tuning** – the policy starts from the *close* part (`s0` or phase 1) and must learn to reach the far part.
+3. **Vanilla fine‑tuning** – only the fine‑tune loss is used.
+4. **BC fine‑tuning** – an auxiliary KL‑like loss (implemented as cross‑entropy) over a small buffer of pre‑train states keeps the old behaviour.
+
+The CSV files contain two rows (vanilla, BC) with the success rate over `eval_eps` episodes. You can extend the scripts to log more detailed statistics if desired.

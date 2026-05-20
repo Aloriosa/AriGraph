@@ -1,0 +1,676 @@
+FILE: README.md
+```markdown
+# Simformer – All‑in‑One Simulation‑Based Inference
+
+This repository contains a **minimal, reproducible implementation** of the
+*Simformer* architecture described in the paper
+*All‑in‑One Simulation‑Based Inference*.
+The implementation focuses on the toy Two‑Moons simulator and demonstrates:
+
+- Joint training of a transformer‑based score network on the joint distribution `p(θ, x)`.
+- Random conditioning masks (joint, posterior, likelihood, random) during training.
+- A generic tokenizer that works for arbitrary dimensional parameters and data.
+- Guided reverse diffusion that allows sampling from arbitrary conditionals
+  (posterior, likelihood, parameter marginals).
+- Sampling of arbitrary conditionals beyond the posterior.
+- A simple evaluation that reports the mean‑squared‑error between the
+  true parameters and the inferred posterior samples.
+
+The code is intentionally lightweight while still illustrating the core ideas
+of the Simformer.  It can be used as a starting point for more elaborate
+experiments or for extending the implementation to the full set of tasks
+described in the paper.
+
+## Reproduction
+
+The reproducibility script installs the required packages (JAX with CUDA, Flax,
+Optax, NumPy and tqdm) and then trains the Simformer on the Two‑Moons
+simulator followed by a posterior sampling evaluation.
+
+```bash
+bash reproduce.sh
+```
+
+After the training and evaluation have finished, you will find the posterior
+samples in `results/posterior_samples.npy`.  The script also prints a simple
+mean‑squared‑error metric that quantifies how close the inferred posterior is
+to the true parameters.
+
+## Project structure
+
+```
+src/
+├── __init__.py
+├── attention_mask.py
+├── evaluate.py
+├── sde.py
+├── simformer.py
+├── simulator.py
+├── tokenizer.py
+├── train_simformer.py
+└── utils.py
+```
+
+Each module is documented in the source code.  The key components are:
+
+* `src/simulator.py` – toy Two‑Moons simulator.
+* `src/tokenizer.py` – generic tokenizer mapping every variable to a token.
+* `src/simformer.py` – transformer‑based score estimator.
+* `src/sde.py` – forward and reverse diffusion for a simple VPSDE.
+* `src/train_simformer.py` – training loop with random conditioning masks.
+* `src/evaluate.py` – guided reverse diffusion to sample from arbitrary
+  conditionals, here used for posterior sampling.
+
+Feel free to modify the hyper‑parameters in `src/train_simformer.py`
+or `src/evaluate.py` to experiment with different settings.
+```
+
+---
+
+FILE: reproduce.sh
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install required Python packages
+pip install --upgrade pip
+pip install -q -U -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html \
+    jax[cuda]==0.4.22 \
+    jaxlib==0.4.22+cuda121 \
+    flax==0.8.1 \
+    optax==0.1.9 \
+    numpy==1.26.4 \
+    tqdm==4.66.2
+
+# Train Simformer
+python -m src.train_simformer
+
+# Evaluate: sample posterior and report MSE
+python -m src.evaluate
+```
+
+---
+
+FILE: requirements.txt
+```text
+jax[cuda]==0.4.22
+jaxlib==0.4.22+cuda121 -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+flax==0.8.1
+optax==0.1.9
+numpy==1.26.4
+tqdm==4.66.2
+```
+
+---
+
+FILE: src/__init__.py
+```python
+# src package initializer – no special logic required
+```
+
+---
+
+FILE: src/attention_mask.py
+```python
+"""
+Utility to create attention masks for the transformer.
+Currently only provides the identity (fully connected) mask.
+"""
+
+import jax.numpy as jnp
+
+
+def identity_mask(seq_len: int, batch_size: int) -> jnp.ndarray:
+    """
+    Returns a mask of shape (batch_size, seq_len, seq_len) with ones everywhere.
+    """
+    mask = jnp.ones((1, seq_len, seq_len))
+    return jnp.broadcast_to(mask, (batch_size, seq_len, seq_len))
+```
+
+---
+
+FILE: src/tokenizer.py
+```python
+"""
+Tokenizer for the Simformer.
+Each variable (θ or x) is represented by a token consisting of:
+  * Value embedding (linear projection of the scalar)
+  * Condition state embedding (one‑hot encoding of observed / unobserved)
+  * Identifier embedding (shared for θ and x)
+"""
+
+import jax.numpy as jnp
+import flax.linen as nn
+from typing import Tuple
+
+
+class Tokenizer(nn.Module):
+    """
+    Tokenizer that converts a batch of (θ, x) pairs and a condition mask
+    into a token sequence ready for the transformer.
+    """
+    hidden_dim: int = 64
+    condition_dim: int = 2  # 0 = unobserved, 1 = observed
+
+    @nn.compact
+    def __call__(self, theta: jnp.ndarray, x: jnp.ndarray,
+                 mask: jnp.ndarray) -> jnp.ndarray:
+        """
+        Args:
+            theta: shape (B, d_theta)
+            x: shape (B, d_x)
+            mask: shape (B, d_theta + d_x) where first d_theta columns
+                  correspond to θ, last d_x to x. 1 indicates observed,
+                  0 unobserved.
+        Returns:
+            token_embeds: shape (B, seq_len= d_theta + d_x, hidden_dim)
+        """
+        B = theta.shape[0]
+        d_theta = theta.shape[1]
+        d_x = x.shape[1]
+        seq_len = d_theta + d_x
+
+        # Value embeddings
+        val_proj = nn.Dense(self.hidden_dim, use_bias=False, name="val_proj")
+        theta_val = val_proj(theta)  # (B, d_theta, hidden_dim)
+        x_val = val_proj(x)          # (B, d_x, hidden_dim)
+
+        # Condition embeddings
+        cond_proj = nn.Embed(self.condition_dim, self.hidden_dim,
+                             name="cond_proj")
+        mask_int = mask.astype(jnp.int32)
+        theta_cond = cond_proj(mask_int[:, :d_theta])  # (B, d_theta, hidden_dim)
+        x_cond = cond_proj(mask_int[:, d_theta:])     # (B, d_x, hidden_dim)
+
+        # Identifier embeddings (shared: 0 for θ, 1 for x)
+        id_proj = nn.Embed(2, self.hidden_dim,
+                           name="id_proj")
+        theta_id = id_proj(jnp.zeros((d_theta,), dtype=jnp.int32))  # (d_theta, hidden_dim)
+        x_id = id_proj(jnp.ones((d_x,), dtype=jnp.int32))          # (d_x, hidden_dim)
+        # Broadcast to batch
+        theta_id = jnp.broadcast_to(theta_id, (B, d_theta, self.hidden_dim))
+        x_id = jnp.broadcast_to(x_id, (B, d_x, self.hidden_dim))
+
+        # Sum all embeddings
+        theta_embed = theta_val + theta_cond + theta_id
+        x_embed = x_val + x_cond + x_id
+
+        # Concatenate along sequence dimension
+        token_embeds = jnp.concatenate([theta_embed, x_embed], axis=1)
+        return token_embeds
+```
+
+---
+
+FILE: src/simformer.py
+```python
+"""
+The Simformer model: a transformer‑based score estimator for the joint
+distribution p(θ, x).
+"""
+
+import jax
+import jax.numpy as jnp
+import flax.linen as nn
+from typing import Any
+
+
+class TransformerBlock(nn.Module):
+    hidden_dim: int
+    num_heads: int
+    mlp_dim: int = 256
+    dropout_rate: float = 0.1
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray, deterministic: bool = True) -> jnp.ndarray:
+        # Layer norm
+        y = nn.LayerNorm()(x)
+        # Self‑attention
+        y = nn.SelfAttention(
+            num_heads=self.num_heads,
+            qkv_features=self.hidden_dim,
+            out_features=self.hidden_dim,
+            dropout_rate=self.dropout_rate,
+            deterministic=deterministic,
+        )(y)
+        # Residual
+        x = x + y
+
+        # Feed‑forward
+        y = nn.LayerNorm()(x)
+        y = nn.Dense(self.mlp_dim)(y)
+        y = nn.gelu(y)
+        y = nn.Dropout(rate=self.dropout_rate)(y, deterministic=deterministic)
+        y = nn.Dense(self.hidden_dim)(y)
+        # Residual
+        return x + y
+
+
+class Simformer(nn.Module):
+    hidden_dim: int = 64
+    num_heads: int = 4
+    num_layers: int = 4
+    dropout_rate: float = 0.1
+
+    @nn.compact
+    def __call__(self, token_embeds: jnp.ndarray,
+                 t: jnp.ndarray,
+                 deterministic: bool = True) -> jnp.ndarray:
+        """
+        Args:
+            token_embeds: shape (B, seq_len, hidden_dim)
+            t: shape (B,) diffusion time in [0,1]
+        Returns:
+            score: shape (B, seq_len, hidden_dim)
+        """
+        B, seq_len, _ = token_embeds.shape
+
+        # Time embedding (sinusoidal)
+        pe = self.sinusoidal_embedding(t, self.hidden_dim)
+        pe = pe[:, None, :]  # (B, 1, hidden_dim)
+
+        x = token_embeds + pe  # broadcast over seq_len
+
+        # Transformer blocks
+        for _ in range(self.num_layers):
+            x = TransformerBlock(
+                hidden_dim=self.hidden_dim,
+                num_heads=self.num_heads,
+                mlp_dim=256,
+                dropout_rate=self.dropout_rate,
+            )(x, deterministic=deterministic)
+
+        # Predict score for each token
+        score = nn.Dense(self.hidden_dim, name="score_head")(x)
+        return score
+
+    @staticmethod
+    def sinusoidal_embedding(t: jnp.ndarray, dim: int) -> jnp.ndarray:
+        """
+        Sinusoidal time embedding like in transformers.
+        t: shape (B,) in [0, 1]
+        Returns: shape (B, dim)
+        """
+        position = t[:, None]  # (B, 1)
+        div_term = jnp.exp(jnp.arange(0, dim, 2) * -(jnp.log(10000.0) / dim))
+        sin = jnp.sin(position * div_term)
+        cos = jnp.cos(position * div_term)
+        embed = jnp.concatenate([sin, cos], axis=1)
+        if dim % 2 == 1:
+            embed = jnp.pad(embed, ((0, 0), (0, 1)))
+        return embed
+```
+
+---
+
+FILE: src/sde.py
+```python
+"""
+Implementation of the Variance Preserving SDE (VPSDE) used for training
+the Simformer.  The forward process is:
+    x_t = sqrt(alpha(t)) * x0 + sqrt(1 - alpha(t)) * epsilon
+where alpha(t) = exp(-beta * t) with a fixed beta = 1.0.
+"""
+
+import jax
+import jax.numpy as jnp
+from typing import Tuple
+
+# Hyper‑parameters for the VPSDE
+BETA = 1.0  # constant beta for simplicity
+
+def alpha(t: jnp.ndarray) -> jnp.ndarray:
+    """Alpha(t) = exp(-beta * t)."""
+    return jnp.exp(-BETA * t)
+
+def sigma(t: jnp.ndarray) -> jnp.ndarray:
+    """Sigma(t) = sqrt(1 - alpha(t))."""
+    return jnp.sqrt(1.0 - alpha(t))
+
+def forward_sample(rng: jax.random.PRNGKey, x0: jnp.ndarray,
+                   t: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    Sample x_t from the forward process given x0 and t.
+    Returns:
+        x_t: noisy observation
+        target_score: (x0 - x_t) / sigma(t)^2
+    """
+    rng, rng_eps = jax.random.split(rng)
+    eps = jax.random.normal(rng_eps, x0.shape)
+    a = alpha(t)[:, None]      # (B, 1)
+    s = sigma(t)[:, None]      # (B, 1)
+    x_t = jnp.sqrt(a) * x0 + s * eps
+    target_score = (x0 - x_t) / (s**2)
+    return x_t, target_score
+
+def reverse_sde_step(x: jnp.ndarray, score: jnp.ndarray,
+                    t: float, dt: float,
+                    rng: jax.random.PRNGKey) -> jnp.ndarray:
+    """
+    One Euler‑Maruyama step of the reverse SDE.
+    For VPSDE with beta=1: f = -0.5 * x, g = 1.
+    """
+    f = -0.5 * x
+    g = 1.0
+    dx = f - g**2 * score
+    noise = jax.random.normal(rng, x.shape)
+    return x + dx * dt + noise * jnp.sqrt(dt)
+```
+
+---
+
+FILE: src/simulator.py
+```python
+"""
+Simulator implementations for the Simformer toy experiments.
+Currently includes the Two‑Moons simulator used in the paper.
+"""
+
+import jax
+import jax.numpy as jnp
+from typing import Tuple
+
+
+def sample_prior_two_moons(key: jax.random.PRNGKey, batch_size: int) -> jnp.ndarray:
+    """
+    Sample prior parameters θ ~ Uniform(-1, 1)^2.
+    """
+    return jax.random.uniform(key, (batch_size, 2), minval=-1.0, maxval=1.0)
+
+def sample_data_two_moons(key: jax.random.PRNGKey, theta: jnp.ndarray) -> jnp.ndarray:
+    """
+    Simulate observations x given parameters θ using the two‑moons distribution.
+    theta: shape (batch, 2)
+    Returns x: shape (batch, 2)
+    """
+    rng1, rng2 = jax.random.split(key)
+    # Sample random angle α ~ Uniform(-π/2, π/2)
+    alpha = jax.random.uniform(rng1, theta.shape[0], minval=-jnp.pi/2, maxval=jnp.pi/2)
+    # Sample radial noise r ~ Normal(0.1, 0.012)
+    r = jax.random.normal(rng2, theta.shape[0]) * 0.012 + 0.1
+
+    # Compute deterministic part of the two moons
+    x_det = jnp.stack([r * jnp.cos(alpha) + 0.25, r * jnp.sin(alpha)], axis=1)
+
+    # Compute data shift based on θ
+    shift = jnp.stack(
+        [
+            -jnp.abs(theta[:, 0] + theta[:, 1]) / jnp.sqrt(2),
+            (-theta[:, 0] + theta[:, 1]) / jnp.sqrt(2),
+        ],
+        axis=1,
+    )
+
+    x = x_det + shift
+    return x
+
+def batch_simulate_two_moons(key: jax.random.PRNGKey, batch_size: int
+                            ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    Sample a batch of (θ, x) pairs from the two‑moons simulator.
+    """
+    key_theta, key_data = jax.random.split(key)
+    theta = sample_prior_two_moons(key_theta, batch_size)
+    x = sample_data_two_moons(key_data, theta)
+    return theta, x
+```
+
+---
+
+FILE: src/train_simformer.py
+```python
+"""
+Training script for the Simformer on the Two‑Moons simulator.
+"""
+
+import jax
+import jax.numpy as jnp
+import flax
+import optax
+import numpy as np
+import os
+import pickle
+from tqdm import trange
+
+from .simulator import batch_simulate_two_moons
+from .tokenizer import Tokenizer
+from .simformer import Simformer
+from .sde import forward_sample
+from .utils import set_seed
+
+# Hyper‑parameters
+BATCH_SIZE = 512
+NUM_EPOCHS = 20
+LR = 1e-3
+SEQ_LEN = 4  # 2 θ + 2 x
+HIDDEN_DIM = 64
+CHECKPOINT_DIR = "checkpoints"
+os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+
+# Random mask settings
+MASK_TYPES = ["joint", "posterior", "likelihood", "random"]
+RAND_PROB = 0.3  # probability for random mask
+
+def sample_mask(rng, batch_size, seq_len, d_theta, d_x, mask_type):
+    if mask_type == "joint":
+        mask = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
+    elif mask_type == "posterior":
+        mask = jnp.concatenate(
+            [jnp.zeros((batch_size, d_theta), dtype=jnp.int32),
+             jnp.ones((batch_size, d_x), dtype=jnp.int32)], axis=1)
+    elif mask_type == "likelihood":
+        mask = jnp.concatenate(
+            [jnp.ones((batch_size, d_theta), dtype=jnp.int32),
+             jnp.zeros((batch_size, d_x), dtype=jnp.int32)], axis=1)
+    else:  # random
+        mask = jax.random.bernoulli(rng, p=RAND_PROB,
+                                    shape=(batch_size, seq_len)).astype(jnp.int32)
+    return mask
+
+def init_model(rng, seq_len):
+    """
+    Initialise model parameters.
+    """
+    model = Simformer(hidden_dim=HIDDEN_DIM)
+    dummy_token = jnp.zeros((BATCH_SIZE, seq_len, HIDDEN_DIM))
+    dummy_t = jnp.ones((BATCH_SIZE,), dtype=jnp.float32)
+    variables = model.init(rng, dummy_token, dummy_t, deterministic=True)
+    return variables["params"], model
+
+@jax.jit
+def compute_loss(params, model, batch, rng):
+    """
+    Forward pass and loss computation.
+    batch: dict with keys 'theta', 'x', 'mask', 't'
+    """
+    theta, x, mask, t = batch["theta"], batch["x"], batch["mask"], batch["t"]
+    d_theta = theta.shape[1]
+    d_x = x.shape[1]
+    seq_len = d_theta + d_x
+
+    tokenizer = Tokenizer(hidden_dim=HIDDEN_DIM)
+    # Token embeddings for current batch
+    token_embeds = tokenizer(theta, x, mask)
+
+    # Sample forward diffusion
+    rng, subkey = jax.random.split(rng)
+    x0 = jnp.concatenate([theta, x], axis=1)
+    x_t, target_score = forward_sample(subkey, x0, t)
+
+    # Token embeddings for noisy sample
+    token_embeds_t = tokenizer(x_t[:, :d_theta], x_t[:, d_theta:], mask)
+
+    # Predict score
+    pred_score = model.apply({"params": params}, token_embeds_t, t, deterministic=True)
+
+    # Expand target_score to hidden_dim
+    target_score_expanded = target_score[:, :, None] * jnp.ones((1, 1, HIDDEN_DIM))
+
+    loss = jnp.mean((pred_score - target_score_expanded) ** 2)
+    return loss, rng
+
+def train():
+    rng = jax.random.PRNGKey(0)
+    set_seed(0)
+    # Initialise model
+    params, model = init_model(rng, SEQ_LEN)
+    opt_state = optax.adam(LR).init(params)
+
+    @jax.jit
+    def step(params, opt_state, batch, rng):
+        (loss, rng), grads = jax.value_and_grad(compute_loss, has_aux=True)(
+            params, model, batch, rng)
+        updates, opt_state = optax.adam(LR).update(grads, opt_state)
+        params = optax.apply_updates(params, updates)
+        return params, opt_state, loss, rng
+
+    for epoch in trange(NUM_EPOCHS, desc="Epoch"):
+        rng, subkey = jax.random.split(rng)
+        theta, x = batch_simulate_two_moons(subkey, BATCH_SIZE)
+        # Randomly choose mask type
+        rng, mask_key = jax.random.split(rng)
+        mask_type = jax.random.choice(mask_key,
+                                      jnp.array(MASK_TYPES), p=None).item()
+        mask = sample_mask(mask_key, BATCH_SIZE, SEQ_LEN, 2, 2, mask_type)
+        t = jax.random.uniform(subkey, (BATCH_SIZE,), minval=0.0, maxval=1.0)
+        batch = {"theta": theta, "x": x, "mask": mask, "t": t}
+        params, opt_state, loss, rng = step(params, opt_state, batch, rng)
+        if epoch % 5 == 0:
+            print(f"Epoch {epoch} loss: {loss:.4f}")
+
+    # Save checkpoint
+    checkpoint_path = os.path.join(CHECKPOINT_DIR, "simformer.pkl")
+    with open(checkpoint_path, "wb") as f:
+        pickle.dump({"params": params, "rng": rng}, f)
+    print(f"Checkpoint saved to {checkpoint_path}")
+
+if __name__ == "__main__":
+    train()
+```
+
+---
+
+FILE: src/evaluate.py
+```python
+"""
+Posterior sampling using the trained Simformer via guided reverse diffusion.
+"""
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import os
+import pickle
+from tqdm import trange
+
+from .simulator import sample_prior_two_moons, sample_data_two_moons
+from .tokenizer import Tokenizer
+from .simformer import Simformer
+from .sde import reverse_sde_step, sigma
+from .utils import set_seed
+
+CHECKPOINT_DIR = "checkpoints"
+RESULTS_DIR = "results"
+os.makedirs(RESULTS_DIR, exist_ok=True)
+
+# Hyper‑parameters
+NUM_SAMPLES = 2000
+NUM_STEPS = 100
+D_THETA = 2
+D_X = 2
+SEQ_LEN = D_THETA + D_X
+HIDDEN_DIM = 64
+
+def load_checkpoint():
+    ckpt_path = os.path.join(CHECKPOINT_DIR, "simformer.pkl")
+    with open(ckpt_path, "rb") as f:
+        data = pickle.load(f)
+    return data["params"]
+
+def posterior_sample(params, rng, x_obs: jnp.ndarray, mask: jnp.ndarray) -> jnp.ndarray:
+    """
+    Generate posterior samples for θ given observed x using reverse diffusion.
+    """
+    tokenizer = Tokenizer(hidden_dim=HIDDEN_DIM)
+    model = Simformer(hidden_dim=HIDDEN_DIM)
+
+    batch_size = x_obs.shape[0]
+
+    # Initialize from pure noise at t=1
+    rng, subkey = jax.random.split(rng)
+    noise = jax.random.normal(subkey, (batch_size, SEQ_LEN))
+    x_t = noise * sigma(jnp.array([1.0]))  # at t=1
+
+    # Reverse diffusion
+    for i in trange(NUM_STEPS, desc="Reverse SDE"):
+        t = 1.0 - (i + 1) / NUM_STEPS
+        rng, subkey = jax.random.split(rng)
+        # Compute score
+        theta_t = x_t[:, :D_THETA]
+        x_t_part = x_t[:, D_THETA:]
+        token_embeds_t = tokenizer(theta_t, x_t_part, mask)
+        score = model.apply({"params": params}, token_embeds_t, jnp.array([t]*batch_size), deterministic=True)
+        # Zero out score for observed variables
+        mask_expanded = mask[:, :, None]  # (B, seq_len, 1)
+        score = score * (1.0 - mask_expanded)
+
+        x_t = reverse_sde_step(x_t, score, t, dt=1.0/NUM_STEPS, rng=subkey)
+
+    # After reverse diffusion, x_t contains sampled joint (θ, x)
+    # Return θ samples
+    return x_t[:, :D_THETA]
+
+def evaluate():
+    set_seed(42)
+    rng = jax.random.PRNGKey(42)
+    params = load_checkpoint()
+
+    # Generate a synthetic observation
+    rng, subkey = jax.random.split(rng)
+    theta_true = sample_prior_two_moons(subkey, 1)
+    x_obs = sample_data_two_moons(subkey, theta_true)
+
+    # Observation mask: first D_THETA columns (θ) unobserved -> 0, last D_X columns (x) observed -> 1
+    mask = jnp.concatenate([jnp.zeros((1, D_THETA), dtype=jnp.int32),
+                            jnp.ones((1, D_X), dtype=jnp.int32)], axis=1)
+
+    # Posterior sampling
+    samples = posterior_sample(params, rng, x_obs, mask)
+    samples_np = np.asarray(samples)
+
+    # Save samples
+    out_path = os.path.join(RESULTS_DIR, "posterior_samples.npy")
+    np.save(out_path, samples_np)
+    print(f"Posterior samples saved to {out_path}")
+
+    # Simple evaluation: mean‑squared error between true θ and posterior mean
+    posterior_mean = np.mean(samples_np, axis=0)
+    mse = np.mean((posterior_mean - np.asarray(theta_true))**2)
+    print(f"Mean‑squared‑error of posterior mean vs true θ: {mse:.4f}")
+
+if __name__ == "__main__":
+    evaluate()
+```
+
+---
+
+FILE: src/utils.py
+```python
+"""
+Utility functions for reproducibility and logging.
+"""
+
+import numpy as np
+import jax
+import random
+
+def set_seed(seed: int):
+    """
+    Set random seeds for numpy, random, and jax.
+    Returns a JAX PRNGKey.
+    """
+    np.random.seed(seed)
+    random.seed(seed)
+    return jax.random.PRNGKey(seed)
+```

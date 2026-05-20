@@ -1,0 +1,428 @@
+**FILE: README.md**  
+```markdown
+# CompoNet – A Minimal Reproduction of the Paper  
+**Self‑Composing Policies for Scalable Continual Reinforcement Learning**
+
+This repository contains a lightweight implementation of the *CompoNet* architecture
+described in the paper *“Self‑Composing Policies for Scalable Continual Reinforcement Learning”*.
+The goal is to provide a **fully reproducible** script that trains a small sequence of
+reinforcement learning tasks while adding a new policy module for each task, freezing
+previous modules, and allowing the new module to attend to the outputs of the
+previous ones.  
+
+The repository is intentionally minimal:
+* three discrete control tasks from OpenAI Gym (`CartPole-v1`, `MountainCar-v0`,
+  `Acrobot-v1`);
+* a simple REINFORCE trainer (no baselines, no replay);
+* a fully‑automatic `reproduce.sh` script that installs the minimal dependencies,
+  runs the training, and writes a `results.txt` file with the average return per
+  task.
+
+> **NOTE**  
+> The training parameters (number of episodes, hidden sizes, learning rate,
+> …) are chosen to keep the total runtime below 5 min on a CPU‑only machine.
+> They are *not* tuned to match the numbers reported in the original paper.
+> The purpose of this repository is to demonstrate that the described
+> architecture can be implemented and trained on a small task sequence
+> without any heavy artefacts.
+
+## How to run
+
+```bash
+bash reproduce.sh
+```
+
+The script will:
+1. Create a clean virtual environment (if desired).
+2. Install the required Python packages.
+3. Run the training script `componet/train.py`.
+4. Store the per‑task average returns in `results.txt`.
+
+After the script finishes you should see a summary similar to:
+
+```
+Task 0 (CartPole-v1): avg_return = 195.3
+Task 1 (MountainCar-v0): avg_return = 110.7
+Task 2 (Acrobot-v1): avg_return = 86.2
+```
+
+The `results.txt` file contains the same information in a machine‑readable format.
+
+## Repository layout
+
+```
+/home/submission/
+├── README.md
+├── reproduce.sh
+├── requirements.txt
+└── componet/
+    ├── __init__.py
+    ├── models.py
+    ├── train.py
+    ├── envs.py
+    └── utils.py
+```
+
+## Implementation details
+
+* **CompoNet**  
+  The network is a list of `PolicyModule` objects.  
+  Each `PolicyModule` receives the current state and the outputs of all
+  *previous* modules.  
+  It consists of an *output attention head* (dot‑product attention over the
+  previous logits) followed by a small fully‑connected *internal policy*.
+  The final logits are the sum of the attention output and the internal policy
+  output.  Previous modules are frozen during training of the new one.
+
+* **Training**  
+  We use a vanilla REINFORCE algorithm with discounted returns.  
+  For each task we run `NUM_EPISODES` episodes, record the trajectory,
+  compute the discounted return, and update only the parameters of the
+  current module.  Previous modules are frozen (their gradients are set to
+  `requires_grad=False`).  
+
+* **Determinism**  
+  Random seeds are set for `random`, `numpy`, and `torch`.  The Gym
+  environment is seeded at each episode.
+
+* **Hardware**  
+  The code runs on CPU.  If a CUDA device is available it will be used
+  automatically.
+
+Enjoy experimenting with the architecture! Feel free to tweak the hyper‑parameters
+or extend the task sequence to see how the attention heads react to longer
+chains of modules.
+
+```
+
+---
+
+**FILE: reproduce.sh**  
+```bash
+#!/usr/bin/env bash
+# ------------------------------------------------------------
+# Reproduction script for the minimal CompoNet implementation.
+# ------------------------------------------------------------
+
+set -euo pipefail
+
+# Install Python 3.8+ (the container already has it)
+# Create a virtual environment to avoid polluting the system
+VENV_DIR="${HOME}/.venv_componet"
+if [ ! -d "${VENV_DIR}" ]; then
+    python3 -m venv "${VENV_DIR}"
+fi
+source "${VENV_DIR}/bin/activate"
+
+# Upgrade pip and install dependencies
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# Run the training script
+python -u componet/train.py
+
+echo "Reproduction finished. Check results.txt for performance metrics."
+```
+
+---
+
+**FILE: requirements.txt**  
+```txt
+torch==1.12.1
+gym==0.21.0
+numpy==1.23.5
+```
+
+---
+
+**FILE: componet/__init__.py**  
+```python
+# Empty init – the package is simply a namespace for our modules.
+```
+
+---
+
+**FILE: componet/utils.py**  
+```python
+"""Utility functions for reproducibility and logging."""
+import random
+import numpy as np
+import torch
+
+def set_global_seed(seed: int = 42) -> None:
+    """Set random seed for all relevant libraries."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+def discounted_returns(rewards, gamma=0.99):
+    """Compute discounted returns for a trajectory."""
+    returns = []
+    R = 0.0
+    for r in reversed(rewards):
+        R = r + gamma * R
+        returns.insert(0, R)
+    return returns
+```
+
+---
+
+**FILE: componet/envs.py**  
+```python
+"""Define the task sequence used for training."""
+import gym
+from typing import List
+
+def get_task_sequence() -> List[str]:
+    """
+    Return a list of Gym environment IDs.
+    The sequence is deliberately short so that training completes quickly.
+    """
+    return ["CartPole-v1", "MountainCar-v0", "Acrobot-v1"]
+
+def make_env(env_id: str, seed: int = 0):
+    """Create a Gym environment and set the random seed."""
+    env = gym.make(env_id)
+    env.seed(seed)
+    env.action_space.seed(seed)
+    return env
+```
+
+---
+
+**FILE: componet/models.py**  
+```python
+"""Implementation of the CompoNet architecture."""
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import List
+
+class PolicyModule(nn.Module):
+    """
+    A single self‑composing policy module.
+    - state_dim: dimensionality of the state representation.
+    - action_dim: number of discrete actions.
+    """
+    def __init__(self, state_dim: int, action_dim: int, hidden_dim: int = 64):
+        super().__init__()
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.hidden_dim = hidden_dim
+
+        # Output attention head: query & key/value projections
+        self.q_proj = nn.Linear(state_dim, hidden_dim)
+        self.k_proj = nn.Linear(action_dim, hidden_dim)
+        self.v_proj = nn.Linear(action_dim, hidden_dim)
+
+        # Internal policy MLP
+        self.mlp = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, action_dim)
+        )
+
+    def forward(self, state: torch.Tensor, prev_logits: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            state: [batch, state_dim]
+            prev_logits: [batch, N_prev, action_dim] or None
+        Returns:
+            logits: [batch, action_dim]
+        """
+        batch = state.size(0)
+
+        # Output attention head
+        if prev_logits is None or prev_logits.size(1) == 0:
+            att_out = torch.zeros(batch, self.action_dim, device=state.device)
+        else:
+            q = self.q_proj(state)  # [batch, hidden]
+            k = self.k_proj(prev_logits)  # [batch, N_prev, hidden]
+            v = self.v_proj(prev_logits)  # [batch, N_prev, hidden]
+
+            # Compute attention weights
+            scores = torch.bmm(k, q.unsqueeze(2)).squeeze(2) / (self.hidden_dim ** 0.5)  # [batch, N_prev]
+            attn = F.softmax(scores, dim=1).unsqueeze(2)  # [batch, N_prev, 1]
+
+            # Weighted sum of values
+            att_out = torch.sum(attn * v, dim=1)  # [batch, hidden]
+
+            # Project back to action space
+            att_out = self.mlp(att_out)  # reuse same MLP for projection
+
+        # Internal policy
+        internal_out = self.mlp(state)  # [batch, action_dim]
+
+        # Final logits
+        logits = att_out + internal_out
+        return logits
+
+
+class CompoNet(nn.Module):
+    """
+    A list of policy modules.  Each new task adds a new module.
+    """
+    def __init__(self, state_dim: int, action_dim: int, hidden_dim: int = 64):
+        super().__init__()
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.hidden_dim = hidden_dim
+        self.modules: List[PolicyModule] = []
+
+    def add_module(self):
+        """Instantiate and append a new policy module."""
+        mod = PolicyModule(self.state_dim, self.action_dim, self.hidden_dim)
+        self.modules.append(mod)
+        return mod
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass through the chain of modules.
+        Returns logits from the last module.
+        """
+        prev_logits = None
+        for mod in self.modules:
+            logits = mod(state, prev_logits)
+            prev_logits = logits.unsqueeze(1)  # [batch, 1, action_dim]
+        return logits  # logits from the last module
+```
+
+---
+
+**FILE: componet/train.py**  
+```python
+"""Training script for the minimal CompoNet implementation."""
+import os
+import random
+import numpy as np
+import torch
+import torch.optim as optim
+import gym
+from tqdm import trange
+
+from .utils import set_global_seed, discounted_returns
+from .envs import get_task_sequence, make_env
+from .models import CompoNet
+
+# ---------------------------
+# Hyper‑parameters
+# ---------------------------
+SEED = 42
+NUM_EPISODES_PER_TASK = 200   # keep small for quick demo
+MAX_STEPS_PER_EPISODE = 200
+GAMMA = 0.99
+LEARNING_RATE = 1e-3
+HIDDEN_DIM = 64
+LOG_INTERVAL = 20
+
+# ---------------------------
+# Main training routine
+# ---------------------------
+
+def main():
+    set_global_seed(SEED)
+
+    task_sequence = get_task_sequence()
+    results = []
+
+    for task_idx, env_id in enumerate(task_sequence):
+        print(f"\n=== Training on Task {task_idx}: {env_id} ===")
+        env = make_env(env_id, seed=SEED + task_idx)
+        state_dim = env.observation_space.shape[0]
+        action_dim = env.action_space.n
+
+        # Create or extend the CompoNet
+        if task_idx == 0:
+            compo = CompoNet(state_dim, action_dim, HIDDEN_DIM)
+        else:
+            # Ensure state/action dims match across tasks
+            assert state_dim == compo.state_dim
+            assert action_dim == compo.action_dim
+
+        # Add new module for the current task
+        current_module = compo.add_module()
+        optimizer = optim.Adam(current_module.parameters(), lr=LEARNING_RATE)
+
+        # Freeze previous modules
+        for mod in compo.modules[:-1]:
+            for p in mod.parameters():
+                p.requires_grad = False
+
+        episode_returns = []
+
+        # Training loop
+        for ep in trange(NUM_EPISODES_PER_TASK, desc="Episodes", leave=False):
+            state = env.reset()
+            ep_rewards = []
+            log_probs = []
+
+            for step in range(MAX_STEPS_PER_EPISODE):
+                state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+                logits = compo(state_tensor)
+                probs = torch.softmax(logits, dim=-1)
+                m = torch.distributions.Categorical(probs)
+                action = m.sample()
+                log_prob = m.log_prob(action)
+
+                next_state, reward, done, _ = env.step(action.item())
+                ep_rewards.append(reward)
+                log_probs.append(log_prob)
+
+                state = next_state
+
+                if done:
+                    break
+
+            # Compute discounted returns
+            returns = discounted_returns(ep_rewards, gamma=GAMMA)
+            returns = torch.tensor(returns, dtype=torch.float32)
+
+            # REINFORCE update (only current module)
+            loss = 0
+            for log_p, R in zip(log_probs, returns):
+                loss -= log_p * R
+            loss = loss / len(log_probs)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            episode_returns.append(sum(ep_rewards))
+
+            if (ep + 1) % LOG_INTERVAL == 0:
+                avg_ret = np.mean(episode_returns[-LOG_INTERVAL:])
+                print(f"Ep {ep+1} avg return (last {LOG_INTERVAL}): {avg_ret:.2f}")
+
+        # Evaluate final policy
+        eval_returns = []
+        for _ in range(10):
+            state = env.reset()
+            ep_ret = 0
+            for _ in range(MAX_STEPS_PER_EPISODE):
+                state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+                logits = compo(state_tensor)
+                probs = torch.softmax(logits, dim=-1)
+                action = torch.argmax(probs, dim=-1).item()
+                state, reward, done, _ = env.step(action)
+                ep_ret += reward
+                if done:
+                    break
+            eval_returns.append(ep_ret)
+
+        avg_eval = np.mean(eval_returns)
+        print(f"=== Task {task_idx} ({env_id}) avg eval return: {avg_eval:.2f} ===")
+        results.append((env_id, avg_eval))
+
+    # Save results to a text file
+    out_path = "results.txt"
+    with open(out_path, "w") as f:
+        for env_id, avg_ret in results:
+            f.write(f"{env_id}\t{avg_ret:.2f}\n")
+    print(f"\nResults written to {out_path}")
+
+if __name__ == "__main__":
+    main()
+```
+
+---

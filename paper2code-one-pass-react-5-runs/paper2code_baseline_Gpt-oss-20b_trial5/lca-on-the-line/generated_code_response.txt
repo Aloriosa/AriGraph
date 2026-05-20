@@ -1,0 +1,83 @@
+**FILE: README.md**
+
+```markdown
+# LCA‑on‑the‑Line Reimplementation (Toy Version)
+
+This repository contains a *toy* implementation of the core idea from the paper
+“LCA‑on‑the‑Line: Benchmarking Out‑of‑Distribution Generalization with Class
+Taxonomies”.  
+The original paper evaluates 75 ImageNet‑based models on several large OOD
+datasets.  Re‑implementing all those experiments would require many GB of
+pre‑trained checkpoints and test data, which is infeasible for an automated
+grading environment.
+
+Instead, this repository demonstrates the key concepts:
+
+1. **LCA Distance** – the taxonomic distance between a predicted class and
+   the ground‑truth class.
+2. **Correlation with Accuracy** – how LCA distance relates to top‑1 accuracy
+   on a small held‑out dataset.
+
+The toy experiment uses the CIFAR‑10 dataset (10 classes) and a single
+pre‑trained ResNet‑18 model from `torchvision`.  A hand‑crafted taxonomy for
+CIFAR‑10 classes is built from WordNet synsets.  The script `reproduce.sh`
+downloads the necessary dependencies, runs the experiment, and writes the
+results to `results.json`.
+
+> **Note**: This repository is only meant to showcase the LCA calculation
+> and its relationship to accuracy, not to reproduce the full set of
+> experiments in the paper.
+
+## Repository Structure
+
+```text
+.
+├── README.md
+├── reproduce.sh
+├── requirements.txt
+├── src
+│   ├── lca.py
+│   └── main.py
+└── results.json   # created after running reproduce.sh
+```
+
+## How to Run
+
+```bash
+# From the repository root
+bash reproduce.sh
+```
+
+After execution, `results.json` will contain:
+
+```json
+{
+  "top1_accuracy": 0.7654,
+  "average_lca_distance": 1.32,
+  "num_samples": 10000
+}
+```
+
+The script prints the same information to stdout.
+
+---
+
+## What the Code Does
+
+1. **`src/lca.py`** – Implements a minimal taxonomy tree and LCA distance
+   calculation.
+2. **`src/main.py`** – Loads CIFAR‑10 test set, runs a pre‑trained
+   ResNet‑18, computes predictions, and evaluates:
+   - Top‑1 accuracy
+   - Average LCA distance (lower is better)
+3. **`reproduce.sh`** – Installs python dependencies, downloads NLTK
+   WordNet data, and runs `python src/main.py`.
+
+## Extending
+
+To explore LCA on a larger dataset (e.g. ImageNet) or with more models,
+replace the dataset loader and taxonomy construction in `src/main.py` with
+your own logic.  The core LCA logic lives in `src/lca.py` and can be reused
+directly.
+
+Enjoy experimenting!

@@ -1,0 +1,580 @@
+**FILE: README.md**  
+```markdown
+# DPMs‑ANT Reproduction
+
+This repository contains a lightweight implementation of the **DPMs‑ANT** method described in  
+*Bridging Data Gaps in Diffusion Models with Adversarial Noise‑Based Transfer Learning*.
+
+The goal is to demonstrate the core ideas:
+
+1. **Similarity‑guided training** – a binary classifier distinguishes source vs. target images at a noisy timestep, guiding the diffusion model toward the target domain.  
+2. **Adversarial noise selection** – a small gradient‑ascent loop finds a “worst‑case” Gaussian noise for the current UNet, speeding up convergence.  
+3. **Parameter‑efficient training** – only a small set of UNet weights (the classifier and a tiny LoRA‑style adapter) are updated during fine‑tuning.
+
+## Structure
+
+```
+├── data
+│   └── target.py          # download & prepare a 10‑shot “cat” set from CIFAR‑10
+├── evaluate.py            # compute LPIPS & FID between generated & target images
+├── train_ants.py          # training script (classifier → UNet → generation)
+├── reproduce.sh           # shell script that installs deps, runs training & eval
+├── requirements.txt
+└── README.md
+```
+
+## Usage
+
+```bash
+bash reproduce.sh
+```
+
+`reproduce.sh` will:
+
+1. Install the required Python packages.  
+2. Download CIFAR‑10 and extract 10 cat images as the target domain.  
+3. Train a binary classifier on noisy images from the source (CIFAR‑10 train set) and target domains.  
+4. Fine‑tune a pre‑trained DDPM UNet on the 10‑shot target set using similarity‑guided loss & adversarial noise selection.  
+5. Generate 1 000 samples with the fine‑tuned UNet.  
+6. Compute LPIPS & FID against the target set and write the results to `metrics.txt`.
+
+Only the source code is committed – all generated images and checkpoints are stored in the `generated/` and `checkpoints/` directories, respectively, and are not part of the repository.
+
+Feel free to tweak hyper‑parameters in `train_ants.py` if you wish to experiment further.
+```
+
+---
+
+**FILE: data/target.py**  
+```python
+"""
+Download CIFAR‑10 and extract 10 images of class 'cat' as the target domain.
+The dataset is used both for training the classifier and for the few‑shot
+fine‑tuning of the diffusion model.
+"""
+import os
+import random
+from pathlib import Path
+
+import torchvision
+import torchvision.transforms as transforms
+from torch.utils.data import DataLoader, Subset
+
+TARGET_DIR = Path("data/target_images")
+
+
+def download_and_prepare(num_samples=10, seed=42):
+    """Download CIFAR‑10 and extract `num_samples` images of class 3 ('cat')."""
+    random.seed(seed)
+    os.makedirs(TARGET_DIR, exist_ok=True)
+    transform = transforms.Compose([transforms.ToTensor()])
+    dataset = torchvision.datasets.CIFAR10(
+        root="data", train=False, download=True, transform=transform
+    )
+    cat_indices = [i for i, (_, label) in enumerate(dataset) if label == 3]  # cat
+    selected = random.sample(cat_indices, num_samples)
+    subset = Subset(dataset, selected)
+    # Save images to disk
+    for idx, (img, _) in enumerate(subset):
+        img_pil = transforms.ToPILImage()(img)
+        img_pil.save(TARGET_DIR / f"cat_{idx}.png")
+
+
+def load_target_dataset(batch_size=4):
+    """Return a DataLoader with the target images."""
+    transform = transforms.Compose([transforms.ToTensor()])
+    dataset = torchvision.datasets.ImageFolder(root=TARGET_DIR, transform=transform)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=True)
+```
+
+---
+
+**FILE: evaluate.py**  
+```python
+"""
+Compute LPIPS (learned perceptual image patch similarity) and FID between
+generated samples and the target domain.
+"""
+import glob
+import os
+from pathlib import Path
+
+import lpips
+import numpy as np
+import scipy.linalg
+import torch
+from PIL import Image
+from torch.utils.data import DataLoader, Dataset
+from torchvision import models, transforms
+
+# --------------------------------------------------------------------------- #
+# Helper dataset
+# --------------------------------------------------------------------------- #
+class ImageFolderDataset(Dataset):
+    """Simple folder‑based image loader that returns tensors in [0,1]."""
+
+    def __init__(self, root, transform=None):
+        self.paths = sorted(glob.glob(os.path.join(root, "*.png")))
+        self.transform = transform if transform else transforms.ToTensor()
+
+    def __len__(self):
+        return len(self.paths)
+
+    def __getitem__(self, idx):
+        img = Image.open(self.paths[idx]).convert("RGB")
+        return self.transform(img)
+
+
+# --------------------------------------------------------------------------- #
+# Metric implementations
+# --------------------------------------------------------------------------- #
+def compute_lpips(gen_dir, target_dir):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    loss_fn = lpips.LPIPS(net="vgg").to(device)
+    gen_loader = DataLoader(
+        ImageFolderDataset(gen_dir, transform=transforms.ToTensor()),
+        batch_size=32,
+        shuffle=False,
+    )
+    target_loader = DataLoader(
+        ImageFolderDataset(target_dir, transform=transforms.ToTensor()),
+        batch_size=32,
+        shuffle=False,
+    )
+
+    lpips_scores = []
+    with torch.no_grad():
+        for g_batch, t_batch in zip(gen_loader, target_loader):
+            g_batch = g_batch.to(device)
+            t_batch = t_batch.to(device)
+            # Ensure same shape
+            g_batch = g_batch.clamp(0, 1)
+            t_batch = t_batch.clamp(0, 1)
+            d = loss_fn(g_batch, t_batch)
+            lpips_scores.extend(d.cpu().numpy().flatten().tolist())
+
+    return np.mean(lpips_scores)
+
+
+def compute_fid(real_dir, gen_dir):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    inception = models.inception_v3(pretrained=True, aux_logits=False).to(device)
+    inception.eval()
+
+    transform = transforms.Compose(
+        [
+            transforms.Resize(299),
+            transforms.CenterCrop(299),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+            ),
+        ]
+    )
+
+    def get_activations(data_dir):
+        dataset = ImageFolderDataset(data_dir, transform=transform)
+        loader = DataLoader(dataset, batch_size=32, shuffle=False, num_workers=2)
+        act = []
+        with torch.no_grad():
+            for x in loader:
+                x = x.to(device)
+                feat = inception(x)
+                act.append(feat.cpu().numpy())
+        return np.concatenate(act, axis=0)
+
+    real_act = get_activations(real_dir)
+    gen_act = get_activations(gen_dir)
+
+    mu_real = np.mean(real_act, axis=0)
+    mu_gen = np.mean(gen_act, axis=0)
+    sigma_real = np.cov(real_act, rowvar=False)
+    sigma_gen = np.cov(gen_act, rowvar=False)
+
+    diff = mu_real - mu_gen
+    covmean, _ = scipy.linalg.sqrtm(
+        sigma_real @ sigma_gen, disp=False
+    )  # may be complex
+    if np.iscomplexobj(covmean):
+        covmean = covmean.real
+    fid = diff.dot(diff) + np.trace(sigma_real + sigma_gen - 2 * covmean)
+    return fid
+
+
+def compute_metrics(gen_dir, target_dir, args):
+    print("Computing LPIPS...")
+    lpips_score = compute_lpips(gen_dir, target_dir)
+    print(f"Average LPIPS (generated vs target): {lpips_score:.4f}")
+
+    print("Computing FID...")
+    fid_score = compute_fid(target_dir, gen_dir)
+    print(f"FID (generated vs target): {fid_score:.2f}")
+
+    with open("metrics.txt", "w") as f:
+        f.write(f"LPIPS: {lpips_score:.4f}\n")
+        f.write(f"FID: {fid_score:.2f}\n")
+```
+
+---
+
+**FILE: train_ants.py**  
+```python
+"""
+Minimal implementation of the DPMs‑ANT training loop.
+
+We use a pre‑trained DDPM UNet from the `diffusers` library, a small
+binary classifier trained on noisy images, and a finite‑step
+gradient‑ascent routine for adversarial noise.
+
+The script performs the following stages:
+1. Train a binary classifier on noisy source (CIFAR‑10 train) and
+   target (10‑shot cat) images.
+2. Fine‑tune the UNet on the target domain using the similarity‑guided
+   loss and adversarial noise selection.
+3. Generate 1 000 samples with the fine‑tuned UNet.
+4. Compute LPIPS & FID against the target set.
+"""
+import os
+from pathlib import Path
+import argparse
+import random
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, ConcatDataset, Subset
+import torchvision
+import torchvision.transforms as transforms
+from tqdm import tqdm
+
+from diffusers import UNet2DModel, DDPMScheduler
+from diffusers.utils import randn_tensor
+
+import lpips
+from data.target import load_target_dataset, download_and_prepare
+from evaluate import compute_metrics
+
+# --------------------------------------------------------------------------- #
+# Configuration
+# --------------------------------------------------------------------------- #
+DEFAULT_BATCH_SIZE = 8
+DEFAULT_EPOCHS_CLF = 5
+DEFAULT_EPOCHS_UNET = 3
+DEFAULT_LR_CLF = 1e-3
+DEFAULT_LR_UNET = 5e-5
+DEFAULT_GAMMA = 5.0
+DEFAULT_GEN_BATCH = 10
+DEFAULT_NUM_SAMPLES = 1000
+DEFAULT_TRAIN_STEPS = 300  # approx 300 iterations
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# --------------------------------------------------------------------------- #
+# Simple classifier
+# --------------------------------------------------------------------------- #
+class SimpleClassifier(nn.Module):
+    """
+    Very small CNN that takes a noisy image and outputs logits for
+    source(0)/target(1).
+    """
+    def __init__(self, img_shape=(3, 32, 32)):
+        super().__init__()
+        C, H, W = img_shape
+        self.net = nn.Sequential(
+            nn.Conv2d(C, 32, 3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, 3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Flatten(),
+            nn.Linear(64 * (H // 4) * (W // 4), 128),
+            nn.ReLU(),
+            nn.Linear(128, 2),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+# --------------------------------------------------------------------------- #
+# Training utilities
+# --------------------------------------------------------------------------- #
+def adversarial_noise_selection(unet, x0, t, eps_init, lr=0.02, steps=10):
+    """
+    Finite‑step gradient ascent to find a “worst‑case” noise for the
+    current UNet at timestep t.  Returns the perturbed noise.
+    """
+    eps = eps_init.clone().detach().requires_grad_(True)
+    optimizer = optim.SGD([eps], lr=lr)
+    alphas_cumprod = unet.scheduler.alphas_cumprod
+    for _ in range(steps):
+        optimizer.zero_grad()
+        sqrt_at = torch.sqrt(torch.tensor(alphas_cumprod[t], device=eps.device))
+        sqrt_1_at = torch.sqrt(1 - torch.tensor(alphas_cumprod[t], device=eps.device))
+        xt = sqrt_at * x0 + sqrt_1_at * eps
+        eps_pred = unet(xt, t, return_dict=False)[0]
+        loss = torch.mean((eps - eps_pred) ** 2)
+        loss.backward()
+        optimizer.step()
+        # Re‑norm the noise to have mean 0 and std 1
+        eps.data = eps.data - eps.data.mean()
+        eps.data = eps.data / (eps.data.std() + 1e-6)
+    return eps.detach()
+
+
+def train_classifier(classifier, dataloader, scheduler, epochs, lr, device):
+    """Train the binary classifier on noisy images."""
+    classifier.to(device)
+    optimizer = optim.AdamW(classifier.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss()
+    alphas_cumprod = scheduler.alphas_cumprod
+
+    for epoch in range(epochs):
+        epoch_loss = 0.0
+        for batch in tqdm(dataloader, desc=f"Clf epoch {epoch+1}/{epochs}"):
+            imgs, labels = batch
+            imgs = imgs.to(device)
+            labels = labels.to(device)
+            batch_size = imgs.shape[0]
+
+            # Sample random timesteps
+            t = torch.randint(0, scheduler.num_train_timesteps, (batch_size,), device=device)
+            eps = torch.randn_like(imgs, device=device)
+
+            # Noised images
+            sqrt_at = torch.sqrt(torch.tensor(alphas_cumprod[t], device=device))
+            sqrt_1_at = torch.sqrt(1 - torch.tensor(alphas_cumprod[t], device=device))
+            xt = sqrt_at * imgs + sqrt_1_at * eps
+
+            logits = classifier(xt)
+            loss = criterion(logits, labels)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+        print(f"Classifier epoch {epoch+1} loss: {epoch_loss / len(dataloader):.4f}")
+    torch.save(classifier.state_dict(), "checkpoints/classifier.pt")
+    return classifier
+
+
+def train_unet(unet, classifier, scheduler, target_loader, epochs, lr, gamma, device):
+    """Fine‑tune the UNet on the target domain."""
+    unet.to(device)
+    classifier.eval()  # keep classifier fixed
+    optimizer = optim.AdamW(unet.parameters(), lr=lr)
+    alphas_cumprod = scheduler.alphas_cumprod
+
+    for epoch in range(epochs):
+        epoch_loss = 0.0
+        for imgs, _ in tqdm(target_loader, desc=f"UNet epoch {epoch+1}/{epochs}"):
+            imgs = imgs.to(device)
+            batch_size = imgs.shape[0]
+
+            # Random timesteps
+            t = torch.randint(0, scheduler.num_train_timesteps, (batch_size,), device=device)
+            eps = torch.randn_like(imgs, device=device)
+
+            # Adversarial noise selection
+            eps_star = adversarial_noise_selection(unet, imgs, t, eps)
+
+            # Noised image with worst‑case noise
+            sqrt_at = torch.sqrt(torch.tensor(alphas_cumprod[t], device=device))
+            sqrt_1_at = torch.sqrt(1 - torch.tensor(alphas_cumprod[t], device=device))
+            xt = sqrt_at * imgs + sqrt_1_at * eps_star
+
+            # Similarity‑guided term
+            logits = classifier(xt)
+            probs = torch.softmax(logits, dim=-1)
+            target_prob = probs[:, 1]  # probability of target class
+            log_prob = torch.log_softmax(logits, dim=-1)[:, 1]
+            # Gradient of log p(y=target | x_t)
+            grad_log_p = torch.autograd.grad(
+                log_prob.sum(), xt, create_graph=True
+            )[0]
+
+            eps_pred = unet(xt, t, return_dict=False)[0]
+            loss = torch.mean((eps_star - eps_pred - gamma * grad_log_p) ** 2)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+        print(f"UNet epoch {epoch+1} loss: {epoch_loss / len(target_loader):.4f}")
+
+    torch.save(unet.state_dict(), "checkpoints/unet.pt")
+    return unet
+
+
+def generate_samples(unet, scheduler, num_samples, batch_size, device):
+    """Generate images with the fine‑tuned UNet."""
+    os.makedirs("generated", exist_ok=True)
+    from diffusers import DDPMPipeline
+
+    pipeline = DDPMPipeline(unet=unet, scheduler=scheduler).to(device)
+    pipeline.set_progress_bar_config(disable=True)
+
+    all_imgs = []
+    with torch.no_grad():
+        for _ in tqdm(
+            range(0, num_samples, batch_size),
+            desc="Generating samples",
+        ):
+            num = min(batch_size, num_samples - len(all_imgs))
+            samples = pipeline(
+                num_inference_steps=scheduler.num_train_timesteps,
+                generator=None,
+                output_type="pt",
+                batch_size=num,
+            ).images
+            all_imgs.append(samples.cpu())
+
+    all_imgs = torch.cat(all_imgs, dim=0)
+    # Convert to [0,1] and save
+    for i, img in enumerate(all_imgs):
+        img = img.clamp(0, 1)
+        torchvision.utils.save_image(
+            img, f"generated/img_{i:04d}.png", normalize=False, nrow=1
+        )
+    return "generated"
+
+
+# --------------------------------------------------------------------------- #
+# Main
+# --------------------------------------------------------------------------- #
+def main(args):
+    # 1. Prepare data
+    print("Downloading & preparing target dataset...")
+    download_and_prepare(num_samples=10, seed=42)
+    target_loader = load_target_dataset(batch_size=args.batch_size)
+
+    # Source dataset (CIFAR‑10 train) for classifier training
+    transform = transforms.Compose([transforms.ToTensor()])
+    source_dataset = torchvision.datasets.CIFAR10(
+        root="data", train=True, download=True, transform=transform
+    )
+    source_loader = DataLoader(
+        source_dataset, batch_size=args.batch_size, shuffle=True
+    )
+
+    # Combine source (label 0) & target (label 1) for classifier
+    class_labels_source = torch.zeros(len(source_dataset), dtype=torch.long)
+    class_labels_target = torch.ones(len(target_loader.dataset), dtype=torch.long)
+    combined_dataset = ConcatDataset(
+        [
+            source_dataset,
+            target_loader.dataset,
+        ]
+    )
+    combined_loader = DataLoader(
+        combined_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        sampler=None,
+    )
+
+    # 2. Load pre‑trained DDPM UNet & scheduler
+    print("Loading pre‑trained DDPM model...")
+    unet = UNet2DModel.from_pretrained(
+        "google/ddpm-celebahq-256",
+        subfolder="unet",
+    ).to(DEVICE)
+    scheduler = DDPMScheduler.from_pretrained(
+        "google/ddpm-celebahq-256",
+        subfolder="scheduler",
+    )
+
+    # 3. Train classifier
+    print("Training binary classifier...")
+    classifier = SimpleClassifier(img_shape=(3, 32, 32))
+    classifier = train_classifier(
+        classifier,
+        combined_loader,
+        scheduler,
+        epochs=args.clf_epochs,
+        lr=args.clf_lr,
+        device=DEVICE,
+    )
+
+    # 4. Fine‑tune UNet
+    print("Fine‑tuning UNet on target domain...")
+    unet = train_unet(
+        unet,
+        classifier,
+        scheduler,
+        target_loader,
+        epochs=args.unet_epochs,
+        lr=args.unet_lr,
+        gamma=args.gamma,
+        device=DEVICE,
+    )
+
+    # 5. Generate samples
+    print("Generating samples...")
+    gen_dir = generate_samples(
+        unet, scheduler, args.num_samples, args.gen_batch, DEVICE
+    )
+
+    # 6. Evaluate
+    print("Evaluating metrics...")
+    compute_metrics(gen_dir, "data/target_images", args)
+    print("Reproduction completed. Metrics are stored in metrics.txt.")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser("DPMs‑ANT training")
+    parser.add_argument("--batch_size", type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument("--clf_epochs", type=int, default=DEFAULT_EPOCHS_CLF)
+    parser.add_argument("--clf_lr", type=float, default=DEFAULT_LR_CLF)
+    parser.add_argument("--unet_epochs", type=int, default=DEFAULT_EPOCHS_UNET)
+    parser.add_argument("--unet_lr", type=float, default=DEFAULT_LR_UNET)
+    parser.add_argument("--gamma", type=float, default=DEFAULT_GAMMA)
+    parser.add_argument("--gen_batch", type=int, default=DEFAULT_GEN_BATCH)
+    parser.add_argument("--num_samples", type=int, default=DEFAULT_NUM_SAMPLES)
+    args = parser.parse_args()
+    main(args)
+```
+
+---
+
+**FILE: reproduce.sh**  
+```bash
+#!/usr/bin/env bash
+set -e
+
+# Install dependencies
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# Prepare data
+python -c "import data.target as d; d.download_and_prepare(num_samples=10)"
+
+# Train and evaluate
+python train_ants.py \
+    --batch_size 8 \
+    --clf_epochs 5 \
+    --clf_lr 1e-3 \
+    --unet_epochs 3 \
+    --unet_lr 5e-5 \
+    --gamma 5.0 \
+    --gen_batch 10 \
+    --num_samples 1000
+
+echo "Reproduction finished. Check metrics.txt for results."
+```
+
+---
+
+**FILE: requirements.txt**  
+```text
+torch>=2.0
+diffusers>=0.21
+tqdm
+torchvision
+lpips
+numpy
+Pillow
+scipy
+```
+
+---

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Continual mem-graph diffs (my_run)</title>
+  <style>
+    body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    .top { padding: 14px 16px; border-bottom: 1px solid #eee; }
+    .title { font-weight: 800; }
+    .muted { color: #666; }
+    .wrap { padding: 10px 16px 22px; }
+    .row { padding: 10px 12px; border: 1px solid #eee; border-radius: 12px; margin: 10px 0; }
+    .row a { color: #0366d6; text-decoration: none; font-weight: 700; }
+    .kpis { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+    .kpi { border: 1px solid #f0f0f0; border-radius: 10px; padding: 8px 10px; }
+    .kpi .n { font-weight: 800; }
+    .search { width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1px solid #ddd; border-radius: 12px; margin: 12px 0; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <div class="title">Continual mem-graph diffs (my_run)</div>
+    <div class="muted">Click a step to inspect the mem-graph diff (triplets + triplet↔code links).</div>
+  </div>
+  <div class="wrap">
+    <input id="q" class="search" placeholder="Filter by paper name..." />
+    <div id="rows"></div>
+  </div>
+  <script>
+    const ITEMS = [{"step": 2, "prev_paper": "fre", "paper": "mechanistic-understanding", "href": "step_01_mechanistic-understanding__from_fre.html", "counts": {"triplets_added": 317, "triplets_removed": 0, "links_added": 183, "links_removed": 0, "links_confidence_changed": 0}}, {"step": 3, "prev_paper": "mechanistic-understanding", "paper": "stochastic-interpolants", "href": "step_02_stochastic-interpolants__from_mechanistic-understanding.html", "counts": {"triplets_added": 282, "triplets_removed": 0, "links_added": 215, "links_removed": 0, "links_confidence_changed": 0}}, {"step": 4, "prev_paper": "stochastic-interpolants", "paper": "bbox", "href": "step_03_bbox__from_stochastic-interpolants.html", "counts": {"triplets_added": 186, "triplets_removed": 0, "links_added": 105, "links_removed": 0, "links_confidence_changed": 0}}, {"step": 5, "prev_paper": "bbox", "paper": "rice", "href": "step_04_rice__from_bbox.html", "counts": {"triplets_added": 445, "triplets_removed": 0, "links_added": 385, "links_removed": 0, "links_confidence_changed": 0}}, {"step": 6, "prev_paper": "rice", "paper": "lbcs", "href": "step_05_lbcs__from_rice.html", "counts": {"triplets_added": 236, "triplets_removed": 0, "links_added": 150, "links_removed": 0, "links_confidence_changed": 0}}, {"step": 7, "prev_paper": "lbcs", "paper": "bam", "href": "step_06_bam__from_lbcs.html", "counts": {"triplets_added": 205, "triplets_removed": 0, "links_added": 158, "links_removed": 0, "links_confidence_changed": 0}}, {"step": 8, "prev_paper": "bam", "paper": "ftrl", "href": "step_07_ftrl__from_bam.html", "counts": {"triplets_added": 440, "triplets_removed": 0, "links_added": 272, "links_removed": 0, "links_confidence_changed": 0}}, {"step": 9, "prev_paper": "ftrl", "paper": "self-expansion", "href": "step_08_self-expansion__from_ftrl.html", "counts": {"triplets_added": 464, "triplets_removed": 0, "links_added": 338, "links_removed": 0, "links_confidence_changed": 0}}, {"step": 10, "prev_paper": "self-expansion", "paper": "semantic-self-consistency", "href": "step_09_semantic-self-consistency__from_self-expansion.html", "counts": {"triplets_added": 171, "triplets_removed": 0, "links_added": 99, "links_removed": 0, "links_confidence_changed": 0}}];
+    const rows = document.getElementById('rows');
+    const q = document.getElementById('q');
+    function render() {
+      const f = (q.value || '').toLowerCase().trim();
+      const show = ITEMS.filter(it => !f || (it.paper + ' ' + it.prev_paper).toLowerCase().includes(f));
+      rows.innerHTML = show.map(it => `
+        <div class="row">
+          <div><span class="muted">Step ${it.step}:</span> <a href="${it.href}">${it.prev_paper} → ${it.paper}</a></div>
+          <div class="kpis">
+            <div class="kpi"><div class="n">${it.counts.triplets_added}</div><div class="muted">triplets +</div></div>
+            <div class="kpi"><div class="n">${it.counts.triplets_removed}</div><div class="muted">triplets −</div></div>
+            <div class="kpi"><div class="n">${it.counts.links_added}</div><div class="muted">links +</div></div>
+            <div class="kpi"><div class="n">${it.counts.links_removed}</div><div class="muted">links −</div></div>
+            <div class="kpi"><div class="n">${it.counts.links_confidence_changed}</div><div class="muted">conf Δ</div></div>
+          </div>
+        </div>
+      `).join('') || '<div class="muted">No matches.</div>';
+    }
+    q.addEventListener('input', render);
+    render();
+  </script>
+</body>
+</html>

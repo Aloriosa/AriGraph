@@ -24,6 +24,11 @@ sys.path.insert(0, os.path.dirname(__file__))
 import prompts.cookbook_extraction_prompt as prmt
 from ontology.cookbook_ontology import validate_triplet
 import utils_reproduction as reprutil
+from topology_pipeline.cards import build_memory_cards, build_paper_cards, cards_to_dict
+from topology_pipeline.graph_materialization import materialize_typed_graph
+from topology_pipeline.prompt_packing import PromptBudget, build_generation_prompt
+from topology_pipeline.retrieval import RetrievalConfig, retrieve_memory_cards
+from topology_pipeline.symbol_assets import build_symbol_assets_from_triplet_links
 
 
 class ReproductionGraph(ContrieverGraph):
@@ -158,21 +163,40 @@ class ReproductionGraph(ContrieverGraph):
 
 
 def run_linking_pass_hypernodes(graph, code_files, log,
-    output_base=None, paper_path=None, repo_dir=None):
+    output_base=None, paper_path=None, repo_dir=None,
+    observation_keys_filter=None, only_new_patterns=False):
+    """
+    observation_keys_filter: if set, only run linking for these observation keys (e.g. new code chunks).
+    only_new_patterns: if True, never add or overwrite triplet2code[pattern] when pattern already has a link
+    (keeps the theory graph free of duplicate / upgraded code links for the same triplet line).
+    """
 
     symbol_index_full = reprutil.build_symbol_index_text(code_files)
+    symbol_records = reprutil.extract_symbol_records(code_files)
+    if output_base:
+        reprutil._write_json_to_path(
+            output_base,
+            "symbol_records.json",
+            {"symbols": symbol_records, "count": len(symbol_records)},
+        )
     if len(symbol_index_full) == 0:
         log('no code files')
         return graph
     max_seq_len = int(os.getenv("MODEL_MAX_SEQ_LEN"))
     obs_idx = 0
-    for observation, (new_triplets_str, _) in graph.obs_episodic.items():
+    episodic_items = list(graph.obs_episodic.items())
+    total_obs = len(episodic_items)
+    for observation, (new_triplets_str, _) in episodic_items:
+        if observation_keys_filter is not None and observation not in observation_keys_filter:
+            continue
         if len(new_triplets_str) == 0:
             log('no triplets in obs')
             continue
-        log(f"Processing observation {obs_idx}/{len(graph.obs_episodic)}")
+        obs_idx += 1
+        log(f"Processing observation {obs_idx} (episodic entries in graph: {total_obs})")
         numbered_triplets = reprutil.format_numbered_triplet_lines(new_triplets_str)
         sym_start = 0
+        seen_pattern_location_pairs = set()
         while sym_start < len(symbol_index_full):
             
             # 1 token ~ 4 chars
@@ -224,10 +248,16 @@ def run_linking_pass_hypernodes(graph, code_files, log,
                         conf_f = 0.0
                     
                     pattern = lines[tid - 1]
+                    loc_key = str(code_loc).strip()
+                    pl_key = (pattern, loc_key)
+                    if pl_key in seen_pattern_location_pairs:
+                        continue
+                    if only_new_patterns and pattern in graph.triplet2code:
+                        continue
                     if pattern in graph.triplet2code and graph.triplet2code[pattern]['confidence'] > conf_f:
                         continue
                     
-                    snip = reprutil.snippet_from_file_line(repo_dir, str(code_loc).strip())
+                    snip = reprutil.snippet_from_file_line(repo_dir, loc_key)
                     code_val = snip.get("code", '')
                     err = snip.get("error")
                     if err:
@@ -236,7 +266,7 @@ def run_linking_pass_hypernodes(graph, code_files, log,
                         continue
                     graph.triplet2code[pattern] = {
                         "code": code_val,
-                        "code_location": str(code_loc).strip(),
+                        "code_location": loc_key,
                         "confidence": conf_f,
                         "line_start": snip.get("line_start", 0),
                         "line_end": snip.get("line_end", 0),
@@ -244,6 +274,7 @@ def run_linking_pass_hypernodes(graph, code_files, log,
                         "documentation": "",
                         "imports": [],
                     }
+                    seen_pattern_location_pairs.add(pl_key)
                     log(f"  Obs {obs_idx}, sym_start {sym_start}: Linked triplet [{tid}] -> {code_loc} (confidence={round(conf_f, 3)})")
 
                 if output_base and paper_path:
@@ -265,7 +296,6 @@ def run_linking_pass_hypernodes(graph, code_files, log,
             # Advance only after this chunk is processed; full symbol text is covered with no truncation.
             sym_start = end
             
-        obs_idx += 1
     log(f" Unique hypernodes added: {len(graph.triplet2code)}")
     return graph
 
@@ -584,79 +614,106 @@ max_paper_queries=25, code_snippet_len=5000):
         )
     
     output_dir = graph_base_dir if output_dir is None else output_dir
-    #graph_data_path = os.path.join(graph_base_dir, "graph_data.json")
-    #paper_graph_path = os.path.join(graph_base_dir, "paper_graph_data.json")
+    os.makedirs(output_dir, exist_ok=True)
 
-    #paper_items = paper_graph.get_all_triplets()
-    
-    log(f"Starting retrieval")
-    
-    topk = 3
-    
-    
-    paper_items = []
-    for observation, (pp, _) in paper_graph.obs_episodic.items():
-        if len(pp) == 0:
-            #log('no triplets in obs')
-            continue
-        paper_items.append("; ".join(pp)) # join triplets with ; to make a single query
+    log("Starting topology-aware retrieval")
 
-        #log(f"Processing observation {obs_idx}/{len(paper_graph.obs_episodic)}")
-        
-    # subgaph is a list of lists of str triplets
-    subgraph = mem_graph.retrieve(paper_items, topk=topk)
+    paper_typed = materialize_typed_graph(
+        graph_kind="paper",
+        raw_triplets=paper_graph.triplets,
+        obs_episodic=paper_graph.obs_episodic,
+    )
+    mem_typed = materialize_typed_graph(
+        graph_kind="memory",
+        raw_triplets=mem_graph.triplets,
+        obs_episodic=mem_graph.obs_episodic,
+    )
+    reprutil._write_json_to_path(output_dir, "paper_graph_typed.json", paper_typed.to_dict())
+    reprutil._write_json_to_path(output_dir, "mem_graph_typed.json", mem_typed.to_dict())
 
+    symbol_assets, triplet_to_asset = build_symbol_assets_from_triplet_links(mem_graph.triplet2code)
+    paper_cards = build_paper_cards(paper_typed)
+    memory_cards = build_memory_cards(mem_typed, symbol_assets, triplet_to_asset)
+    reprutil._write_json_to_path(output_dir, "paper_cards.json", {"cards": cards_to_dict(paper_cards)})
+    reprutil._write_json_to_path(output_dir, "mem_cards.json", {"cards": cards_to_dict(memory_cards)})
+    reprutil._write_json_to_path(
+        output_dir,
+        "symbol_assets.json",
+        {"assets": [asset.to_dict() for asset in symbol_assets], "triplet_to_asset": triplet_to_asset},
+    )
 
-    expert_knowledge = ""
+    selected = retrieve_memory_cards(
+        paper_cards,
+        memory_cards,
+        RetrievalConfig(
+            per_paper_card=max(1, min(4, retrieval_topk)),
+            total_budget=max(8, max_paper_queries),
+            min_score=max(0.01, min(0.3, retrieval_threshold / 3.0)),
+        ),
+    )
+    reprutil._write_json_to_path(
+        output_dir,
+        "retrieval_selection.json",
+        {"selection": [{"paper_card_id": p, "memory_card_id": m, "score": s} for p, m, s in selected]},
+    )
+    # Backward-compatible artifact used by existing analysis scripts.
     expert_data = {}
-    for obs, query in zip(list(paper_graph.obs_episodic.keys()), paper_items):
-        if len(paper_graph.obs_episodic[obs][0]) == 0:
-            #log('no triplets in obs')
+    paper_card_by_id = {card.id: card for card in paper_cards}
+    memory_card_by_id = {card.id: card for card in memory_cards}
+    for p_id, m_id, score in selected:
+        p_card = paper_card_by_id.get(p_id)
+        m_card = memory_card_by_id.get(m_id)
+        if not p_card or not m_card:
             continue
-        expert_data[obs] = {'triplets': query, 'expert_knowledge': []}
-        #for pi in pis:
-        obs_line = f"Paper triplets: {query}\nExpert knowledge:\n" #f"Paper excerpt: {obs}"
-        query_striplets = subgraph.pop(0)
-        for striplet in query_striplets:
-            hn = mem_graph.triplet2code.get(striplet, "")
-            if isinstance(hn, dict):
-                snip = hn.get("code", "None")
-            else:
-                snip = hn
-            obs_line += f"Pattern: {striplet}\nCode snippet: {snip[:code_snippet_len]}\n"
-            expert_data[obs]['expert_knowledge'].append({'Mem triplet': striplet, 'Code snippet': snip[:code_snippet_len]})
-        
-        expert_knowledge += obs_line
-
-    log(f"expert_knowledge built")
-
+        key = p_card.id
+        expert_data.setdefault(key, {"triplets": p_card.generation_summary, "expert_knowledge": []})
+        expert_data[key]["expert_knowledge"].append(
+            {
+                "Mem triplet": m_card.generation_summary,
+                "Code snippet": "\n".join(m_card.linked_asset_ids),
+                "score": score,
+            }
+        )
     reprutil._write_json_to_path(output_dir, "expert_data.json", expert_data)
-    log(f"expert_data saved to {os.path.join(output_dir, 'expert_data.json')}")
-    #paper_graph_block = "\n".join(paper_graph.get_all_triplets()) #_format_triplets_for_prompt(paper_graph.get_all_triplets())
-    #expert_knowledge = "\n".join(expert_graph)
 
-    max_seq_len = int(os.getenv("MODEL_MAX_SEQ_LEN"))
-    
-    # 1 token ~ 4 chars
+    budget = PromptBudget(
+        max_prompt_tokens=int(os.getenv("MODEL_MAX_SEQ_LEN", "262000")),
+        reserved_output_tokens=int(os.getenv("MODEL_OUTPUT_TOKEN_RESERVE", "120000")),
+        fixed_block_tokens=12000,
+        paper_cards_tokens=28000,
+        memory_cards_tokens=36000,
+        code_assets_tokens=22000,
+    )
+    packed = build_generation_prompt(
+        benchmark_rules=prmt.BENCHMARK_EVALUATION_RULES,
+        toy_example=prmt.REPRODUCTION_SCRIPT_TOY_EXAMPLE,
+        paper_cards=paper_cards,
+        memory_cards=memory_cards,
+        selected_map=selected,
+        symbol_assets=symbol_assets,
+        budget=budget,
+    )
     prompt = prmt.prompt_coding_agent_paper_mem_graph.format(
         BENCHMARK_RULES=prmt.BENCHMARK_EVALUATION_RULES,
         TOY_EXAMPLE=prmt.REPRODUCTION_SCRIPT_TOY_EXAMPLE,
-        #paper_summary=paper_summary,
-        #paper_graph=paper_graph_block,
-        expert_knowledge=expert_knowledge,
+        expert_knowledge=(
+            "## Paper cards\n"
+            + packed["paper_block"]
+            + "\n\n## Memory cards\n"
+            + packed["memory_block"]
+            + "\n\n## Linked code assets\n"
+            + packed["code_asset_block"]
+        ),
     )
-    template_seq_len = reprutil.estimate_tokens(prompt,
-                                                model=os.getenv("OPENAI_MODEL"))
-    if template_seq_len > 2 * max_seq_len / 3:
-        log(f"Prompt length {template_seq_len} exceeds 2/3 of max_seq_len {max_seq_len}, truncating...")
-        neg_tail = int(4.1 * (2 * max_seq_len / 3 - template_seq_len)) # < 0
-        prompt = prmt.prompt_coding_agent_paper_mem_graph.format(
-        BENCHMARK_RULES=prmt.BENCHMARK_EVALUATION_RULES,
-        TOY_EXAMPLE=prmt.REPRODUCTION_SCRIPT_TOY_EXAMPLE,
-        #paper_summary=paper_summary,
-        #paper_graph=paper_graph_block,
-        expert_knowledge=expert_knowledge[:neg_tail],
-        )
+    template_seq_len = reprutil.estimate_tokens(prompt, model=os.getenv("OPENAI_MODEL"))
+    max_seq_len = int(os.getenv("MODEL_MAX_SEQ_LEN", "262000"))
+    reserved = int(os.getenv("MODEL_OUTPUT_TOKEN_RESERVE", "120000"))
+    max_prompt_allowed = max(8_000, max_seq_len - reserved)
+    if template_seq_len > max_prompt_allowed:
+        log(f"Prompt length {template_seq_len} exceeds allowed prompt budget {max_prompt_allowed}, truncating...")
+        ratio = max_prompt_allowed / max(1, template_seq_len)
+        keep_chars = int(len(prompt) * ratio * 0.98)
+        prompt = prompt[:keep_chars]
 
     log(f"Prompt length: {reprutil.estimate_tokens(prompt,model=os.getenv('OPENAI_MODEL'))} TOKENS, generating code...")
     chat_completion = agent.chat.completions.create(
@@ -682,7 +739,6 @@ max_paper_queries=25, code_snippet_len=5000):
     log(f"Code generation response: {len(response)} chars")
     log(f"Code generation tokens: {completion_tokens} completion, {prompt_tokens} prompt")
 
-    os.makedirs(output_dir, exist_ok=True)
     raw_output_path = os.path.join(output_dir, "generated_code_response.txt")
     repo_root = os.path.join(output_dir, "submission")
     os.makedirs(repo_root, exist_ok=True)

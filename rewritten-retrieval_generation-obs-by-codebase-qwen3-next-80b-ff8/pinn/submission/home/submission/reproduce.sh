@@ -1,0 +1,612 @@
+#!/bin/bash
+
+# Set up environment
+apt-get update && apt-get install -y python3 python3-pip git
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+pip3 install numpy scipy wandb matplotlib
+
+# Create directory structure
+mkdir -p /home/submission/src
+cd /home/submission
+
+# Create source files
+cat > src/models.py << 'EOF'
+import torch
+import torch.nn as nn
+
+class PINN(nn.Module):
+  def __init__(self, in_dim, hidden_dim, out_dim, num_layer):
+    super(PINN, self).__init__()
+
+    layers = []
+    for i in range(num_layer-1):
+      if i == 0:
+        layers.append(nn.Linear(in_features=in_dim, out_features=hidden_dim))
+        layers.append(nn.Tanh())
+      else:
+        layers.append(nn.Linear(in_features=hidden_dim, out_features=hidden_dim))
+        layers.append(nn.Tanh())
+
+    layers.append(nn.Linear(in_features=hidden_dim, out_features=out_dim))
+
+    self.linear = nn.Sequential(*layers)
+
+  def forward(self, x, t):
+    src = torch.cat((x,t), dim=-1)
+    return self.linear(src)
+EOF
+
+cat > src/train_utils.py << 'EOF'
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.optim import Adam, LBFGS
+from .opts.adam_lbfgs import Adam_LBFGS
+from .opts.adam_lbfgs_nncg import Adam_LBFGS_NNCG
+from .opts.adam_lbfgs_gd import Adam_LBFGS_GD
+import random
+import re
+import wandb
+
+LOG_FREQ = 20 # Hard-coded for now -- this is done to match the max_iter of the LBFGS optimizer + save time
+
+def parse_params_list(pde_params_list):
+    """Parse PDE parameters from list of strings like ['beta=10']"""
+    pde_coefs = {}
+    for param in pde_params_list:
+        if '=' in param:
+            key, value = param.split('=')
+            pde_coefs[key] = float(value)
+    return pde_coefs
+
+"""
+Helper function for obtaining corresponding domain and loss function of the chosen PDE type. 
+
+INPUT: 
+- pde_name: string; name of the PDE problem
+- pde_params_list: list of strings; coefficients of the PDE
+- loss_name: string; name of the loss type
+OUTPUT: 
+- x_range: list of size 2; lower and upper bounds of spatial variable x
+- t_range: list of size 2; lower and upper bounds of temporal variable t
+- loss_func: loss function that takes (x,t,pred) and computes the total loss
+- pde_coefs: dictionary containing coefficients of the PDE
+"""
+def get_pde(pde_name, pde_params_list, loss_name): 
+    # determine loss type
+    loss_options = {
+        "l1": {"res": nn.L1Loss(), "bc": nn.L1Loss(), "ic": nn.L1Loss()},
+        "mse": {"res": nn.MSELoss(), "bc": nn.MSELoss(), "ic": nn.MSELoss()},
+        "huber": {"res": nn.HuberLoss(), "bc": nn.HuberLoss(), "ic": nn.HuberLoss()},
+        "hybrid": {"res": nn.HuberLoss(), "bc": nn.MSELoss(), "ic": nn.MSELoss()}
+    }
+    try: 
+        loss_type = loss_options[loss_name]
+    except KeyError as ke:
+        raise RuntimeError("{} is not a valid loss type.".format(ke))
+
+    # parse PDE parameters
+    pde_coefs = parse_params_list(pde_params_list)
+    
+    # determine pde type
+    if pde_name == "convection": 
+        if "beta" not in pde_coefs.keys(): 
+            raise KeyError("beta is not specified for convection PDE.")
+
+        x_range = [0, 2 * np.pi]
+        t_range = [0, 1]
+        
+        def loss_func(x, t, pred):
+            # Extract prediction
+            u_pred = pred
+            
+            # Compute PDE residual: u_t + beta * u_x = 0
+            # Need gradients
+            u = u_pred
+            du_dt = torch.autograd.grad(u, t, grad_outputs=torch.ones_like(u), create_graph=True, retain_graph=True)[0]
+            du_dx = torch.autograd.grad(u, x, grad_outputs=torch.ones_like(u), create_graph=True, retain_graph=True)[0]
+            
+            pde_residual = du_dt + pde_coefs['beta'] * du_dx
+            
+            # Compute initial condition: u(x,0) = sin(x)
+            # We need to evaluate at t=0
+            x_ic = x[::len(x)//100]  # Sample some points
+            t_ic = torch.zeros_like(x_ic)
+            u_ic_pred = model(x_ic, t_ic)
+            u_ic_exact = torch.sin(x_ic)
+            ic_loss = loss_type["ic"](u_ic_pred, u_ic_exact)
+            
+            # Compute boundary conditions: u(0,t) = u(2π,t)
+            x_bc_left = torch.zeros_like(t)
+            x_bc_right = torch.ones_like(t) * 2 * np.pi
+            u_bc_left = model(x_bc_left, t)
+            u_bc_right = model(x_bc_right, t)
+            bc_loss = loss_type["bc"](u_bc_left, u_bc_right)
+            
+            # Compute PDE residual loss
+            res_loss = loss_type["res"](pde_residual, torch.zeros_like(pde_residual))
+            
+            return res_loss, bc_loss, ic_loss
+            
+        return x_range, t_range, loss_func, pde_coefs
+        
+    else:
+        raise ValueError(f"PDE {pde_name} not implemented")
+
+def generate_data(x_range, t_range, num_x, num_t, num_res):
+    """Generate training data points"""
+    # Collocation points for PDE residual
+    x_res = torch.linspace(x_range[0], x_range[1], num_res, requires_grad=True).view(-1, 1)
+    t_res = torch.linspace(t_range[0], t_range[1], num_res, requires_grad=True).view(-1, 1)
+    
+    # Boundary points
+    x_bc = torch.cat([
+        torch.zeros(num_t, 1),  # x=0
+        torch.ones(num_t, 1) * 2 * np.pi  # x=2π
+    ])
+    t_bc = torch.linspace(t_range[0], t_range[1], num_t).view(-1, 1).repeat(2, 1)
+    
+    # Initial condition points
+    x_ic = torch.linspace(x_range[0], x_range[1], num_x).view(-1, 1)
+    t_ic = torch.zeros(num_x, 1)
+    
+    return x_res, t_res, x_bc, t_bc, x_ic, t_ic
+
+def train_pinn(model, x_res, t_res, x_bc, t_bc, x_ic, t_ic, optimizer, epochs, loss_name):
+    """Train the PINN model"""
+    # Create loss function
+    _, _, loss_func, _ = get_pde("convection", ["beta=10"], loss_name)
+    
+    # Create data for training
+    def closure():
+        optimizer.zero_grad()
+        
+        # Compute PDE residual loss
+        u_res = model(x_res, t_res)
+        res_loss, bc_loss, ic_loss = loss_func(x_res, t_res, u_res)
+        
+        # Compute total loss
+        total_loss = res_loss + bc_loss + ic_loss
+        
+        # Compute gradients
+        total_loss.backward()
+        
+        return total_loss, [p.grad for p in model.parameters()]
+    
+    for epoch in range(epochs):
+        loss, _ = closure()
+        optimizer.step(closure)
+        
+        if epoch % LOG_FREQ == 0:
+            print(f'Epoch {epoch}, Loss: {loss.item():.6f}')
+    
+    return model
+EOF
+
+cat > src/opts/adam_lbfgs.py << 'EOF'
+import torch
+from torch.optim import Optimizer
+
+class Adam_LBFGS(Optimizer):
+    def __init__(self, params, switch_epochs, adam_params, lbfgs_params):
+        # defaults = dict(switch_epoch=switch_epoch, adam_params=adam_params, lbfgs_params=lbfgs_params)
+
+        self.switch_epochs = sorted(switch_epochs)
+        self.params = list(params)
+        self.adam = torch.optim.Adam(self.params, **adam_params)
+        self.lbfgs_params = lbfgs_params
+        self.lbfgs = None
+
+        super(Adam_LBFGS, self).__init__(self.params, defaults={})
+
+        self.state['epoch'] = 0
+
+    def step(self, closure=None):
+        if self.state['epoch'] < self.switch_epochs[0]:
+            self.adam.step(closure)
+        else:
+            # (Re)start LBFGS optimizer
+            if self.state['epoch'] in self.switch_epochs:
+                print(f'Starting LBFGS optimizer at epoch {self.state["epoch"]}')
+                self.lbfgs = torch.optim.LBFGS(self.params, **self.lbfgs_params)
+            if self.lbfgs is not None:
+                self.lbfgs.step(closure)
+
+        self.state['epoch'] += 1
+EOF
+
+cat > src/opts/adam_lbfgs_nncg.py << 'EOF'
+import torch
+from torch.optim import Optimizer
+
+class Adam_LBFGS_NNCG(Optimizer):
+    def __init__(self, params, switch_epoch1, switch_epoch2, adam_params, lbfgs_params, nncg_params):
+        self.switch_epoch1 = switch_epoch1
+        self.switch_epoch2 = switch_epoch2
+        self.params = list(params)
+        self.adam = torch.optim.Adam(self.params, **adam_params)
+        self.lbfgs_params = lbfgs_params
+        self.nncg_params = nncg_params
+        self.lbfgs = None
+        self.nncg = None
+
+        super(Adam_LBFGS_NNCG, self).__init__(self.params, defaults={})
+
+        self.state['epoch'] = 0
+
+    def step(self, closure=None):
+        if self.state['epoch'] < self.switch_epoch1:
+            self.adam.step(closure)
+            self.state['epoch'] += 1
+
+        elif self.state['epoch'] < self.switch_epoch2:
+            if self.state['epoch'] == self.switch_epoch1:
+                print(f'Switching to LBFGS optimizer at epoch {self.state["epoch"]}')
+                self.lbfgs = torch.optim.LBFGS(self.params, **self.lbfgs_params)
+            if self.lbfgs is not None:
+                self.lbfgs.step(closure)
+            self.state['epoch'] += 1
+            
+        else:
+            if self.state['epoch'] == self.switch_epoch2:
+                print(f'Switching to NysNewtonCG optimizer at epoch {self.state["epoch"]}')
+                self.nncg = NysNewtonCG(self.params, **self.nncg_params)
+            if self.nncg is not None:
+                _, grad = self.nncg.step(closure)
+            self.state['epoch'] += 1
+            return grad
+EOF
+
+cat > src/opts/nys_newton_cg.py << 'EOF'
+import torch
+from torch.optim import Optimizer
+import math
+
+def _nystrom_pcg(hvp, g, old_dir, mu, U, S, rank, cg_tol, cg_max_iters):
+    """Nystrom-PCG algorithm for computing Newton direction"""
+    # Initialize PCG
+    d = torch.zeros_like(g)
+    r = g.clone()
+    z = r.clone()
+    p = z.clone()
+    
+    # Initial residual norm
+    r_norm = torch.dot(r, r)
+    r0_norm = r_norm
+    
+    # If residual is small, return zero direction
+    if r_norm < cg_tol:
+        return d
+    
+    # PCG iterations
+    for k in range(cg_max_iters):
+        if r_norm < cg_tol * r0_norm:
+            break
+            
+        # Compute H * p
+        Hp = hvp(p)
+        
+        # Compute alpha
+        alpha = r_norm / torch.dot(p, Hp)
+        
+        # Update direction and residual
+        d = d + alpha * p
+        r = r - alpha * Hp
+        
+        # Compute new residual norm
+        r_norm_new = torch.dot(r, r)
+        
+        # Compute beta
+        beta = r_norm_new / r_norm
+        
+        # Update search direction
+        z = r + beta * z
+        p = z
+        
+        r_norm = r_norm_new
+        
+    return d
+
+def _armijo(obj_func, x_init, g, d, lr):
+    """Armijo line search"""
+    c = 1e-4
+    rho = 0.5
+    alpha = lr
+    
+    f0 = obj_func(x_init, 0, torch.zeros_like(g))
+    
+    while True:
+        f_new = obj_func(x_init, alpha, d)
+        if f_new <= f0 + c * alpha * torch.dot(g, d):
+            break
+        alpha *= rho
+        if alpha < 1e-10:
+            break
+            
+    return alpha
+
+class NysNewtonCG(Optimizer):
+    def __init__(self, params, lr=1.0, rank=10, mu=1e-4, chunk_size=1,
+                 cg_tol=1e-16, cg_max_iters=1000, line_search_fn=None, verbose=False):
+        defaults = dict(lr=lr, rank=rank, chunk_size=chunk_size, mu=mu, cg_tol=cg_tol,
+                        cg_max_iters=cg_max_iters, line_search_fn=line_search_fn)
+        self.rank = rank
+        self.mu = mu
+        self.chunk_size = chunk_size
+        self.cg_tol = cg_tol
+        self.cg_max_iters = cg_max_iters
+        self.line_search_fn = line_search_fn
+        self.verbose = verbose
+        self.U = None
+        self.S = None
+        self.n_iters = 0
+        super(NysNewtonCG, self).__init__(params, defaults)
+
+        if len(self.param_groups) > 1:
+            raise ValueError(
+                "NysNewtonCG doesn't currently support per-parameter options (parameter groups)")
+
+        if self.line_search_fn is not None and self.line_search_fn != 'armijo':
+            raise ValueError("NysNewtonCG only supports Armijo line search")
+
+        self._params = self.param_groups[0]['params']
+        self._params_list = list(self._params)
+        self._numel_cache = None
+
+    def _numel(self):
+        if self._numel_cache is None:
+            self._numel_cache = sum(p.numel() for p in self._params)
+        return self._numel_cache
+
+    def _add_grad(self, step_size, update):
+        offset = 0
+        for p in self._params:
+            numel = p.numel()
+            p.data.add_(update[offset:offset + numel].view_as(p), alpha=step_size)
+            offset += numel
+        assert offset == self._numel()
+
+    def _clone_param(self):
+        return [p.clone(memory_format=torch.contiguous_format) for p in self._params]
+
+    def _set_param(self, params_data):
+        for p, pdata in zip(self._params, params_data):
+            p.data = pdata.data
+
+    def _hvp(self, g, params, v):
+        """Compute Hessian-vector product"""
+        # Compute gradient of dot product of g and v
+        grad_g = torch.autograd.grad(g, params, grad_outputs=v, retain_graph=True, create_graph=True)
+        grad_g = torch.cat([grad.view(-1) for grad in grad_g])
+        return grad_g
+
+    def step(self, closure=None):
+        """Perform a single optimization step.
+
+        Args:
+            closure (callable, optional): A closure that reevaluates the model and returns (i) the loss and (ii) gradient w.r.t. the parameters.
+            The closure can compute the gradient w.r.t. the parameters by calling torch.autograd.grad on the loss with create_graph=True.
+        """
+        if self.n_iters == 0:
+            # Store the previous direction for warm starting PCG
+            self.old_dir = torch.zeros(
+                self._numel(), device=self._params[0].device)
+
+        # NOTE: The closure must return both the loss and the gradient
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss, grad_tuple = closure()
+
+        g = torch.cat([grad.view(-1) for grad in grad_tuple if grad is not None])
+
+        # One step update
+        for group_idx, group in enumerate(self.param_groups):
+            def hvp_temp(x):
+                return self._hvp(g, self._params_list, x)
+
+            # Calculate the Newton direction
+            d = _nystrom_pcg(hvp_temp, g, self.old_dir,
+                             self.mu, self.U, self.S, self.rank, self.cg_tol, self.cg_max_iters)
+
+            # Store the previous direction for warm starting PCG
+            self.old_dir = d
+
+            # Check if d is a descent direction
+            if torch.dot(d, g) <= 0:
+                print("Warning: d is not a descent direction")
+
+            if self.line_search_fn == 'armijo':
+                x_init = self._clone_param()
+
+                def obj_func(x, t, dx):
+                    self._add_grad(t, dx)
+                    loss = float(closure()[0])
+                    self._set_param(x)
+                    return loss
+
+                # Use -d for convention
+                t = _armijo(obj_func, x_init, g, -d, group['lr'])
+            else:
+                t = group['lr']
+
+            self.state[group_idx]['t'] = t
+
+            # update parameters
+            ls = 0
+            for p in group['params']:
+                np = torch.numel(p)
+                dp = d[ls:ls+np].view(p.shape)
+                ls += np
+                p.data.add_(-dp, alpha=t)
+
+        self.n_iters += 1
+
+        return loss, g
+EOF
+
+cat > src/run_experiment.py << 'EOF'
+import torch
+import numpy as np
+import argparse
+import random
+import os
+import time
+from src.models import PINN
+from src.train_utils import get_pde, generate_data, train_pinn
+from src.opts.adam_lbfgs import Adam_LBFGS
+from src.opts.adam_lbfgs_nncg import Adam_LBFGS_NNCG
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--seed', type=int, default=123)
+    parser.add_argument('--pde', type=str, default='convection')
+    parser.add_argument('--pde_params', nargs='+', default=['beta=10'])
+    parser.add_argument('--opt', type=str, default='adam_lbfgs_nncg')
+    parser.add_argument('--opt_params', nargs='+', default=['lr', '0.001'])
+    parser.add_argument('--num_layers', type=int, default=4)
+    parser.add_argument('--num_neurons', type=int, default=50)
+    parser.add_argument('--loss', type=str, default='mse')
+    parser.add_argument('--num_x', type=int, default=257)
+    parser.add_argument('--num_t', type=int, default=101)
+    parser.add_argument('--num_res', type=int, default=10000)
+    parser.add_argument('--epochs', type=int, default=41000)
+    parser.add_argument('--device', type=str, default='cuda')
+    parser.add_argument('--wandb_project', type=str, default='convection_adam_final')
+    
+    args = parser.parse_args()
+    
+    # Set random seeds
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed)
+    
+    # Set device
+    device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
+    
+    # Get PDE domain and loss function
+    x_range, t_range, loss_func, pde_coefs = get_pde(args.pde, args.pde_params, args.loss)
+    
+    # Generate training data
+    x_res, t_res, x_bc, t_bc, x_ic, t_ic = generate_data(x_range, t_range, args.num_x, args.num_t, args.num_res)
+    
+    # Move data to device
+    x_res = x_res.to(device)
+    t_res = t_res.to(device)
+    x_bc = x_bc.to(device)
+    t_bc = t_bc.to(device)
+    x_ic = x_ic.to(device)
+    t_ic = t_ic.to(device)
+    
+    # Initialize model
+    model = PINN(in_dim=2, hidden_dim=args.num_neurons, out_dim=1, num_layer=args.num_layers)
+    model = model.to(device)
+    
+    # Initialize optimizer based on configuration
+    if args.opt == 'adam':
+        optimizer = torch.optim.Adam(model.parameters(), lr=float(args.opt_params[1]))
+    elif args.opt == 'adam_lbfgs':
+        # Use the Adam-LBFGS hybrid
+        adam_params = {'lr': float(args.opt_params[1])}
+        lbfgs_params = {'lr': 1.0, 'max_iter': 20, 'max_eval': 25, 'history_size': 10}
+        switch_epochs = [20000]  # Switch after 20k epochs
+        optimizer = Adam_LBFGS(model.parameters(), switch_epochs=switch_epochs, adam_params=adam_params, lbfgs_params=lbfgs_params)
+    elif args.opt == 'adam_lbfgs_nncg':
+        # Use the full Adam-LBFGS-NysNewtonCG pipeline
+        adam_params = {'lr': float(args.opt_params[1])}
+        lbfgs_params = {'lr': 1.0, 'max_iter': 20, 'max_eval': 25, 'history_size': 10}
+        nncg_params = {
+            'lr': 1.0,
+            'rank': 10,
+            'mu': 1e-4,
+            'cg_tol': 1e-6,
+            'cg_max_iters': 100,
+            'line_search_fn': 'armijo'
+        }
+        switch_epoch1 = 20000
+        switch_epoch2 = 35000
+        optimizer = Adam_LBFGS_NNCG(model.parameters(), switch_epoch1=switch_epoch1, switch_epoch2=switch_epoch2, 
+                                  adam_params=adam_params, lbfgs_params=lbfgs_params, nncg_params=nncg_params)
+    else:
+        raise ValueError(f"Optimizer {args.opt} not supported")
+    
+    # Train model
+    print(f"Training {args.pde} with {args.opt} optimizer")
+    start_time = time.time()
+    model = train_pinn(model, x_res, t_res, x_bc, t_bc, x_ic, t_ic, optimizer, args.epochs, args.loss)
+    end_time = time.time()
+    
+    # Save results
+    results_dir = f"results/{args.pde}/{args.opt}/seed_{args.seed}"
+    os.makedirs(results_dir, exist_ok=True)
+    
+    # Save model
+    torch.save(model.state_dict(), f"{results_dir}/model.pth")
+    
+    # Save training time
+    with open(f"{results_dir}/training_time.txt", 'w') as f:
+        f.write(f"Training time: {end_time - start_time:.2f} seconds\n")
+    
+    # Compute final L2 relative error
+    # Generate exact solution for convection: u(x,t) = sin(x - beta*t)
+    x_exact = torch.linspace(x_range[0], x_range[1], 1000).view(-1, 1).to(device)
+    t_exact = torch.linspace(t_range[0], t_range[1], 1000).view(-1, 1).to(device)
+    x_grid, t_grid = torch.meshgrid(x_exact.squeeze(), t_exact.squeeze(), indexing='ij')
+    x_exact_flat = x_grid.reshape(-1, 1)
+    t_exact_flat = t_grid.reshape(-1, 1)
+    
+    with torch.no_grad():
+        u_pred = model(x_exact_flat, t_exact_flat)
+        u_exact = torch.sin(x_exact_flat - pde_coefs['beta'] * t_exact_flat)
+        
+        l2_error = torch.sqrt(torch.mean((u_pred - u_exact)**2))
+        l2_exact = torch.sqrt(torch.mean(u_exact**2))
+        l2_relative_error = l2_error / l2_exact
+        
+        print(f"L2 Relative Error: {l2_relative_error.item():.6f}")
+        
+        # Save L2 relative error
+        with open(f"{results_dir}/l2_relative_error.txt", 'w') as f:
+            f.write(f"L2 Relative Error: {l2_relative_error.item():.6f}\n")
+    
+    # Save output to file for grading
+    with open("output.csv", 'w') as f:
+        f.write("metric,value\n")
+        f.write(f"l2_relative_error,{l2_relative_error.item():.6f}\n")
+        f.write(f"training_time,{end_time - start_time:.2f}\n")
+        f.write(f"epochs,{args.epochs}\n")
+        f.write(f"num_neurons,{args.num_neurons}\n")
+        f.write(f"num_layers,{args.num_layers}\n")
+        f.write(f"optimizer,{args.opt}\n")
+        f.write(f"seed,{args.seed}\n")
+    
+    print(f"Results saved to output.csv")
+
+if __name__ == "__main__":
+    main()
+EOF
+
+# Create results directory
+mkdir -p results/convection/adam_lbfgs_nncg/seed_123
+
+# Run the experiment with the parameters from the paper
+python3 src/run_experiment.py \
+    --seed 123 \
+    --pde convection \
+    --pde_params beta=10 \
+    --opt adam_lbfgs_nncg \
+    --opt_params lr 0.001 \
+    --num_layers 4 \
+    --num_neurons 50 \
+    --loss mse \
+    --num_x 257 \
+    --num_t 101 \
+    --num_res 10000 \
+    --epochs 41000 \
+    --device cuda
+
+# Verify output
+cat output.csv
+EOF
+
+FILE: /home/submission/README.md

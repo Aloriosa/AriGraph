@@ -1,0 +1,119 @@
+2026-03-14 13:41:01.302698 ======================================================================
+2026-03-14 13:41:01.302861 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 13:41:01.302928 ======================================================================
+2026-03-14 13:41:01.302969 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/self-expansion/paper.md
+2026-03-14 13:41:01.303009 Log path: paper2code_react5_Gpt-oss-20b_trial1/self-expansion
+2026-03-14 13:41:01.303046 Model: Openai/Gpt-oss-20b
+2026-03-14 13:41:01.303081 Max iterations: 5
+2026-03-14 13:41:01.303119 Run reproduce.sh: False
+2026-03-14 13:41:01.303202 Run LLM paper check: True
+2026-03-14 13:41:01.303235 
+2026-03-14 13:41:01.303267 Loading paper...
+2026-03-14 13:41:01.303483 Paper length: 84481 chars (using 84481 for prompt)
+2026-03-14 13:41:01.303526 
+2026-03-14 13:41:01.323135 --- Iteration 0: Initial generation ---
+2026-03-14 13:41:58.979975   Created: generated_reproduction.txt
+2026-03-14 13:41:58.980091 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial1/self-expansion/submission (1 files)
+2026-03-14 13:41:58.980152 
+2026-03-14 13:41:58.980193 --- Iteration 1: Observe & Refine ---
+2026-03-14 13:42:01.780134 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core method/algorithm (SEMA architecture, modular adapters, representation descriptors, router, self‑expansion logic)  
+MISSING: Hyperparameters (learning rate, batch size, optimizer settings, training epochs, etc.)  
+MISSING: Data setup (datasets, preprocessing, train/validation splits, class‑incremental protocol)  
+MISSING: Evaluation (metrics, test procedure, baseline comparisons)  
+MISSING: Experimental setup (hardware configuration, training steps, checkpointing, logging)  
+MISSING: reproduce.sh (script to run the full training/evaluation pipeline)  
+
+All critical components from the paper are absent in the provided code.
+2026-03-14 13:42:01.780328 
+2026-03-14 13:42:01.780581 Generating refined code...
+2026-03-14 13:43:10.435429   Updated: generated_reproduction.txt
+2026-03-14 13:43:10.435560 
+2026-03-14 13:43:10.435606 --- Iteration 2: Observe & Refine ---
+2026-03-14 13:43:16.647502 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incomplete Elements in the Reproduction**
+
+| Status | Requirement from the Paper | Notes |
+|--------|-----------------------------|-------|
+| **MISSING** | Core SEMA architecture (ViT backbone + modular adapters + representation descriptors + expandable router) | The `sema.py` file does not contain the full implementation of the modular adapter, descriptor, or router modules. |
+| **MISSING** | Self‑expansion logic (triggering new adapters when all descriptors in a layer flag a novel pattern) | No code that checks descriptor outputs and adds new modules during training. |
+| **MISSING** | Training loop that freezes the PTM, trains adapters and router per task, and handles task‑wise learning rates / epochs | `run_sema.py` only contains a placeholder; no per‑task training loop or freezing logic. |
+| **MISSING** | Dataset handling for class‑incremental learning (e.g., split CIFAR‑100/mini‑ImageNet into sequential tasks, preprocessing, data loaders) | No dataset utilities or split definitions. |
+| **MISSING** | Evaluation protocol (average accuracy, forgetting, etc.) and comparison to baselines (L2P, DualPrompt, etc.) | No evaluation script or baseline implementations. |
+| **MISSING** | Hyperparameter configuration (learning rate, batch size, optimizer, scheduler, number of epochs per task) | `requirements.txt` only lists dependencies; no hyperparameter file or defaults. |
+| **MISSING** | Reproducibility script (`reproduce.sh`) that runs the full pipeline and outputs the paper’s results | `reproduce.sh` is empty / contains only a placeholder. |
+| **MISSING** | Checkpointing / model saving logic for each task | No code to save or load adapters/routers per task. |
+| **MISSING** | Logging / metric tracking (e.g., TensorBoard, CSV logs) | No logging utilities. |
+| **MISSING** | Hardware / environment details (GPU usage, seed setting) | No seed or device configuration. |
+
+**Conclusion**
+
+The current repository does **not** reproduce the key contributions of the paper. All major components—model architecture, self‑expansion mechanism, training procedure, dataset handling, evaluation, and reproducibility script—are missing or incomplete. The code needs a comprehensive rewrite to match the paper’s methodology and experimental setup.
+2026-03-14 13:43:16.647749 
+2026-03-14 13:43:16.647948 Generating refined code...
+2026-03-14 13:44:16.622584   Updated: generated_reproduction.txt
+2026-03-14 13:44:16.622716 
+2026-03-14 13:44:16.622762 --- Iteration 3: Observe & Refine ---
+2026-03-14 13:44:33.682307 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Checklist of paper‑required components vs. the provided code**
+
+| Status | Requirement (from the paper) | Comment |
+|--------|------------------------------|---------|
+| **OK** | Modular adapters (functional adapter + descriptor) | The repo contains a `ModularAdapter` class in `src/model.py`. |
+| **OK** | Expandable weighting router (soft mixture of adapters) | `ExpandableRouter` is defined and trained jointly with adapters. |
+| **OK** | Self‑expansion trigger logic (add new adapter only when all descriptors flag novelty) | `SEMA` class in `src/sema.py` implements the expansion check and module addition. |
+| **INCORRECT** | Backbone architecture – ViT as in the paper | The implementation uses a small CNN backbone (`SimpleCNN`) instead of a Vision Transformer. |
+| **INCORRECT** | Representation descriptors as novelty detectors (AE/VAE) | The code uses a simple MLP descriptor; no density‑estimation or VAE‑style novelty detector is provided. |
+| **INCORRECT** | Hyper‑parameters (learning rate, batch size, epochs, optimizer) | The defaults (`lr=1e-3`, `batch=64`, `epochs=20`) differ from the values reported in the paper (e.g., ViT‑based training with `lr=5e-5`, `batch=32`, `epochs=50`). |
+| **PARTIAL** | Dataset & split | Uses CIFAR‑100 with 10 classes per task (class‑incremental). The paper’s experiments are on ImageNet‑1000/ViT‑B; the dataset choice is different but still a valid CL setting. |
+| **PARTIAL** | Evaluation metrics | The script reports overall accuracy after each task but does **not** compute forgetting or average accuracy over all tasks, which the paper reports. |
+| **PARTIAL** | Baseline comparison | No code for competing methods (e.g., L2P, DualPrompt, etc.) is included; only the SEMA model is trained and evaluated. |
+| **PARTIAL** | Experimental protocol (training steps, checkpointing, hardware) | The `reproduce.sh` script runs training but does not expose the exact training schedule, checkpointing strategy, or hardware requirements used in the paper. |
+| **MISSING** | ViT backbone implementation | The paper’s core claim relies on a frozen ViT; the repo does not provide a ViT backbone. |
+| **MISSING** | Novelty‑detection based representation descriptors (AE/VAE) | The paper explicitly uses an auto‑encoder/variational auto‑encoder as the descriptor; this is absent. |
+| **MISSING** | Forgetting metric computation | The paper reports average forgetting; the repo does not compute or report it. |
+| **MISSING** | Comparison to other CL methods | No baseline training scripts or evaluation code for other methods are provided. |
+
+**Conclusion**
+
+The repository implements the high‑level structure of SEMA (modular adapters, router, self‑expansion logic) but diverges from the paper in several critical aspects: backbone choice, novelty‑detection descriptors, hyper‑parameters, evaluation metrics, and baseline comparisons. Therefore, the reproduction is **not complete**.
+
+**Actionable fixes**
+
+1. Replace the CNN backbone with a ViT (e.g., `timm` ViT‑B) and freeze it as in the paper.  
+2. Implement the representation descriptor as an auto‑encoder or VAE and use it to trigger expansion.  
+3. Align hyper‑parameters (learning rate, batch size, epochs, optimizer) with the paper’s settings.  
+4. Add forgetting and average accuracy metrics.  
+5. Include scripts for baseline methods and a comparison routine.  
+6. Update `reproduce.sh` to match the exact training schedule and checkpointing used in the paper.  
+
+Once these changes are made, the code will faithfully reproduce the key contributions of the paper.
+2026-03-14 13:44:33.682531 
+2026-03-14 13:44:33.682706 Generating refined code...
+2026-03-14 13:45:45.492504   Updated: generated_reproduction.txt
+2026-03-14 13:45:45.492626 
+2026-03-14 13:45:45.492685 --- Iteration 4: Observe & Refine ---
+2026-03-14 13:45:48.778210 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core method/algorithm (modular adapters, representation descriptors, expandable weighting router, self‑expansion logic)  
+MISSING: Hyperparameters (learning rate, batch size, optimizer settings, etc.)  
+MISSING: Data setup (dataset download, preprocessing, train/val splits, class‑incremental ordering)  
+MISSING: Evaluation (metrics, test protocol, baseline comparisons)  
+MISSING: Experimental setup (hardware configuration, training steps, checkpointing, logging)  
+MISSING: reproduce.sh (full pipeline to reproduce the paper’s results)
+2026-03-14 13:45:48.778476 
+2026-03-14 13:45:48.778729 Generating refined code...
+2026-03-14 13:46:39.195912   Updated: generated_reproduction.txt
+2026-03-14 13:46:39.196053 
+2026-03-14 13:46:39.196097 --- Iteration 5: Observe & Refine ---

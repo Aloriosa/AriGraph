@@ -1,0 +1,21 @@
+# Semantic Self‑Consistency Reproduction
+
+This repository contains a minimal yet fully functional implementation of the core ideas from
+*Semantic Self‑Consistency: Enhancing Language Model Reasoning via Semantic Weighting* (Knappe et al.).
+
+The pipeline follows the self‑consistency paradigm:
+
+1. **Generate multiple chain‑of‑thought (CoT) rationales** for each question using a large language model.
+2. **Embed** each rationale with a BERT‑based sentence transformer (SciBERT for math, RoBERTa for commonsense).
+3. **Weight** the rationales with either:
+   * **Centroid Proximity Weighting (CPW)** – inversely proportional to distance from the embedding centroid.
+   * **Semantic Consensus Weighting (SCW)** – based on the sum of cosine similarities to all other rationales.
+4. **Aggregate** the weighted rationales by a weighted majority vote to obtain a final answer.
+5. **Optionally filter outliers** with K‑NN, Isolation Forest or One‑Class SVM.
+6. **Evaluate** accuracy on the held‑out test splits of AQuA‑RAT, SVAMP and StrategyQA.
+
+> **Important** – The implementation uses *publicly available* open‑source models.  
+> It does **not** ship any large model checkpoints; they are downloaded on first use by the HuggingFace `transformers` library.  
+> The code is fully reproducible on a machine with an NVIDIA GPU (any recent model will do).
+
+## How to reproduce

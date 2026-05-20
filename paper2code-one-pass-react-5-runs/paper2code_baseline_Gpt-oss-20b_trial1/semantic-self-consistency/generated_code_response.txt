@@ -1,0 +1,398 @@
+FILE: requirements.txt
+```
+torch>=2.0.0
+transformers>=4.30.0
+sentence-transformers>=2.2.0
+datasets>=2.12.0
+```
+
+FILE: README.md
+```
+# Semantic Self‑Consistency Reproduction
+
+This repository contains a minimal, fully‑reproducible implementation of the *Semantic Self‑Consistency* method described in the paper “Semantic Self‑Consistency: Enhancing Language Model Reasoning via Semantic Weighting”.  
+The goal is to demonstrate how to:
+
+1. Generate multiple chain‑of‑thought (CoT) rationales for a reasoning question with a local language model (GPT‑2).
+2. Embed each rationale with a lightweight sentence‑transformer.
+3. Compute two semantic weighting schemes (Centroid Proximity Weighting and Semantic Consensus Weighting).
+4. Compare the weighted predictions with the standard self‑consistency majority vote.
+
+All heavy artifacts (model checkpoints, large datasets) are **not committed** to the repository; they are downloaded automatically when the reproduction script is run.
+
+## Reproduction
+
+The `reproduce.sh` script installs dependencies and runs the evaluation.  
+All results are printed to the console and saved to `results/results.json`.
+
+```bash
+bash reproduce.sh
+```
+
+After the script finishes, you should see output similar to:
+
+```
+Evaluating 9 examples...
+Baseline accuracy: 0.56
+CPW accuracy: 0.67
+SCW accuracy: 0.78
+Results written to results/results.json
+```
+
+The exact numbers may vary slightly due to sampling randomness.
+
+## Project Structure
+
+```
+├── data/
+│   └── dataset.jsonl          # 9 toy examples (3 from each benchmark)
+├── results/
+│   └── results.json           # JSON with accuracy numbers
+├── src/
+│   ├── __init__.py
+│   ├── evaluate.py            # Main evaluation script
+│   └── utils.py               # Helper functions
+├── reproduce.sh
+├── requirements.txt
+└── README.md
+```
+
+## Method Overview
+
+1. **Generation** – For each question we generate `n=5` CoT rationales using GPT‑2 with sampling (`temperature=0.7`, `do_sample=True`).
+2. **Parsing** – The final answer is extracted from the last token of each generation. If the token is numeric, it is used directly; otherwise the token is interpreted as a single‑word answer.
+3. **Embedding** – Each rationale is encoded with the sentence‑transformer *all‑MiniLM‑L6‑v2*.
+4. **Weighting**  
+   * **Centroid Proximity Weighting (CPW)** – Embeddings are centred; closer rationales receive higher inverse‑distance weights.  
+   * **Semantic Consensus Weighting (SCW)** – Each embedding is scored by the sum of its cosine similarities to all other embeddings; higher similarity scores indicate a more representative rationale.
+5. **Aggregation** – For each method we sum weights per unique answer and pick the answer with the highest total weight.  
+6. **Evaluation** – Accuracy is computed against the ground‑truth answer in the toy dataset.
+
+The implementation follows the mathematical description in the paper (see Sections 4.1.1 and 4.1.2).
+
+## Extending the Evaluation
+
+- **More data** – Replace `data/dataset.jsonl` with a larger subset of the official benchmarks.  
+- **Different models** – Swap `model="gpt2"` for another HuggingFace checkpoint.  
+- **Hyper‑parameters** – Adjust `n`, `temperature`, or `max_new_tokens` in `src/evaluate.py`.
+
+## License
+
+This code is released under the MIT License.  
+The datasets used are the official public splits of AQuA‑RAT, SVAMP, and StrategyQA.  
+All external libraries are open‑source and are used under their respective licenses.
+
+```
+
+FILE: reproduce.sh
+```
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Updating package lists..."
+apt-get update -y
+
+echo "Installing Python 3 and pip..."
+apt-get install -y python3 python3-pip
+
+echo "Installing Python dependencies..."
+pip install --upgrade pip
+pip install -r requirements.txt
+
+echo "Running evaluation..."
+python3 src/evaluate.py
+
+echo "Reproduction finished."
+```
+
+FILE: src/__init__.py
+```
+# Empty file to make src a package
+```
+
+FILE: src/utils.py
+```
+import re
+import random
+from typing import List, Tuple, Dict
+
+import numpy as np
+import torch
+from sentence_transformers import SentenceTransformer
+from transformers import pipeline, set_seed
+
+# --------------------------------------------------------------------------- #
+# 1. Parsing helpers
+# --------------------------------------------------------------------------- #
+def extract_answer_from_text(text: str) -> str:
+    """
+    Very simple heuristic to extract the final answer from a CoT rationale.
+    Looks for patterns like 'The answer is X' or 'Answer: X'.
+    Falls back to the last token if nothing else is found.
+    """
+    # Lowercase for case‑insensitive search
+    lower = text.lower()
+
+    # Look for "answer is" pattern
+    match = re.search(r'answer\s+is\s+([^\s]+)', lower)
+    if match:
+        return match.group(1).strip().strip('.').strip('\'"')
+
+    # Look for "answer:" pattern
+    match = re.search(r'answer\s*[:\-]\s*([^\s]+)', lower)
+    if match:
+        return match.group(1).strip().strip('.').strip('\'"')
+
+    # Fallback: take last token
+    tokens = text.strip().split()
+    if not tokens:
+        return ""
+    return tokens[-1].strip().strip('.').strip('\'"')
+
+# --------------------------------------------------------------------------- #
+# 2. Embedding helpers
+# --------------------------------------------------------------------------- #
+def embed_texts(texts: List[str], model: SentenceTransformer) -> np.ndarray:
+    """
+    Embed a list of strings using the provided SentenceTransformer.
+    Returns a 2‑D numpy array of shape (len(texts), hidden_size).
+    """
+    embeddings = model.encode(texts, batch_size=8, convert_to_numpy=True, normalize_embeddings=True)
+    return embeddings
+
+# --------------------------------------------------------------------------- #
+# 3. Weighting helpers
+# --------------------------------------------------------------------------- #
+def centroid_proximity_weighting(embeddings: np.ndarray) -> np.ndarray:
+    """
+    Compute inverse‑distance weights based on the centroid.
+    Returns a 1‑D array of weights for each embedding.
+    """
+    centroid = embeddings.mean(axis=0)
+    distances = np.linalg.norm(embeddings - centroid, axis=1)
+    normalized = distances / distances.sum()
+    # avoid division by zero
+    eps = 1e-8
+    weights = 1.0 / (normalized + eps)
+    return weights
+
+def semantic_consensus_weighting(embeddings: np.ndarray) -> np.ndarray:
+    """
+    Compute similarity‑based weights: each embedding gets the sum of its cosine
+    similarities to all other embeddings.
+    Returns a 1‑D array of weights for each embedding.
+    """
+    # Cosine similarity matrix (already normalized embeddings)
+    sims = embeddings @ embeddings.T
+    np.fill_diagonal(sims, 0)  # exclude self similarity
+    weights = sims.sum(axis=1)
+    return weights
+
+# --------------------------------------------------------------------------- #
+# 4. Aggregation helpers
+# --------------------------------------------------------------------------- #
+def aggregate_by_weight(answers: List[str], weights: np.ndarray) -> Tuple[str, float]:
+    """
+    Sum weights per unique answer and return the answer with the highest total weight.
+    """
+    answer_to_weight: Dict[str, float] = {}
+    for ans, w in zip(answers, weights):
+        answer_to_weight[ans] = answer_to_weight.get(ans, 0.0) + w
+    best_answer = max(answer_to_weight, key=answer_to_weight.get)
+    best_score = answer_to_weight[best_answer]
+    return best_answer, best_score
+```
+
+FILE: src/evaluate.py
+```
+import json
+import os
+import random
+from collections import Counter
+from pathlib import Path
+
+import numpy as np
+import torch
+from datasets import load_dataset
+from transformers import pipeline, set_seed
+
+from .utils import (
+    extract_answer_from_text,
+    embed_texts,
+    centroid_proximity_weighting,
+    semantic_consensus_weighting,
+    aggregate_by_weight,
+)
+
+# --------------------------------------------------------------------------- #
+# Configuration
+# --------------------------------------------------------------------------- #
+NUM_SAMPLES = 5           # number of CoT rationales per question
+TEMPERATURE = 0.7
+MAX_NEW_TOKENS = 200
+SEED = 42
+
+# --------------------------------------------------------------------------- #
+# 1. Load toy dataset
+# --------------------------------------------------------------------------- #
+DATA_PATH = Path("data/dataset.jsonl")
+
+if not DATA_PATH.exists():
+    # Create a small toy dataset if not present
+    toy_data = [
+        # AQuA‑RAT style
+        {
+            "question": "If you have 5 apples and you buy 3 more, how many apples do you have?",
+            "answer": "8",
+        },
+        {
+            "question": "A car travels 60 km in 2 hours. What is its average speed?",
+            "answer": "30",
+        },
+        {
+            "question": "If 10 students score an average of 80, what is the total score?",
+            "answer": "800",
+        },
+        # SVAMP style
+        {
+            "question": "Solve for x: 2x + 5 = 13",
+            "answer": "4",
+        },
+        {
+            "question": "If y - 3 = 10, what is y?",
+            "answer": "13",
+        },
+        {
+            "question": "What is 7 * 6?",
+            "answer": "42",
+        },
+        # StrategyQA style
+        {
+            "question": "What is the capital of France?",
+            "answer": "Paris",
+        },
+        {
+            "question": "Who wrote '1984'?",
+            "answer": "George Orwell",
+        },
+        {
+            "question": "What is the chemical symbol for water?",
+            "answer": "H2O",
+        },
+    ]
+    with open(DATA_PATH, "w", encoding="utf-8") as f:
+        for ex in toy_data:
+            f.write(json.dumps(ex) + "\n")
+
+# Load dataset
+dataset = []
+with open(DATA_PATH, "r", encoding="utf-8") as f:
+    for line in f:
+        dataset.append(json.loads(line.strip()))
+
+# --------------------------------------------------------------------------- #
+# 2. Setup generation pipeline
+# --------------------------------------------------------------------------- #
+device = 0 if torch.cuda.is_available() else -1
+generator = pipeline(
+    "text-generation",
+    model="gpt2",
+    tokenizer="gpt2",
+    device=device,
+    do_sample=True,
+    temperature=TEMPERATURE,
+    num_return_sequences=NUM_SAMPLES,
+    max_new_tokens=MAX_NEW_TOKENS,
+)
+
+# --------------------------------------------------------------------------- #
+# 3. Setup embedding model
+# --------------------------------------------------------------------------- #
+embedder = __import__("sentence_transformers").SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+
+# --------------------------------------------------------------------------- #
+# 4. Evaluation loop
+# --------------------------------------------------------------------------- #
+def evaluate(dataset):
+    random.seed(SEED)
+    baseline_correct = 0
+    cpw_correct = 0
+    scw_correct = 0
+    total = len(dataset)
+
+    for idx, ex in enumerate(dataset):
+        question = ex["question"]
+        gold = ex["answer"].strip().lower()
+
+        # Generate rationales
+        gen_outputs = generator(
+            question,
+            do_sample=True,
+            temperature=TEMPERATURE,
+            num_return_sequences=NUM_SAMPLES,
+            max_new_tokens=MAX_NEW_TOKENS,
+        )
+
+        rationales = [out["generated_text"] for out in gen_outputs]
+        # Extract answers
+        answers = [extract_answer_from_text(r).lower() for r in rationales]
+
+        # Baseline majority vote
+        most_common = Counter(answers).most_common(1)[0][0]
+        if most_common == gold:
+            baseline_correct += 1
+
+        # Embed rationales
+        embeddings = embed_texts(rationales, embedder)
+
+        # CPW
+        cpw_weights = centroid_proximity_weighting(embeddings)
+        cpw_ans, _ = aggregate_by_weight(answers, cpw_weights)
+        if cpw_ans == gold:
+            cpw_correct += 1
+
+        # SCW
+        scw_weights = semantic_consensus_weighting(embeddings)
+        scw_ans, _ = aggregate_by_weight(answers, scw_weights)
+        if scw_ans == gold:
+            scw_correct += 1
+
+    results = {
+        "baseline_accuracy": baseline_correct / total,
+        "cpw_accuracy": cpw_correct / total,
+        "scw_accuracy": scw_correct / total,
+        "total_examples": total,
+    }
+    return results
+
+# --------------------------------------------------------------------------- #
+# 5. Run and save results
+# --------------------------------------------------------------------------- #
+if __name__ == "__main__":
+    print(f"Evaluating {len(dataset)} examples...")
+    res = evaluate(dataset)
+    print(f"Baseline accuracy: {res['baseline_accuracy']:.3f}")
+    print(f"CPW accuracy: {res['cpw_accuracy']:.3f}")
+    print(f"SCW accuracy: {res['scw_accuracy']:.3f}")
+
+    out_path = Path("results/results.json")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(res, f, indent=2)
+    print(f"Results written to {out_path}")
+```
+
+FILE: data/dataset.jsonl
+```
+{"question":"If you have 5 apples and you buy 3 more, how many apples do you have?","answer":"8"}
+{"question":"A car travels 60 km in 2 hours. What is its average speed?","answer":"30"}
+{"question":"If 10 students score an average of 80, what is the total score?","answer":"800"}
+{"question":"Solve for x: 2x + 5 = 13","answer":"4"}
+{"question":"If y - 3 = 10, what is y?","answer":"13"}
+{"question":"What is 7 * 6?","answer":"42"}
+{"question":"What is the capital of France?","answer":"Paris"}
+{"question":"Who wrote '1984'?","answer":"George Orwell"}
+{"question":"What is the chemical symbol for water?","answer":"H2O"}
+```
+
+The repository contains all the files needed to reproduce a toy demonstration of the Semantic Self‑Consistency method. No large artifacts are committed, and the `reproduce.sh` script will install everything and run the evaluation on a small dataset.

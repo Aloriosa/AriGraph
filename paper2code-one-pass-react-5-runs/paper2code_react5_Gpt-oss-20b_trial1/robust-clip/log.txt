@@ -1,0 +1,204 @@
+2026-03-14 17:54:09.338064 ======================================================================
+2026-03-14 17:54:09.338208 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 17:54:09.338275 ======================================================================
+2026-03-14 17:54:09.338332 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/robust-clip/paper.md
+2026-03-14 17:54:09.338370 Log path: paper2code_react5_Gpt-oss-20b_trial1/robust-clip
+2026-03-14 17:54:09.338408 Model: Openai/Gpt-oss-20b
+2026-03-14 17:54:09.338443 Max iterations: 5
+2026-03-14 17:54:09.338481 Run reproduce.sh: False
+2026-03-14 17:54:09.338520 Run LLM paper check: True
+2026-03-14 17:54:09.338555 
+2026-03-14 17:54:09.338589 Loading paper...
+2026-03-14 17:54:09.338852 Paper length: 72509 chars (using 72509 for prompt)
+2026-03-14 17:54:09.338935 
+2026-03-14 17:54:09.359262 --- Iteration 0: Initial generation ---
+2026-03-14 17:55:10.547497   Created: generated_reproduction.txt
+2026-03-14 17:55:10.547628 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial1/robust-clip/submission (1 files)
+2026-03-14 17:55:10.547704 
+2026-03-14 17:55:10.547778 --- Iteration 1: Observe & Refine ---
+2026-03-14 17:55:21.284786 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- CLIP vision‑encoder architecture (ViT‑L/14) and its pre‑trained weights.  
+- Training on ImageNet (full‑size, 2 epochs) as described in the paper.  
+- Unsupervised adversarial fine‑tuning loss that preserves the original embeddings (e.g., KL‑divergence or cosine‑similarity penalty).  
+- Adversarial training loop (APGD, half‑precision, 100‑step iterations, single‑precision refinement, targeted attacks for VQA).  
+- Evaluation on large vision‑language models (OpenFlamingo, LLaVA) with the metrics reported (CIDEr, VQA accuracy).  
+- Baseline comparisons (original CLIP, TeCoA, FARE) and reporting of clean vs. robust performance.  
+- Robustness evaluation pipeline for ε = 2/255 and 4/255, including transfer and targeted attacks.  
+- Zero‑shot classification evaluation on ImageNet and other datasets.  
+- Checkpoint saving, logging, and a `reproduce.sh` script that runs the full training + evaluation pipeline.  
+- Use of the exact hyper‑parameters from the paper (learning rate, batch size, optimizer, weight decay, etc.).  
+
+**INCORRECT**  
+- The repository uses ViT‑B/32 on CIFAR‑10 instead of the paper’s ViT‑L/14 on ImageNet.  
+- Training time is described as ~5 min, whereas the paper trains for 2 epochs on ImageNet (≈ several hours on a large GPU).  
+
+**PARTIAL**  
+- The code skeleton mentions “adversarial loss” but does not implement the actual loss or the adversarial example generation during training.  
+- The project structure notes a minimal reproduction but lacks the full evaluation suite (LVLMs, captioning, VQA, robustness metrics).  
+
+**Conclusion**  
+ALL components required to reproduce the paper’s results are missing or incorrectly implemented. The repository needs substantial additions to match the paper’s methodology and evaluation protocol.
+2026-03-14 17:55:21.284978 
+2026-03-14 17:55:21.285140 Generating refined code...
+2026-03-14 17:56:20.437225   Updated: generated_reproduction.txt
+2026-03-14 17:56:20.437356 
+2026-03-14 17:56:20.437403 --- Iteration 2: Observe & Refine ---
+2026-03-14 17:56:29.114605 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing (not present in the code)**  
+- ImageNet‑1k training data and 2‑epoch schedule used in the paper.  
+- ViT‑L/14 backbone (paper uses ViT‑L/14, code uses ViT‑B/32).  
+- ε = 2/255 attack strength (paper reports results for both 2/255 and 4/255).  
+- APGD attack pipeline (half‑precision 100‑iter + single‑precision refinement).  
+- Evaluation on large vision‑language models (OpenFlamingo, LLaVA) and the downstream tasks (COCO, Flickr30k, VQAv2, TextVQA).  
+- Targeted and transfer attack experiments (Table 3 & 4).  
+- Zero‑shot ImageNet classification evaluation (paper reports robust accuracy on ImageNet).  
+- Metrics used in the paper (CIDEr for captioning, VQA accuracy, ImageNet top‑1/5).  
+- Reproduce script (`reproduce.sh`) that runs the full pipeline and reproduces the paper’s tables.  
+
+**Incorrect (present but not matching the paper)**  
+- Hyper‑parameters: 1 epoch vs. 2 epochs; ε = 4/255 only vs. both 2/255 & 4/255; PGD‑20 vs. APGD‑100/half‑precision.  
+- Dataset: CIFAR‑10 vs. ImageNet.  
+
+**Partial (implemented but incomplete)**  
+- Unsupervised fine‑tuning with MSE loss between clean and adversarial embeddings.  
+- Freezing the text encoder.  
+- PGD adversarial attack (20 steps).  
+- Zero‑shot classification evaluation (on CIFAR‑10).  
+
+**OK (fully implemented)**  
+- Core idea of FARE: fine‑tune the vision encoder while preserving the original embeddings.  
+- Basic training loop with clean and adversarial forward passes.  
+- MSE loss computation.  
+- Evaluation of zero‑shot classification accuracy on the test set.  
+
+**Conclusion**  
+The code implements the core algorithmic idea but omits the key experimental setup, datasets, attack pipeline, and evaluation metrics that are essential to reproduce the paper’s results.  
+
+**ALL_OK**: *No – reproduction is incomplete.*
+2026-03-14 17:56:29.114799 
+2026-03-14 17:56:29.114928 Generating refined code...
+2026-03-14 17:57:19.880914   Updated: generated_reproduction.txt
+2026-03-14 17:57:19.881032 
+2026-03-14 17:57:19.881075 --- Iteration 3: Observe & Refine ---
+2026-03-14 17:57:22.801710 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core method/algorithm implementation (FARE unsupervised adversarial fine‑tuning of CLIP)  
+MISSING: Hyperparameters (learning rate, batch size, optimizer settings, number of epochs, etc.)  
+MISSING: Data setup (ImageNet, COCO, Flickr30k, VQAv2, TextVQA, preprocessing, splits)  
+MISSING: Evaluation metrics and protocol (CIDEr, VQA accuracy, robustness tests, attack pipelines)  
+MISSING: Experimental setup (training steps, checkpointing, hardware requirements, reproducibility scripts)  
+MISSING: `reproduce.sh` or equivalent script to run the full pipeline and generate the paper’s results  
+
+All critical components from the paper are absent in the provided code.
+2026-03-14 17:57:22.801900 
+2026-03-14 17:57:22.802050 Generating refined code...
+2026-03-14 17:58:08.096109   Updated: requirements.txt
+2026-03-14 17:58:08.096240   Updated: train_fare.py
+2026-03-14 17:58:08.096321   Updated: evaluate_fare.py
+2026-03-14 17:58:08.096393   Updated: reproduce.sh
+2026-03-14 17:58:08.096457   Updated: README.md
+2026-03-14 17:58:08.096500 
+2026-03-14 17:58:08.096539 --- Iteration 4: Observe & Refine ---
+2026-03-14 17:58:39.989001 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incorrect / Partial Requirements**
+
+| Status | Requirement | Comment |
+|--------|-------------|---------|
+| **MISSING** | Evaluation on LVLMs (OpenFlamingo, LLaVA) with captioning & VQA metrics | Code only evaluates ImageNet classification. |
+| **MISSING** | Evaluation on COCO, Flickr30k, VQAv2, TextVQA datasets | Not implemented. |
+| **MISSING** | Adversarial evaluation on 500 random images per dataset | Code uses 200 validation images. |
+| **MISSING** | Robustness evaluation at ε = 4/255 | Only ε = 2/255 is used. |
+| **MISSING** | Transfer‑attack evaluation | Not implemented. |
+| **MISSING** | Targeted attack evaluation (VQA) | Not implemented. |
+| **MISSING** | Full‑size ImageNet training (≈1.28 M images) | Code trains on 1 % of ImageNet. |
+| **INCORRECT** | PGD attack parameters | Paper uses APGD with 100 iterations, half‑precision; code uses 10 PGD steps, 1/255 step size, float32. |
+| **INCORRECT** | Attack pipeline (APGD, half‑precision, 100 iterations) | Code uses simple PGD. |
+| **INCORRECT** | Epsilon values during training | Paper may use both 2/255 and 4/255; code uses only 2/255. |
+| **INCORRECT** | Evaluation dataset size | Paper uses 500 images for adversarial evaluation; code uses 200. |
+| **INCORRECT** | Use of half‑precision for attacks | Code uses float32. |
+| **INCORRECT** | Targeted attacks for VQA | Not implemented. |
+| **INCORRECT** | Transfer attacks | Not implemented. |
+| **PARTIAL** | Unsupervised fine‑tuning of vision encoder | Code freezes all except visual encoder and uses MSE loss, matching the core idea, but training on a tiny subset and with simplified hyper‑parameters. |
+| **PARTIAL** | Zero‑shot classification on ImageNet | Implemented, but only on a small validation set and without the full evaluation protocol described in the paper. |
+| **OK** | Use of CLIP ViT‑B/32 backbone | Correct. |
+| **OK** | Use of MSE (squared L2) loss between clean & perturbed embeddings | Correct. |
+| **OK** | AdamW optimizer with lr=1e‑5, weight decay=1e‑4 | Correct. |
+| **OK** | Saving checkpoint & evaluation script | Functional, but not aligned with paper’s full experimental setup. |
+
+**Conclusion**
+
+The provided code implements only a minimal, toy version of the unsupervised adversarial fine‑tuning procedure. It does **not** reproduce the key experimental results, evaluation protocols, or attack pipelines described in the paper. Significant additions and corrections are required to match the paper’s methodology and results.
+2026-03-14 17:58:39.989262 
+2026-03-14 17:58:39.989390 Generating refined code...
+2026-03-14 18:00:30.352028   Updated: README.md
+2026-03-14 18:00:30.352152   Updated: requirements.txt
+2026-03-14 18:00:30.352224   Updated: imagenet_classes.txt
+2026-03-14 18:00:30.352289   Updated: train_fare.py
+2026-03-14 18:00:30.352370   Updated: evaluate_fare.py
+2026-03-14 18:00:30.352448   Updated: evaluate_lvml.py
+2026-03-14 18:00:30.352510   Updated: reproduce.sh
+2026-03-14 18:00:30.352552 
+2026-03-14 18:00:30.352592 --- Iteration 5: Observe & Refine ---
+2026-03-14 18:01:23.604842 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**
+
+- Full unsupervised adversarial fine‑tuning protocol as described in the paper (e.g. APGD with half‑precision 100‑step attack followed by single‑precision refinement, use of the full ImageNet training set, and the exact loss formulation used in the paper).  
+- Robustness evaluation on the downstream vision‑language tasks (COCO captioning, Flickr30k captioning, VQA, TextVQA) and the corresponding metrics (CIDEr, VQA accuracy).  
+- Transfer‑attack evaluation (adversarial images generated on one LVLM transferred to another).  
+- Targeted‑attack evaluation (stealth attacks that force a specific text output).  
+- Use of the actual ImageNet class names for zero‑shot classification; the provided `imagenet_classes.txt` contains placeholder names (`class_0`, `class_1`, …).  
+- Evaluation of clean performance on the full ImageNet validation set (the paper reports clean accuracy on all validation images, not just 500).  
+- Comparison with the TeCoA baseline and other CLIP variants as shown in the paper tables.  
+- Integration of the robust vision encoder into real LVLMs (OpenFlamingo, LLaVA) and reporting their performance.  
+
+**INCORRECT**
+
+- `train_fare.py` uses `args.ep` instead of `args.eps`, causing a runtime error.  
+- The training script is incomplete (missing closing parentheses, incomplete training loop).  
+- The training uses only 1 % of ImageNet (≈12 k images) and 10 PGD steps, whereas the paper uses the full dataset and a more aggressive attack schedule.  
+- The training uses a step size of `1/255.0` and only 2 epochs, which does not match the paper’s hyper‑parameters.  
+- `evaluate_fare.py` evaluates clean accuracy on only 500 validation images, whereas the paper evaluates on the entire validation set.  
+- The attack in `evaluate_fare.py` is a simple PGD with 100 steps in float16, but the paper’s attack pipeline uses APGD with half‑precision followed by a single‑precision refinement.  
+- The evaluation uses placeholder class names, so the zero‑shot classification results are meaningless.  
+
+**PARTIAL**
+
+- The core idea of unsupervised adversarial fine‑tuning (minimising the MSE between clean and perturbed image embeddings) is present, but the implementation does not follow the exact procedure described in the paper.  
+- The evaluation script computes clean and robust accuracy on ImageNet, but it does not reproduce the paper’s evaluation protocol (full validation set, correct class names, proper attack pipeline).  
+- The `reproduce.sh` script orchestrates training and evaluation, but because the training script is incomplete and the evaluation uses placeholder data, it cannot produce the paper’s results.  
+- The placeholder LVLM evaluation (`evaluate_lvml.py`) does not implement any real downstream task evaluation.  
+
+**Conclusion**
+
+The current code base does **not** fully reproduce the experiments and results presented in the paper. Significant additions and corrections are required to match the paper’s methodology, hyper‑parameters, data handling, and evaluation protocols.
+2026-03-14 18:01:23.605027 
+2026-03-14 18:01:23.605162 Generating refined code...
+2026-03-14 18:02:42.727733   Updated: README.md
+2026-03-14 18:02:42.727861   Updated: train_fare.py
+2026-03-14 18:02:42.727927   Updated: evaluate_fare.py
+2026-03-14 18:02:42.728003   Updated: evaluate_lvml.py
+2026-03-14 18:02:42.728060   Updated: reproduce.sh
+2026-03-14 18:02:42.728117   Updated: requirements.txt
+2026-03-14 18:02:42.728172   Updated: imagenet_classes.txt
+2026-03-14 18:02:42.728209 
+2026-03-14 18:02:42.728243 ======================================================================
+2026-03-14 18:02:42.728276 REACT BASELINE COMPLETE
+2026-03-14 18:02:42.728307 ======================================================================
+2026-03-14 18:02:42.728338 Total iterations: 6
+2026-03-14 18:02:42.728371 API tokens: 53437 completion, 200617 prompt
+2026-03-14 18:02:42.728402 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial1/robust-clip/generated_code_response.txt

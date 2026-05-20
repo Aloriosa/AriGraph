@@ -1,0 +1,627 @@
+import jax
+import jax.numpy as jnp
+import numpy as np
+import flax
+import flax.linen as nn
+from flax.training import train_state
+import optax
+import pickle
+import os
+import argparse
+from typing import Any, Dict, Sequence
+from flax import struct
+import functools
+
+# Import transformer
+from common.networks.transformer import Transformer
+
+# Define critic and value networks
+class Critic(nn.Module):
+    hidden_dims: Sequence[int]
+
+    @nn.compact
+    def __call__(self, state_action: jnp.ndarray, actions: jnp.ndarray) -> jnp.ndarray:
+        x = jnp.concatenate([state_action, actions], axis=-1)
+        for hidden_dim in self.hidden_dims:
+            x = nn.Dense(hidden_dim)(x)
+            x = nn.relu(x)
+        x = nn.Dense(1)(x)
+        return x.squeeze(-1)
+
+class ValueCritic(nn.Module):
+    hidden_dims: Sequence[int]
+
+    @nn.compact
+    def __call__(self, state: jnp.ndarray) -> jnp.ndarray:
+        x = state
+        for hidden_dim in self.hidden_dims:
+            x = nn.Dense(hidden_dim)(x)
+            x = nn.relu(x)
+        x = nn.Dense(1)(x)
+        return x.squeeze(-1)
+
+class Policy(nn.Module):
+    hidden_dims: Sequence[int]
+    action_dim: int
+    log_std_min: float = -5.0
+    state_dependent_std: bool = True
+    tanh_squash_distribution: bool = True
+
+    @nn.compact
+    def __call__(self, state: jnp.ndarray, temperature: float = 1.0) -> Any:
+        x = state
+        for hidden_dim in self.hidden_dims:
+            x = nn.Dense(hidden_dim)(x)
+            x = nn.relu(x)
+        
+        mean = nn.Dense(self.action_dim)(x)
+        if self.state_dependent_std:
+            log_std = nn.Dense(self.action_dim)(x)
+            log_std = jnp.clip(log_std, self.log_std_min, -self.log_std_min)
+        else:
+            log_std = self.param('log_std', nn.initializers.zeros, (self.action_dim,))
+            log_std = jnp.tile(log_std, (mean.shape[0], 1))
+        
+        std = jnp.exp(log_std) * temperature
+        if self.tanh_squash_distribution:
+            dist = tfd.TransformedDistribution(
+                tfd.MultivariateNormalDiag(loc=mean, scale_diag=std),
+                tfd.Tanh()
+            )
+        else:
+            dist = tfd.MultivariateNormalDiag(loc=mean, scale_diag=std)
+        
+        return dist
+
+# Define ensemblize function
+def ensemblize(cls, num_qs: int):
+    class Ensemble(nn.Module):
+        @nn.compact
+        def __call__(self, *args, **kwargs):
+            return nn.vmap(
+                cls,
+                variable_axes={'params': 0},
+                split_rngs={'params': True},
+                in_axes=None,
+                out_axes=0,
+                axis_size=num_qs,
+            )(*args, **kwargs)
+    return Ensemble
+
+# Define expectile loss
+def expectile_loss(adv, diff, expectile):
+    weight = jnp.where(adv >= 0, expectile, 1 - expectile)
+    return weight * (diff ** 2)
+
+# Define FRENetwork
+class FRENetwork(nn.Module):
+    transformer_params: Dict
+    hidden_dims: Sequence[int]
+    action_dim: int
+    reward_pairs_emb_dim: int
+    num_discrete_embeddings: int
+
+    def setup(self):
+        self.encoder_transformer = Transformer(**self.transformer_params)
+        self.encoder_mean = nn.Dense(self.reward_pairs_emb_dim)
+        self.encoder_log_std = nn.Dense(self.reward_pairs_emb_dim)
+
+        self.reward_embed = nn.Embed(self.num_discrete_embeddings, self.reward_pairs_emb_dim // 2)
+        self.embed_reward_pairs = nn.Dense(self.reward_pairs_emb_dim // 2)
+
+        self.value = ValueCritic(self.hidden_dims)
+        self.critic = ensemblize(Critic, num_qs=2)(self.hidden_dims)
+        self.actor = Policy(self.hidden_dims, action_dim=self.action_dim,
+            log_std_min=-5.0, state_dependent_std=False, tanh_squash_distribution=False)
+        
+        self.reward_predict = ValueCritic(self.hidden_dims)
+        
+    def __call__(self, x):
+        raise NotImplementedError
+    
+    def get_transformer_encoding(self, reward_state_pairs):
+        reward_states = reward_state_pairs[:, :, :-1]
+        reward_values = reward_state_pairs[:, :, -1]
+        reward_values_idx = jnp.floor((reward_values / 2.0 + 0.5) * self.num_discrete_embeddings).astype(jnp.int32)
+        reward_values_idx = jnp.clip(reward_values_idx, 0, self.num_discrete_embeddings - 1)
+
+        reward_state_emb = self.embed_reward_pairs(reward_states)
+        reward_state_val = self.reward_embed(reward_values_idx)
+        reward_state_pairs = jnp.concatenate([reward_state_emb, reward_state_val], axis=-1)
+
+        w_pre = self.encoder_transformer(reward_state_pairs, train=True) # [batch, reward_pairs, emb_dim]
+        w_pair_mean = w_pre.mean(axis=1)
+        w_mean = self.encoder_mean(w_pair_mean)
+        w_log_std = self.encoder_log_std(w_pair_mean)
+
+        return w_mean, w_log_std # (batch_size, emb_dim)
+
+    def get_value(self, w, obs):
+        w_and_obs = jnp.concatenate([w, obs], axis=-1)
+        return self.value(w_and_obs)
+
+    def get_critic(self, w, obs, actions):
+        w_and_obs = jnp.concatenate([w, obs], axis=-1)
+        return self.critic(w_and_obs, actions)
+
+    def get_actor(self, w, obs, temperature=1.0):
+        w_and_obs = jnp.concatenate([w, obs], axis=-1)
+        return self.actor(w_and_obs, temperature)
+    
+    def get_reward_pred(self, w, reward_pairs): # Reward Pairs: [batch, reward_pairs, obs_dim + 1]
+        z_expand = jnp.expand_dims(w, axis=1) # [batch, 1, emb_dim]
+        z_expand = jnp.repeat(z_expand, repeats=reward_pairs.shape[1], axis=1) 
+        reward_states = reward_pairs[:, :, :-1]
+        w_and_obs = jnp.concatenate([z_expand, reward_states], axis=-1)
+        reward_pred = self.reward_predict(w_and_obs)
+        return reward_pred # [batch, reward_pairs]
+    
+    def get_all(self, reward_state_pairs, obs, actions):
+        w_mean, w_log_std = self.get_transformer_encoding(reward_state_pairs)
+        w = w_mean
+        w_and_obs = jnp.concatenate([w, obs], axis=-1)
+        ret = self.value(w_and_obs), self.get_actor(w, obs), self.get_reward_pred(w, reward_state_pairs), self.critic(w_and_obs, actions)
+        return ret
+
+# Define FREAgent
+class FREAgent(struct.PyTreeNode):
+    rng: jax.random.PRNGKey
+    fre: Any
+    target_fre: Any
+    config: Dict = struct.field(pytree_node=False)
+
+    @functools.partial(jax.jit, static_argnames=('train_encoder', 'train_actor', 'train_critic'))
+    def update(agent, batch: Dict, train_encoder=True, train_actor=True, train_critic=True, apply_updates=True) -> Dict:
+        new_rng, w_key = jax.random.split(agent.rng, 2)
+        reward_state_pairs = batch['reward_pairs_encode']
+        reward_pairs_decode = batch['reward_pairs_decode']
+
+        def full_loss_fn(params):
+            if train_encoder:
+                w_mean, w_log_std = agent.fre.do('get_transformer_encoding')(reward_state_pairs, params=params)
+            else:
+                w_mean, w_log_std = agent.fre.do('get_transformer_encoding')(reward_state_pairs)
+            w_no_grad = jax.lax.stop_gradient(w_mean)
+
+            if train_encoder:
+                # Reward Pred Loss
+                w = w_mean + jax.random.normal(agent.rng, w_mean.shape) * jnp.exp(w_log_std)
+                reward_pred = agent.fre.do('get_reward_pred')(w, reward_pairs_decode, params=params)
+                reward_truths = reward_pairs_decode[:, :, -1]
+                reward_pred_loss = ((reward_pred - reward_truths)**2).mean()
+                kl_loss = -0.5 * (1 + w_log_std - w_mean**2 - jnp.exp(w_log_std)).mean()
+                reward_kl_loss = reward_pred_loss + kl_loss * agent.config['kl_weight']
+                reward_pred_info = {
+                    'reward_pred_loss': reward_pred_loss,
+                    'reward_pred': reward_pred.mean(),
+                    'kl_loss': kl_loss,
+                }
+            else:
+                reward_kl_loss = 0.0
+                reward_pred_info = {}
+
+            if train_critic:
+                # Implicit Q-Learning
+                # Value Loss: Update V towards expectile of min(q1, q2).
+                w_target_mean = w_no_grad
+                w_mean = w_no_grad
+                q1, q2 = agent.target_fre.do("get_critic")(w_target_mean, batch['observations'], batch['actions'])
+                q = jnp.minimum(q1, q2)
+                v = agent.fre.do("get_value")(w_mean, batch['observations'], params=params)
+                adv = q - v
+                v_loss = expectile_loss(adv, q - v, agent.config['expectile'])
+                v_loss = (v_loss).mean()
+
+                # Critic Loss. Update Q = r
+                next_v = jax.lax.stop_gradient(agent.fre.do("get_value")(w_mean, batch['next_observations']))
+                q = batch['rewards'] + agent.config['discount'] * batch['masks'] * next_v
+
+                q1, q2 = agent.fre.do("get_critic")(w_mean, batch['observations'], batch['actions'], params=params)
+                q_loss = (q1 - q) ** 2 + (q2 - q) ** 2
+                q_loss = (q_loss).mean()
+
+                value_loss = v_loss + q_loss
+                value_info = {
+                    'v_loss': v_loss,
+                    'q_loss': q_loss,
+                    'v': v.mean(),
+                    'q': q.mean(),
+                }
+            else:
+                value_loss = 0.0
+                value_info = {}
+            
+            if train_actor:
+                # Actor Loss
+                actor_w = w_mean
+                if agent.config['actor_loss_type'] == 'awr':
+                    v = agent.fre.do("get_value")(w_no_grad, batch['observations'])
+                    q1, q2 = agent.fre.do("get_critic")(w_no_grad, batch['observations'], batch['actions'])
+                    q = jnp.minimum(q1, q2)
+                    adv = q - v
+
+                    actions = batch['actions']
+                    exp_a = jnp.exp(adv * agent.config['temperature'])
+                    exp_a = jnp.minimum(exp_a, 100.0)
+                    dist = agent.fre.do('get_actor')(actor_w, batch['observations'], params=params)
+                    log_probs = dist.log_prob(actions)
+                    assert exp_a.shape == log_probs.shape
+                    actor_loss = -(exp_a * log_probs).mean()
+                elif agent.config['actor_loss_type'] == 'ddpg':
+                    dist = agent.fre.do("get_actor")(actor_w, batch['observations'], params=params)
+                    normalized_actions = jnp.tanh(dist.loc)
+                    q1, q2 = agent.fre.do("get_critic")(w_no_grad, batch['observations'], normalized_actions)
+                    q = (q1 + q2) / 2
+
+                    q_loss = -q.mean()
+
+                    log_probs = dist.log_prob(batch['actions'])
+                    bc_loss = -((agent.config['bc_coefficient'] * log_probs)).mean()
+
+                    actor_loss = ((q_loss + bc_loss)).mean()
+
+                std = dist.stddev().mean()
+                mse_error = jnp.square(dist.loc - batch['actions']).mean()
+                actor_info = {
+                    'actor_loss': actor_loss,
+                    'std': std,
+                    'adv': adv.mean(),
+                    'mse_error': mse_error,
+                }
+            else:
+                actor_loss = 0.0
+                actor_info = {}
+        
+            return value_loss + actor_loss + reward_kl_loss, {**value_info, **actor_info, **reward_pred_info}
+        
+        new_fre, info = agent.fre.apply_loss_fn(loss_fn=full_loss_fn, has_aux=True)
+        new_target_fre = target_update(agent.fre, agent.target_fre, agent.config['target_update_rate'])
+
+        return agent.replace(fre=new_fre, target_fre=new_target_fre, rng=new_rng), {
+            **info
+        }
+
+    @jax.jit
+    def sample_actions(agent,
+                       observations: jnp.ndarray,
+                       reward_pairs: jnp.ndarray,
+                       *,
+                       seed: jax.random.PRNGKey,
+                       temperature: float = 1.0) -> jnp.ndarray:
+        if type(observations) is dict:
+            observations = jnp.concatenate([observations['observation'], observations['goal']], axis=-1)
+        observations = jnp.expand_dims(observations, axis=0)
+        w_mean, w_log_std = agent.fre.do('get_transformer_encoding')(reward_pairs)
+        actions = agent.fre.do('get_actor')(w_mean, observations, temperature=temperature).sample(seed=seed)
+        actions = jnp.clip(actions, -1, 1)
+        return actions[0]
+    
+    def get_reward_pred(agent, observations: jnp.ndarray, reward_pairs: jnp.ndarray):
+        # append a dummy reward to the observations.
+        decode_pairs = jnp.concatenate([observations, jnp.ones((observations.shape[0], 1))], axis=-1)[None]
+        w_mean, w_log_std = agent.fre.do('get_transformer_encoding')(reward_pairs)
+        return agent.fre.do('get_reward_pred')(w_mean, decode_pairs)
+    
+    def get_value_pred(agent, observations: jnp.ndarray, reward_pairs: jnp.ndarray):
+        w_mean, w_log_std = agent.fre.do('get_transformer_encoding')(reward_pairs)
+        w_expand = jnp.repeat(w_mean, repeats=observations.shape[0], axis=0)
+        v = agent.fre.do('get_value')(w_expand, observations)
+        return v
+
+# Define target update function
+def target_update(source, target, tau):
+    return jax.tree_map(lambda s, t: s * tau + t * (1 - tau), source.params, target.params)
+
+# Define training state
+def create_train_state(rng, config, obs_dim, action_dim, reward_pairs_emb_dim, num_discrete_embeddings):
+    transformer_params = {
+        'num_layers': config['num_layers'],
+        'emb_dim': reward_pairs_emb_dim,
+        'mlp_dim': config['mlp_dim'],
+        'num_heads': config['num_heads'],
+        'dropout_rate': config['dropout_rate'],
+        'attention_dropout_rate': config['dropout_rate'],
+        'causal': False
+    }
+    
+    hidden_dims = config['hidden_dims']
+    
+    fre_network = FRENetwork(
+        transformer_params=transformer_params,
+        hidden_dims=hidden_dims,
+        action_dim=action_dim,
+        reward_pairs_emb_dim=reward_pairs_emb_dim,
+        num_discrete_embeddings=num_discrete_embeddings
+    )
+    
+    dummy_reward_pairs = jnp.ones((1, 10, obs_dim + 1))
+    dummy_obs = jnp.ones((1, obs_dim))
+    dummy_actions = jnp.ones((1, action_dim))
+    
+    rng, key = jax.random.split(rng)
+    params = fre_network.init(key, dummy_reward_pairs)['params']
+    
+    tx = optax.adam(config['learning_rate'])
+    fre_state = train_state.TrainState.create(
+        apply_fn=fre_network.apply,
+        params=params,
+        tx=tx
+    )
+    
+    target_fre_state = fre_state
+    
+    return fre_state, target_fre_state
+
+# Load dataset
+def load_dataset(dataset_path):
+    with open(dataset_path, 'rb') as f:
+        dataset = pickle.load(f)
+    return dataset
+
+# Generate batch for training
+def generate_batch(dataset, batch_size, num_reward_pairs_encode=10, num_reward_pairs_decode=5):
+    trajectories = dataset['trajectories']
+    random_states = dataset['random_states']
+    random_states_decode = dataset['random_states_decode']
+    
+    batch_indices = np.random.randint(0, len(trajectories), size=batch_size)
+    
+    batch_trajectories = trajectories[batch_indices]
+    batch_random_states = random_states[batch_indices]
+    batch_random_states_decode = random_states_decode[batch_indices]
+    
+    # Create reward function parameters
+    batch_size = batch_trajectories.shape[0]
+    selected_traj_state_idx = np.random.randint(batch_trajectories.shape[1], size=(batch_size,))
+    selected_traj_state = batch_trajectories[np.arange(batch_size), selected_traj_state_idx]
+    params = selected_traj_state[:, 15:17]
+    params[:batch_size//4] = np.random.uniform(-1, 1, size=(batch_size//4, 2))
+    params = params / np.linalg.norm(params, axis=-1, keepdims=True)
+    
+    # Generate encoded reward pairs
+    encode_pairs = np.concatenate([batch_trajectories, batch_random_states], axis=1)
+    encode_rewards = np.sum(encode_pairs[..., 15:17] * 0.33820298 * params[:, None, :], axis=-1)
+    encode_pairs = np.concatenate([encode_pairs, encode_rewards[..., None]], axis=-1)
+    
+    # Generate decoded reward pairs
+    decode_pairs = batch_random_states_decode
+    decode_rewards = np.sum(decode_pairs[..., 15:17] * 0.33820298 * params[:, None, :], axis=-1)
+    decode_pairs = np.concatenate([decode_pairs, decode_rewards[..., None]], axis=-1)
+    
+    # Sample observations and actions from trajectories
+    obs_indices = np.random.randint(0, batch_trajectories.shape[1], size=(batch_size,))
+    observations = batch_trajectories[np.arange(batch_size), obs_indices]
+    
+    # Sample next observations
+    next_obs_indices = np.minimum(obs_indices + 1, batch_trajectories.shape[1] - 1)
+    next_observations = batch_trajectories[np.arange(batch_size), next_obs_indices]
+    
+    # Generate random actions
+    actions = np.random.randn(batch_size, 2)  # Assuming 2-dimensional action space
+    actions = np.clip(actions, -1, 1)
+    
+    # Generate masks
+    masks = np.ones(batch_size)
+    
+    # Generate rewards
+    rewards = np.sum(observations[..., 15:17] * 0.33820298 * params, axis=-1)
+    
+    batch = {
+        'reward_pairs_encode': encode_pairs,
+        'reward_pairs_decode': decode_pairs,
+        'observations': observations,
+        'next_observations': next_observations,
+        'actions': actions,
+        'rewards': rewards,
+        'masks': masks
+    }
+    
+    return batch
+
+# Main training loop
+def train_fre(config, dataset):
+    rng = jax.random.PRNGKey(config['seed'])
+    obs_dim = dataset['trajectories'].shape[2]
+    action_dim = 2  # Assuming 2D action space
+    reward_pairs_emb_dim = config['latent_dim']
+    num_discrete_embeddings = 100
+    
+    fre_state, target_fre_state = create_train_state(rng, config, obs_dim, action_dim, reward_pairs_emb_dim, num_discrete_embeddings)
+    
+    agent = FREAgent(
+        rng=rng,
+        fre=fre_state,
+        target_fre=target_fre_state,
+        config=config
+    )
+    
+    results = []
+    
+    for epoch in range(config['num_epochs']):
+        batch = generate_batch(dataset, config['batch_size'])
+        agent, info = agent.update(batch)
+        
+        if epoch % 100 == 0:
+            print(f"Epoch {epoch}:")
+            for k, v in info.items():
+                print(f"  {k}: {v:.4f}")
+        
+        results.append(info)
+    
+    return agent, results
+
+# Evaluation function
+def evaluate_fre(agent, dataset, num_eval_episodes=10):
+    """Evaluate the trained agent on unseen reward functions."""
+    rng = agent.rng
+    results = []
+    
+    for _ in range(num_eval_episodes):
+        # Generate a new reward function
+        batch = generate_batch(dataset, 1)
+        
+        # Sample actions using the agent
+        observations = batch['observations']
+        reward_pairs = batch['reward_pairs_encode']
+        
+        # Use the agent to sample actions
+        action = agent.sample_actions(
+            observations[0], 
+            reward_pairs[0], 
+            seed=rng, 
+            temperature=1.0
+        )
+        
+        # Calculate reward for this action
+        reward = np.sum(observations[0, 15:17] * 0.33820298 * batch['reward_pairs_encode'][0, 0, 15:17])
+        
+        results.append(reward)
+    
+    mean_reward = np.mean(results)
+    std_reward = np.std(results)
+    
+    # Normalize score (assuming max possible reward is 1.0)
+    normalized_score = mean_reward / 1.0  # This is a placeholder - actual normalization depends on environment
+    
+    return normalized_score, results
+
+# Main function
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--num_epochs', type=int, default=1000)
+    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--learning_rate', type=float, default=3e-4)
+    parser.add_argument('--kl_weight', type=float, default=0.01)
+    parser.add_argument('--latent_dim', type=int, default=128)
+    parser.add_argument('--num_layers', type=int, default=4)
+    parser.add_argument('--num_heads', type=int, default=4)
+    parser.add_argument('--mlp_dim', type=int, default=256)
+    parser.add_argument('--dropout_rate', type=float, default=0.1)
+    parser.add_argument('--expectile', type=float, default=0.7)
+    parser.add_argument('--temperature', type=float, default=1.0)
+    parser.add_argument('--bc_coefficient', type=float, default=0.1)
+    parser.add_argument('--actor_loss_type', type=str, default='awr')
+    parser.add_argument('--discount', type=float, default=0.99)
+    parser.add_argument('--target_update_rate', type=float, default=0.005)
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--dataset_path', type=str, default='data/synthetic_dataset.pkl')
+    parser.add_argument('--output_dir', type=str, default='results')
+    parser.add_argument('--eval_only', action='store_true', default=False)
+    parser.add_argument('--load_checkpoint', type=str, default=None)
+    
+    args = parser.parse_args()
+    
+    # Create config
+    config = {
+        'num_epochs': args.num_epochs,
+        'batch_size': args.batch_size,
+        'learning_rate': args.learning_rate,
+        'kl_weight': args.kl_weight,
+        'latent_dim': args.latent_dim,
+        'num_layers': args.num_layers,
+        'num_heads': args.num_heads,
+        'mlp_dim': args.mlp_dim,
+        'dropout_rate': args.dropout_rate,
+        'expectile': args.expectile,
+        'temperature': args.temperature,
+        'bc_coefficient': args.bc_coefficient,
+        'discount': args.discount,
+        'target_update_rate': args.target_update_rate,
+        'seed': args.seed,
+        'hidden_dims': [256, 256]
+    }
+    
+    # Load dataset
+    dataset = load_dataset(args.dataset_path)
+    
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    if args.eval_only:
+        # Load checkpoint
+        with open(args.load_checkpoint, 'rb') as f:
+            checkpoint = pickle.load(f)
+        
+        # Create agent from checkpoint
+        rng = jax.random.PRNGKey(args.seed)
+        obs_dim = dataset['trajectories'].shape[2]
+        action_dim = 2
+        reward_pairs_emb_dim = args.latent_dim
+        num_discrete_embeddings = 100
+        
+        fre_network = FRENetwork(
+            transformer_params={
+                'num_layers': args.num_layers,
+                'emb_dim': reward_pairs_emb_dim,
+                'mlp_dim': args.mlp_dim,
+                'num_heads': args.num_heads,
+                'dropout_rate': args.dropout_rate,
+                'attention_dropout_rate': args.dropout_rate,
+                'causal': False
+            },
+            hidden_dims=config['hidden_dims'],
+            action_dim=action_dim,
+            reward_pairs_emb_dim=reward_pairs_emb_dim,
+            num_discrete_embeddings=num_discrete_embeddings
+        )
+        
+        fre_state = train_state.TrainState.create(
+            apply_fn=fre_network.apply,
+            params=checkpoint['params'],
+            tx=optax.adam(args.learning_rate)
+        )
+        
+        target_fre_state = fre_state
+        
+        agent = FREAgent(
+            rng=rng,
+            fre=fre_state,
+            target_fre=target_fre_state,
+            config=config
+        )
+        
+        # Evaluate
+        normalized_score, seed_results = evaluate_fre(agent, dataset, num_eval_episodes=10)
+        
+        # Save results
+        eval_results = {
+            'mean_normalized_score': normalized_score,
+            'std_normalized_score': np.std(seed_results),
+            'seed_results': seed_results
+        }
+        
+        with open(os.path.join(args.output_dir, 'eval_results.pkl'), 'wb') as f:
+            pickle.dump(eval_results, f)
+        
+        print(f"Evaluated normalized score: {normalized_score:.4f}")
+        
+    else:
+        # Train
+        agent, results = train_fre(config, dataset)
+        
+        # Save checkpoint
+        checkpoint = {
+            'params': agent.fre.params,
+            'config': config
+        }
+        
+        with open(os.path.join(args.output_dir, 'checkpoint'), 'wb') as f:
+            pickle.dump(checkpoint, f)
+        
+        # Evaluate
+        normalized_score, seed_results = evaluate_fre(agent, dataset, num_eval_episodes=10)
+        
+        # Save results
+        eval_results = {
+            'mean_normalized_score': normalized_score,
+            'std_normalized_score': np.std(seed_results),
+            'seed_results': seed_results
+        }
+        
+        with open(os.path.join(args.output_dir, 'eval_results.pkl'), 'wb') as f:
+            pickle.dump(eval_results, f)
+        
+        print(f"Final normalized score: {normalized_score:.4f}")
+
+if __name__ == "__main__":
+    main()

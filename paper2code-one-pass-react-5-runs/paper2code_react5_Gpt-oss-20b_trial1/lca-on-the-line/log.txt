@@ -1,0 +1,223 @@
+2026-03-14 19:56:25.342639 ======================================================================
+2026-03-14 19:56:25.342769 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 19:56:25.342808 ======================================================================
+2026-03-14 19:56:25.342839 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/lca-on-the-line/paper.md
+2026-03-14 19:56:25.342868 Log path: paper2code_react5_Gpt-oss-20b_trial1/lca-on-the-line
+2026-03-14 19:56:25.342895 Model: Openai/Gpt-oss-20b
+2026-03-14 19:56:25.342922 Max iterations: 5
+2026-03-14 19:56:25.342950 Run reproduce.sh: False
+2026-03-14 19:56:25.342979 Run LLM paper check: True
+2026-03-14 19:56:25.343005 
+2026-03-14 19:56:25.343030 Loading paper...
+2026-03-14 19:56:25.343642 Paper length: 108847 chars (using 108847 for prompt)
+2026-03-14 19:56:25.343707 
+2026-03-14 19:56:25.362146 --- Iteration 0: Initial generation ---
+2026-03-14 19:57:22.917308   Created: README.md
+2026-03-14 19:57:22.917453   Created: requirements.txt
+2026-03-14 19:57:22.917514   Created: reproduce.sh
+2026-03-14 19:57:22.917569   Created: lca_experiment.py
+2026-03-14 19:57:22.917605 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial1/lca-on-the-line/submission (4 files)
+2026-03-14 19:57:22.917636 
+2026-03-14 19:57:22.917665 --- Iteration 1: Observe & Refine ---
+2026-03-14 19:57:31.810346 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Use of a real, large‑scale class hierarchy (e.g., WordNet) for ImageNet.  
+- Evaluation on the ImageNet ID set and the five ImageNet‑style OOD datasets (ImageNet‑S, ImageNet‑R, ImageNet‑A, ImageNet‑O, etc.).  
+- Benchmarking across the 75 models (36 VMs + 39 VLMs) described in the paper.  
+- Construction of a latent taxonomy via K‑means clustering for datasets without a predefined hierarchy.  
+- Experiments that align model predictions with the class taxonomy (soft‑label or prompt‑engineering techniques).  
+- Reporting of the full “LCA‑on‑the‑Line” correlation curves and statistical significance as shown in the paper.  
+- A reproducible pipeline that automatically downloads the required ImageNet/OOD data, runs all models, and outputs the paper’s tables/figures.  
+
+**INCORRECT**  
+- The script loads a ResNet‑18 pretrained on ImageNet and then replaces the final layer for CIFAR‑10, but it attempts to load the ImageNet weights from a URL that is not compatible with the modified architecture. This will either fail or produce a model that is not properly fine‑tuned for CIFAR‑10.  
+- The LCA distance is computed purely from node depth, whereas the paper defines it using the information content (entropy) of the ancestor node. The current implementation does not match the paper’s definition.  
+
+**PARTIAL**  
+- The toy hierarchy and LCA utilities demonstrate the concept of a taxonomy distance, but they are a simplified 2‑level structure and do not reflect the depth or branching of WordNet.  
+- The “noisy OOD” split (Gaussian noise) is a crude proxy for an OOD dataset; the paper uses real, severely shifted datasets.  
+- The script prints a single Pearson correlation between ID LCA distance and OOD accuracy, whereas the paper reports multiple correlation analyses across many models and datasets.  
+
+**OK**  
+- The script correctly computes top‑1 accuracy and mean LCA distance for a given model on a test set.  
+- The reproducibility script (`reproduce.sh`) installs dependencies and runs the experiment, but it only reproduces the toy demo, not the full paper results.  
+
+**Conclusion**  
+The provided code implements a toy illustration of the LCA concept but does **not** reproduce the core experimental contributions of the paper. Significant additions are required to match the paper’s methodology, data, and evaluation protocol.
+2026-03-14 19:57:31.810521 
+2026-03-14 19:57:31.810718 Generating refined code...
+2026-03-14 19:58:38.337173   Updated: generated_reproduction.txt
+2026-03-14 19:58:38.337276 
+2026-03-14 19:58:38.337349 --- Iteration 2: Observe & Refine ---
+2026-03-14 19:58:46.296691 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incorrect / Partial Requirements**
+
+| Status | Requirement from the paper | Comment |
+|--------|----------------------------|---------|
+| **MISSING** | Evaluation on ImageNet (ID) and the five ImageNet‑style OOD variants (ImageNet‑S, R, A, O, etc.) | The code uses CIFAR‑10 only. |
+| **MISSING** | Use of the full WordNet hierarchy for ImageNet classes | The code defines a toy 2‑level hierarchy. |
+| **MISSING** | Computation of LCA distance using *information‑content* (entropy) as in the paper | The code uses a simple depth‑difference formula. |
+| **MISSING** | Aggregation of LCA distance over all predictions (taxonomy loss) for soft‑label predictions | The code only handles hard predictions. |
+| **MISSING** | Construction of a latent hierarchy via K‑means for datasets without a predefined taxonomy | Not implemented. |
+| **MISSING** | Alignment of model predictions with the class taxonomy (soft labels or prompt engineering) to improve generalization | Not implemented. |
+| **MISSING** | Large‑scale evaluation over 75 models (36 VMs + 39 VLMs) | Only a single ResNet‑18 is evaluated. |
+| **MISSING** | Baseline comparisons (e.g., effective robustness, accuracy‑on‑the‑line) | No baselines are computed. |
+| **MISSING** | Detailed hyper‑parameter settings for training the 75 models (learning rates, optimizers, epochs, etc.) | No training loop for the main models. |
+| **MISSING** | Hardware / checkpoint management (GPU usage, model checkpoints, reproducibility flags) | Not addressed. |
+| **INCORRECT** | LCA distance definition | Paper uses depth of LCA in WordNet + information content; code uses a simple depth‑difference metric. |
+| **INCORRECT** | OOD dataset creation | Paper uses natural distribution shifts; code uses Gaussian noise, which is not representative. |
+| **PARTIAL** | Evaluation protocol | The script computes ID accuracy, ID LCA, OOD accuracy, and a single correlation value, but it does not follow the paper’s multi‑dataset, multi‑model protocol. |
+| **PARTIAL** | Reproducibility script | `reproduce.sh` installs dependencies and runs the demo, but it does not reproduce the paper’s results or produce the reported tables/figures. |
+
+**Conclusion:** The provided code only demonstrates a toy version of the LCA idea on CIFAR‑10 and does not implement the core methodology, data setup, evaluation protocol, or experimental results described in the paper. Significant additions are required to achieve a faithful reproduction.
+2026-03-14 19:58:46.296871 
+2026-03-14 19:58:46.297003 Generating refined code...
+2026-03-14 19:59:30.339257   Updated: README.md
+2026-03-14 19:59:30.339455   Updated: lca_experiment.py
+2026-03-14 19:59:30.339579   Updated: reproduce.sh
+2026-03-14 19:59:30.339678   Updated: requirements.txt
+2026-03-14 19:59:30.339750 
+2026-03-14 19:59:30.339804 --- Iteration 3: Observe & Refine ---
+2026-03-14 19:59:43.392956 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incorrect / Partial / OK Checklist**
+
+| # | Requirement (from paper) | Status | Comment |
+|---|---------------------------|--------|---------|
+| 1 | **Core LCA distance metric** (definition using WordNet, information‑content, applied to all predictions) | **PARTIAL** | The script implements a toy 2‑level hierarchy and the LCA distance formula, but it does **not** use WordNet or the full ImageNet taxonomy. |
+| 2 | **Use of WordNet hierarchy** | **MISSING** | No WordNet lookup or mapping from ImageNet synsets to hierarchy nodes. |
+| 3 | **Information‑content calculation** (based on class frequencies in ImageNet) | **PARTIAL** | The script uses a uniform leaf probability for CIFAR‑10, not the true ImageNet class frequencies. |
+| 4 | **Evaluation on 75 models** (36 VMs + 39 VLMs) | **MISSING** | Only a single ResNet‑18 is evaluated. |
+| 5 | **Evaluation on ImageNet ID and 5 OOD variants** (ImageNet‑S/R/A/O, etc.) | **MISSING** | The demo uses CIFAR‑10 test set and a synthetic Gaussian‑noise OOD split. |
+| 6 | **Correlation analysis across models** (LCA‑on‑the‑Line) | **MISSING** | The script computes a single Pearson r between ID LCA and OOD accuracy for one model only. |
+| 7 | **Training procedure for VMs/VLMs** (fine‑tuning or zero‑shot) | **INCORRECT** | The script loads ImageNet‑pretrained ResNet‑18 weights and never fine‑tunes them on CIFAR‑10 (unless the optional training routine is manually invoked). |
+| 8 | **Hyperparameters** (learning rate, batch size, epochs, optimizer) | **INCORRECT** | The script uses hard‑coded values (e.g., lr=0.01, 5 epochs) that are not aligned with the paper’s large‑scale training settings. |
+| 9 | **Construction of latent hierarchy via K‑means** | **MISSING** | No implementation of K‑means clustering to build a taxonomy for datasets lacking a predefined hierarchy. |
+| 10 | **Alignment of predictions with class taxonomy** (soft labels or prompt engineering) | **MISSING** | No mechanism to adjust predictions or loss based on the hierarchy. |
+| 11 | **Hardware / checkpointing** (GPU usage, model checkpoints) | **MISSING** | No checkpoint saving, no specification of GPU requirements. |
+| 12 | **Full reproducibility script** (`reproduce.sh`) | **PARTIAL** | The script installs dependencies and runs the demo, but it does **not** reproduce the paper’s experimental pipeline (no training, no multiple models, no OOD datasets). |
+| 13 | **Result reporting** (accuracy, LCA distance, correlation) | **OK** | The script prints and saves ID/OOD accuracy and mean LCA distance, but only for a single model. |
+| 14 | **Use of softmax probabilities for generalized LCA** | **PARTIAL** | The script uses hard predictions; the paper mentions a generalized form for soft distributions (see appendix). |
+
+**Summary**
+
+The provided code implements a *very* simplified version of the LCA distance concept but omits the core components that are essential to reproduce the paper’s findings:
+
+- It does not use the WordNet hierarchy or ImageNet class frequencies.
+- It evaluates only one model on CIFAR‑10 instead of 75 models on ImageNet and its OOD variants.
+- It lacks the K‑means hierarchy construction, prediction alignment, and the full training pipeline.
+- Hyperparameters and training procedure are not aligned with the paper.
+
+**Recommendation**
+
+To achieve a faithful reproduction, the following must be added/changed:
+
+1. Load ImageNet ID and OOD datasets (ImageNet‑S/R/A/O, etc.).
+2. Build or load the WordNet hierarchy for ImageNet classes and compute true information‑content.
+3. Evaluate a diverse set of VMs and VLMs (or at least a representative subset) and compute LCA distances for each.
+4. Implement the K‑means hierarchy construction for datasets without a predefined taxonomy.
+5. Add mechanisms to align predictions with the taxonomy (soft labels or prompt engineering).
+6. Use the paper’s training hyperparameters or at least provide a realistic fine‑tuning routine.
+7. Update `reproduce.sh` to run the full pipeline, including training, evaluation, and correlation analysis across models.
+
+Once these changes are made, the reproduction will be complete.
+2026-03-14 19:59:43.393169 
+2026-03-14 19:59:43.393291 Generating refined code...
+2026-03-14 20:01:02.672502   Updated: generated_reproduction.txt
+2026-03-14 20:01:02.672635 
+2026-03-14 20:01:02.672703 --- Iteration 4: Observe & Refine ---
+2026-03-14 20:01:14.798569 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Use of the *official* WordNet hierarchy for ImageNet classes (paper’s core).  
+- Evaluation on the full set of 75 models (36 VMs + 39 VLMs).  
+- Inclusion of Vision‑Language Models (e.g., CLIP, BLIP, etc.).  
+- Evaluation on the five ImageNet‑style OOD datasets (ImageNet‑R, ImageNet‑S, ImageNet‑A, ImageNet‑O, etc.).  
+- Construction of a latent taxonomy via K‑means for datasets without a predefined hierarchy.  
+- Alignment of model predictions with the class taxonomy (soft‑label or prompt‑engineering techniques).  
+- Generalised LCA distance that operates on the full soft‑max probability distribution (paper’s Appendix D.3).  
+- Correlation analysis across *multiple* models to demonstrate the “LCA‑on‑the‑Line” effect.  
+- Proper training of VMs on ImageNet (or fine‑tuning on ImageNet‑ID) and VLMs on LAION/CLIP style data.  
+- Detailed hyper‑parameter settings from the paper (learning rates, batch sizes, optimizer choices, number of epochs, etc.).  
+- Explicit data preprocessing pipeline matching ImageNet (resize, center‑crop, normalization).  
+- Full experimental pipeline that reproduces the paper’s reported numbers (e.g., Pearson r, R², MAE, etc.).  
+- Documentation of hardware requirements (GPU type, memory, training time).  
+
+**INCORRECT**  
+- Loading the pretrained ResNet‑18 weights: the script attempts to load the ImageNet checkpoint but then replaces the final layer without re‑initialising the rest of the network, leading to a mismatch between the pretrained weights and the new classifier.  
+- The “train_cifar10_model” routine is only a placeholder and does not reflect the training procedure used in the paper (e.g., no data‑augmentation schedule, no learning‑rate warm‑up, no weight‑decay schedule).  
+- The noise‑based OOD split (Gaussian noise) does not correspond to the severe visual shifts used in the paper (ImageNet‑R, etc.).  
+
+**PARTIAL**  
+- LCA distance computation is implemented, but it uses a toy 2‑level hierarchy instead of the full WordNet tree.  
+- Information‑content based f(·) is used, matching the paper’s definition.  
+- The script computes mean LCA distance and top‑1 accuracy, and reports a Pearson correlation, which is the same type of metric used in the paper.  
+
+**OK**  
+- The script is self‑contained, installs dependencies, and runs end‑to‑end on a single machine.  
+- The code structure (data loading, evaluation, correlation) is clear and reproducible.  
+
+**Conclusion**  
+The current repository implements only a toy demonstration and does not reproduce the core experimental findings of the paper. Significant additions are required to meet the paper’s reproducibility requirements.
+2026-03-14 20:01:14.798809 
+2026-03-14 20:01:14.798977 Generating refined code...
+2026-03-14 20:02:40.146976   Updated: README.md
+2026-03-14 20:02:40.147117   Updated: reproduce.sh
+2026-03-14 20:02:40.147177   Updated: requirements.txt
+2026-03-14 20:02:40.147232   Updated: lca_experiment.py
+2026-03-14 20:02:40.147282 
+2026-03-14 20:02:40.147343 --- Iteration 5: Observe & Refine ---
+2026-03-14 20:02:57.856527 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Use of the ImageNet dataset (ID) and the five real OOD variants (ImageNet‑R, ImageNet‑S, ImageNet‑A, ImageNet‑O, etc.) as described in the paper.  
+- Evaluation of 75 models (36 VMs + 39 VLMs) – the demo only fine‑tunes three vision models and uses one CLIP zero‑shot model.  
+- Construction of a latent taxonomic hierarchy via K‑means for datasets without a predefined hierarchy (Section 4 of the paper).  
+- Alignment of model predictions with the class taxonomy (soft‑label or prompt‑engineering techniques) that the paper claims can improve generalization.  
+- Full training pipeline for VLMs (e.g., CLIP fine‑tuning or other VLMs) and the associated hyper‑parameters.  
+- Reporting of the exact correlation values and statistical significance across the 75‑model benchmark.  
+- Comparison against baseline “Effective Robustness” or “Agreement‑on‑the‑Line” metrics.  
+
+**INCORRECT**  
+- None of the implemented components are syntactically wrong, but the LCA distance calculation uses a simplified information‑content estimate (uniform leaf probability) rather than the frequency‑based estimate described in Valmadre 2022. This deviates from the paper’s exact formulation.  
+
+**PARTIAL**  
+- **LCA distance metric** – implemented, but only for the CIFAR‑10 classes and with a simplified info‑content calculation.  
+- **CLIP inference** – zero‑shot evaluation is provided, but no prompt‑engineering or soft‑label alignment with the taxonomy is performed.  
+- **OOD evaluation** – uses a synthetic Gaussian‑noise corruption instead of the real OOD datasets the paper uses.  
+- **Hierarchy construction** – a WordNet tree is built, but the paper’s K‑means clustering approach for arbitrary datasets is not implemented.  
+
+**OK**  
+- The script builds a WordNet hierarchy for the chosen classes.  
+- ID and OOD accuracy are computed and reported.  
+- Mean LCA distance is calculated for ID and OOD predictions.  
+- Pearson correlation between ID LCA and OOD accuracy is reported.  
+- The `reproduce.sh` script installs dependencies, downloads WordNet data, and runs the experiment.  
+
+**Conclusion**  
+The provided code implements a toy version of the core LCA idea but does not reproduce the full experimental setup, datasets, models, or the additional techniques described in the paper. Therefore, the reproduction is incomplete.
+2026-03-14 20:02:57.856720 
+2026-03-14 20:02:57.856839 Generating refined code...
+2026-03-14 20:05:03.016045   Updated: README.md
+2026-03-14 20:05:03.016193   Updated: reproduce.sh
+2026-03-14 20:05:03.016289   Updated: requirements.txt
+2026-03-14 20:05:03.016345   Updated: lca_experiment.py
+2026-03-14 20:05:03.016380 
+2026-03-14 20:05:03.016426 ======================================================================
+2026-03-14 20:05:03.016456 REACT BASELINE COMPLETE
+2026-03-14 20:05:03.016498 ======================================================================
+2026-03-14 20:05:03.016526 Total iterations: 6
+2026-03-14 20:05:03.016553 API tokens: 48260 completion, 256420 prompt
+2026-03-14 20:05:03.016580 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial1/lca-on-the-line/generated_code_response.txt

@@ -1,0 +1,101 @@
+2026-03-15 13:22:52.130989 ======================================================================
+2026-03-15 13:22:52.131108 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-15 13:22:52.131147 ======================================================================
+2026-03-15 13:22:52.131204 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/bridging-data-gaps/paper.md
+2026-03-15 13:22:52.131241 Log path: paper2code_react5_Gpt-oss-20b_trial1/bridging-data-gaps
+2026-03-15 13:22:52.131278 Model: Openai/Gpt-oss-20b
+2026-03-15 13:22:52.131305 Max iterations: 5
+2026-03-15 13:22:52.131333 Run reproduce.sh: False
+2026-03-15 13:22:52.131363 Run LLM paper check: True
+2026-03-15 13:22:52.131389 
+2026-03-15 13:22:52.131415 Loading paper...
+2026-03-15 13:22:52.131609 Paper length: 66553 chars (using 66553 for prompt)
+2026-03-15 13:22:52.131644 
+2026-03-15 13:22:52.149736 --- Iteration 0: Initial generation ---
+2026-03-15 13:24:01.128313   Created: generated_reproduction.txt
+2026-03-15 13:24:01.128410 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial1/bridging-data-gaps/submission (1 files)
+2026-03-15 13:24:01.128450 
+2026-03-15 13:24:01.128484 --- Iteration 1: Observe & Refine ---
+2026-03-15 13:24:11.167803 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incomplete Elements (must be added/updated)**  
+
+- **MISSING: Full similarity‑guided training loop** – The paper’s core idea is to use a classifier to estimate the source‑to‑target domain gap and guide fine‑tuning. The toy code only sketches a placeholder and does not compute or back‑propagate a similarity loss.  
+- **MISSING: Adversarial noise selection (min‑max optimization)** – The paper proposes a dynamic, worst‑case noise selection per image. The current implementation uses standard Gaussian noise and has no adversarial sampling or min‑max loss.  
+- **MISSING: Adaptor modules / parameter‑efficient fine‑tuning** – The paper describes lightweight adapters that freeze most of the pretrained diffusion backbone. The toy code keeps the entire U‑Net trainable (or frozen) but does not insert adapters or control which parameters are updated.  
+- **MISSING: Pre‑trained diffusion checkpoint** – The paper fine‑tunes a large‑scale pretrained DDPM/Latent Diffusion model (e.g., trained on FFHQ). The toy code trains from scratch on MNIST, so the transfer‑learning aspect is absent.  
+- **MISSING: Target domain dataset** – The experiments in the paper use few‑shot image generation tasks (e.g., 10‑shot Sunglasses). The toy code uses MNIST, which does not reflect the few‑shot setting or the domain gap.  
+- **MISSING: Evaluation metrics** – The paper reports LPIPS, FID, and visual inspection of over‑fitting vs. under‑fitting. The toy code does not compute LPIPS, FID, or any quantitative metric.  
+- **MISSING: Training schedule & hyper‑parameters** – The paper specifies learning rates, batch sizes, number of fine‑tuning steps, and optimizer settings tuned for few‑shot transfer. The toy code uses generic defaults (e.g., lr=1e‑4, batch=64) that are not aligned with the paper.  
+- **MISSING: reproduce.sh / end‑to‑end script** – The repository lacks a reproducible shell script that downloads the pretrained checkpoint, runs fine‑tuning, and evaluates on the target dataset.  
+- **MISSING: Logging & checkpointing** – The paper’s results rely on saving intermediate checkpoints and logging LPIPS per step. The toy code does not provide this.  
+
+**Partial / Incorrect Elements**  
+
+- **PARTIAL: Diffusion model implementation** – The toy code implements a basic DDPM U‑Net, but it is not the same architecture (e.g., no attention, no conditioning) used in the paper’s experiments.  
+- **INCORRECT: Noise schedule** – The toy code uses a simple linear beta schedule, whereas the paper uses the cosine schedule or a schedule tuned for the pretrained model.  
+- **INCORRECT: Conditional guidance** – The paper’s conditional reverse process (Eq. 4) is not used; the toy code ignores classifier guidance or classifier‑free guidance.  
+
+**OK (but minimal)**  
+
+- **OK: Basic diffusion training loop** – The toy code contains a standard DDPM training loop that can be used as a starting point.  
+- **OK: Dataset loading** – MNIST is loaded correctly, but it does not match the paper’s few‑shot domain.  
+
+**Actionable Summary**  
+
+1. Replace the toy diffusion backbone with the pretrained checkpoint used in the paper (e.g., a 256×256 DDPM or LDM).  
+2. Implement the similarity‑guided loss: train a lightweight classifier on source vs. target, compute a domain‑gap metric, and back‑propagate it to the diffusion model.  
+3. Add the adversarial noise selection: for each training step, sample multiple noise vectors, evaluate the loss, and pick the worst‑case noise (min‑max).  
+4. Insert adapter modules (e.g., LoRA or residual adapters) and freeze the rest of the network.  
+5. Use the few‑shot target dataset (e.g., 10‑shot Sunglasses) and follow the same train/val split as in the paper.  
+6. Compute LPIPS and FID after each epoch and log them.  
+7. Provide a `reproduce.sh` that downloads the pretrained checkpoint, runs fine‑tuning, and evaluates, producing the same figures/tables as the paper.  
+
+**Conclusion**  
+ALL components required by the paper are not fully reproduced in the toy implementation. The repository needs substantial additions and corrections to match the paper’s methodology and results.
+2026-03-15 13:24:11.168014 
+2026-03-15 13:24:11.168199 Generating refined code...
+2026-03-15 13:25:20.731351   Updated: generated_reproduction.txt
+2026-03-15 13:25:20.731474 
+2026-03-15 13:25:20.731531 --- Iteration 2: Observe & Refine ---
+2026-03-15 13:25:32.836630 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Checklist – What the paper requires vs. what the repo shows**
+
+| Status | Requirement from the paper | Comment |
+|--------|----------------------------|---------|
+| **MISSING** | Full *adversarial noise selection* (min‑max optimisation over Gaussian noise conditioned on the input image). | The repo header claims an “adversarial noise” module, but the implementation is not shown. If the code simply uses the standard random Gaussian noise without a min‑max loop, the core contribution is missing. |
+| **MISSING** | *Similarity‑guided training* that uses a classifier to estimate the divergence between source and target domains and drives the fine‑tuning loss. | The repo mentions a “classifier” but there is no evidence of a loss term that incorporates the classifier’s output to guide the diffusion model. |
+| **MISSING** | *Adapter modules* that freeze the bulk of the pretrained DDPM while only fine‑tuning a small set of parameters. | The repo states “adapter modules” but the code does not show any explicit freezing of the U‑Net backbone or a lightweight adapter architecture. |
+| **MISSING** | Evaluation metrics used in the paper (FID, LPIPS, diversity scores). | The repo header does not list any metric computation. If only FID is computed, LPIPS and diversity are omitted. |
+| **MISSING** | Exact hyper‑parameter settings (learning rate, batch size, number of training steps, scheduler, weight‑decay, etc.) that match the paper’s experiments. | The repo likely uses default values; the paper’s specific values are not documented. |
+| **MISSING** | Precise data preparation: 10‑shot SVHN split, preprocessing pipeline, and any data‑augmentation used. | The repo claims “CIFAR‑10 → 10‑shot SVHN” but does not show the exact split or augmentation strategy. |
+| **MISSING** | A `reproduce.sh` (or equivalent) script that runs the full training and evaluation pipeline to reproduce the paper’s reported numbers. | No such script is present in the snippet. |
+| **PARTIAL** | Adversarial noise selection – the repo may include a simple noise‑selection routine but not the full min‑max loop over the noise distribution. | If the code only selects a fixed noise level or uses a heuristic, the adversarial aspect is incomplete. |
+| **PARTIAL** | Similarity‑guided training – the classifier may be present but the loss that couples it to the diffusion loss might be missing or simplified. | The classifier could be used only for monitoring, not as a training signal. |
+| **PARTIAL** | Adapter modules – the code may freeze some layers but not all, or may use a generic “adapter” that is not the lightweight module described in the paper. | The exact architecture (e.g., 1‑x‑1 convs, residual adapters) is not shown. |
+| **PARTIAL** | Evaluation metrics – FID may be computed, but LPIPS and diversity metrics are absent. | The paper emphasises perceptual distance (LPIPS) in Figure 1. |
+| **PARTIAL** | Hyper‑parameters – the repo may use reasonable defaults but not the exact values reported. | Without the paper’s table of hyper‑parameters, it’s unclear if they match. |
+| **PARTIAL** | Data setup – the repo may use CIFAR‑10 pre‑training but the 10‑shot SVHN split may not be exactly the same as the paper’s. | The exact random seed and split selection are not documented. |
+| **PARTIAL** | `reproduce.sh` – the repo may provide a Makefile or a Jupyter notebook but not a single script that reproduces the paper’s results. | The header mentions “does not ship any large checkpoints”, but no script is shown. |
+
+**Summary**
+
+- **ALL_OK** cannot be claimed because several core components (adversarial noise, similarity‑guided loss, adapters, evaluation metrics, exact hyper‑parameters, data split, and reproducibility script) are either missing or only partially implemented.  
+- The developer should add a full min‑max adversarial noise selection routine, integrate the classifier into the loss, freeze the U‑Net backbone and add lightweight adapters, compute FID + LPIPS, set hyper‑parameters exactly as in the paper, use the exact 10‑shot SVHN split, and provide a reproducible script.
+2026-03-15 13:25:32.836814 
+2026-03-15 13:25:32.836938 Generating refined code...
+2026-03-15 13:26:53.957441   Updated: generated_reproduction.txt
+2026-03-15 13:26:53.957537 
+2026-03-15 13:26:53.957585 --- Iteration 3: Observe & Refine ---
+2026-03-15 13:28:18.664593 All checks passed. Stopping refinement.
+2026-03-15 13:28:18.664747 ======================================================================
+2026-03-15 13:28:18.664808 REACT BASELINE COMPLETE
+2026-03-15 13:28:18.664861 ======================================================================
+2026-03-15 13:28:18.664896 Total iterations: 4
+2026-03-15 13:28:18.664930 API tokens: 37140 completion, 72787 prompt
+2026-03-15 13:28:18.664962 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial1/bridging-data-gaps/generated_code_response.txt

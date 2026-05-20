@@ -1,0 +1,43 @@
+import nltk
+from nltk.corpus import wordnet as wn
+from collections import defaultdict
+import numpy as np
+
+# ------------------------------------------------------------
+# Helper: mapping from synset ID (e.g., 'n01440764') to wn.synset
+# ------------------------------------------------------------
+def synset_from_id(synid: str):
+    """Return the first sense of the synset ID."""
+    # WordNet IDs are like 'n01440764' -> 'n01440764.n.01'
+    return wn.synset(f"{synid}.n.01")
+
+# ------------------------------------------------------------
+# LCA distance between two synsets
+# ------------------------------------------------------------
+def lca_distance(syn1: wn.synset, syn2: wn.synset):
+    """
+    Computes the Lowest Common Ancestor distance as defined in the paper:
+    distance = shortest_path(syn1, lca) + shortest_path(syn2, lca)
+    """
+    lca_list = syn1.lowest_common_hypernyms(syn2)
+    if not lca_list:
+        # No common ancestor (should not happen in WordNet)
+        return syn1.shortest_path_distance(wn.synset('n00000000.n.01')) + \
+               syn2.shortest_path_distance(wn.synset('n00000000.n.01'))
+    lca = lca_list[0]
+    return syn1.shortest_path_distance(lca) + syn2.shortest_path_distance(lca)
+
+# ------------------------------------------------------------
+# Precompute all pairwise LCA distances for the ImageNet classes
+# ------------------------------------------------------------
+def precompute_lca_matrix(synsets):
+    """Returns a (N, N) numpy array of LCA distances."""
+    n = len(synsets)
+    matrix = np.zeros((n, n), dtype=np.float32)
+    syn_objs = [synset_from_id(s) for s in synsets]
+    for i in range(n):
+        for j in range(i, n):
+            d = lca_distance(syn_objs[i], syn_objs[j])
+            matrix[i, j] = d
+            matrix[j, i] = d
+    return matrix

@@ -1,0 +1,204 @@
+2026-03-14 19:50:22.556647 ======================================================================
+2026-03-14 19:50:22.556785 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 19:50:22.556829 ======================================================================
+2026-03-14 19:50:22.556865 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/stay-on-topic-with-classifier-free-guidance/paper.md
+2026-03-14 19:50:22.556899 Log path: paper2code_react5_Gpt-oss-20b_trial5/stay-on-topic-with-classifier-free-guidance
+2026-03-14 19:50:22.556931 Model: Openai/Gpt-oss-20b
+2026-03-14 19:50:22.556962 Max iterations: 5
+2026-03-14 19:50:22.556995 Run reproduce.sh: False
+2026-03-14 19:50:22.557029 Run LLM paper check: True
+2026-03-14 19:50:22.557060 
+2026-03-14 19:50:22.557088 Loading paper...
+2026-03-14 19:50:22.557457 Paper length: 115400 chars (using 115400 for prompt)
+2026-03-14 19:50:22.557529 
+2026-03-14 19:50:22.577241 --- Iteration 0: Initial generation ---
+2026-03-14 19:51:08.754398   Created: generated_reproduction.txt
+2026-03-14 19:51:08.754487 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial5/stay-on-topic-with-classifier-free-guidance/submission (1 files)
+2026-03-14 19:51:08.754525 
+2026-03-14 19:51:08.754559 --- Iteration 1: Observe & Refine ---
+2026-03-14 19:51:18.690346 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing from the reproduction**
+
+- **Negative prompting** – The paper discusses extending CFG with a negative prompt (Eq. 5) and demonstrates its use for fine‑grained control. The demo code does not implement or expose a negative‑prompt interface.  
+- **Chain‑of‑Thought (CoT) prompting** – The experiments in §3.2 show CFG applied to CoT prompts. No CoT logic or evaluation is present.  
+- **Zero‑shot benchmark evaluation** – §3.1 reports results on a wide suite of zero‑shot tasks (LAMBADA, QA, reasoning, etc.). The demo only generates a few toy prompts; no benchmark data, splits, or metrics are used.  
+- **Evaluation metrics & protocol** – Accuracy, F1, BLEU, etc. are not computed or reported.  
+- **Human‑preference study** – §3.4 describes a 75 % preference for CFG‑guided assistants. No human evaluation pipeline is included.  
+- **Computational analysis** – The paper compares FLOPs, VRAM, and “half‑size model” gains. No such analysis is performed.  
+- **Full experimental pipeline** – The paper’s results come from a systematic, reproducible pipeline (data download, preprocessing, inference, metric aggregation). The `reproduce.sh` script only installs dependencies, downloads GPT‑2, and runs a single demo.  
+
+**Partially implemented**
+
+- **Hyperparameters** – The code hard‑codes a single guidance strength (`γ = 1.5`) and a fixed random seed. The paper explores a range of γ values and does not fix them.  
+- **Model choice** – The demo uses GPT‑2, whereas the paper evaluates Pythia, GPT‑2, and LLaMA families. Using GPT‑2 alone does not cover the full claim.  
+- **Reproducibility script** – `reproduce.sh` runs the demo deterministically, but it does not reproduce the paper’s full set of results or provide a way to reproduce the benchmark scores.  
+
+**Correctly implemented**
+
+- **CFG core algorithm (Eq. 7)** – The demo applies the log‑space re‑weighting of conditioned vs. unconditional logits, which is the central contribution of the paper.  
+- **Demonstration of CFG effect** – The script shows that a higher γ can change the generated text, illustrating the basic idea.  
+
+**Conclusion**
+
+The code only implements the bare‑bones CFG algorithm for GPT‑2 and demonstrates it on a few prompts. It does **not** reproduce the key experimental findings, benchmarks, or extended techniques (negative prompting, CoT, human evaluation) presented in the paper.
+
+**Recommendation**
+
+Add modules for benchmark loading (LM Evaluation Harness), negative prompting, CoT prompting, metric aggregation, and a reproducible pipeline that matches the paper’s experimental protocol. Once those are in place, the reproduction will be complete.
+2026-03-14 19:51:18.690583 
+2026-03-14 19:51:18.690853 Generating refined code...
+2026-03-14 19:52:19.044708   Updated: generated_reproduction.txt
+2026-03-14 19:52:19.044817 
+2026-03-14 19:52:19.044856 --- Iteration 2: Observe & Refine ---
+2026-03-14 19:52:22.579629 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Core CFG algorithm (Eq. 7) applied to causal language model logits.  
+- Negative prompting support (Eq. 5).  
+- Chain‑of‑Thought (CoT) demo implementation.  
+- Benchmark evaluation on LM‑Evaluation‑Harness tasks (LAMBADA, BoolQ, TriviaQA, etc.).  
+- Baseline comparison (e.g., vanilla sampling, temperature, top‑k).  
+- Hyperparameter settings (γ values, temperature, top‑k, top‑p).  
+- Data preprocessing and split handling for the chosen benchmarks.  
+- Metrics computation (accuracy, F1, etc.) and result aggregation.  
+- `reproduce.sh` script that installs dependencies, downloads models, runs the full evaluation pipeline, and prints results.  
+- Hardware / runtime configuration (e.g., GPU usage, batch size).  
+
+**PARTIAL**  
+- The repository header and README describe the intended features, but no actual implementation code is present.  
+
+**INCORRECT**  
+- None (no code to evaluate).  
+
+**OK**  
+- None (no functional components are present).  
+
+**Recommendation**  
+Implement the missing components listed above to achieve a faithful reproduction of the paper’s experiments.
+2026-03-14 19:52:22.579811 
+2026-03-14 19:52:22.579940 Generating refined code...
+2026-03-14 19:53:19.037397   Updated: generated_reproduction.txt
+2026-03-14 19:53:19.037507 
+2026-03-14 19:53:19.037548 --- Iteration 3: Observe & Refine ---
+2026-03-14 19:53:32.845841 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / incomplete components relative to the paper**
+
+| Status | Requirement from the paper | Notes |
+|--------|----------------------------|-------|
+| **MISSING** | Full evaluation on the entire LM‑Eval harness (≈ 30+ tasks) | Only LAMBADA, BoolQ, TriviaQA are touched. |
+| **MISSING** | Baseline comparisons (vanilla sampling, temperature, top‑k/p, etc.) | No side‑by‑side results. |
+| **MISSING** | Chain‑of‑Thought (CoT) + Self‑Consistency experiments | Only a single CoT demo is shown. |
+| **MISSING** | Negative prompting for assistant‑style prompts (system + user) | Demo exists but not integrated into evaluation. |
+| **MISSING** | Negative prompting for long‑form generation, code generation, reasoning tasks | Not implemented. |
+| **MISSING** | Human‑evaluation protocol (75 % preference) | No human study code. |
+| **MISSING** | SOTA claim on LAMBADA with LLaMA‑7B vs PaLM‑540B | No comparison code or results. |
+| **MISSING** | Entropy‑reduction analysis & visualizations | No code for measuring or plotting. |
+| **MISSING** | Stacking CFG with other inference‑time methods (e.g., CoT, Self‑Consistency) | No implementation. |
+| **MISSING** | Computational‑cost analysis (FLOPs, VRAM) | No profiling. |
+| **MISSING** | Training a smaller model with CFG to match a larger model | No training script. |
+| **MISSING** | Hyper‑parameter tuning details (γ values, temperature, top‑k) | Only a single γ is used. |
+| **MISSING** | Full negative‑prompting implementation (Eq. 5) | Demo present but not integrated. |
+| **MISSING** | Long‑form generation experiments | Not included. |
+| **MISSING** | Code‑generation benchmarks | Not included. |
+| **MISSING** | Complex chatbot‑style prompting experiments | Not included. |
+| **MISSING** | GPU/CPU hardware details & reproducibility checklist | Not provided. |
+
+| Status | Core method / algorithm | Notes |
+|--------|------------------------|-------|
+| **OK** | CFG inference algorithm (Eq. 7) | The script applies the logit re‑weighting `logit = logit_uncond + γ*(logit_cond - logit_uncond)`. |
+| **PARTIAL** | Negative prompting (Eq. 5) | A demo exists, but it is not part of the automated evaluation pipeline. |
+| **PARTIAL** | Chain‑of‑Thought example | Only a single static example is shown; no systematic CoT evaluation. |
+
+**Summary**
+
+The repository implements the core CFG inference logic and a small demo, but it does **not** reproduce the extensive experimental suite, baseline comparisons, human evaluation, or the SOTA claims presented in the paper. Many key components (negative prompting, CoT stacking, entropy analysis, long‑form/code generation, hardware profiling, etc.) are missing. To achieve a faithful reproduction, the missing items above must be added.
+2026-03-14 19:53:32.846108 
+2026-03-14 19:53:32.846351 Generating refined code...
+2026-03-14 19:54:27.533805   Updated: generated_reproduction.txt
+2026-03-14 19:54:27.533908 
+2026-03-14 19:54:27.533994 --- Iteration 4: Observe & Refine ---
+2026-03-14 19:54:37.665051 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incomplete Reproduction**
+
+| Category | Item | Status | Notes |
+|----------|------|--------|-------|
+| **Core Method** | CFG inference algorithm (Eq. 7) | **OK** | The script applies the log‑space re‑weighting of conditional vs. unconditional logits, matching Eq. 7. |
+| **Hyperparameters** | Guidance strength γ | **MISSING** | The paper discusses a range of γ values (e.g., γ = 5 for negative prompting). The script does not expose or tune γ. |
+| **Negative Prompting** | Integration into evaluation | **PARTIAL** | A demo is provided, but it is not used in the benchmark runs. |
+| **Chain‑of‑Thought (CoT)** | Stacking with CFG | **PARTIAL** | A CoT example is shown, but the evaluation does not combine CFG with CoT or Self‑Consistency. |
+| **Benchmarks** | Full suite (LAMBADA, BoolQ, TriviaQA, etc.) | **PARTIAL** | Only three tasks are evaluated; the paper reports results on many more (e.g., Q&A, reasoning, code generation). |
+| **Model** | LLaMA‑7B (SOTA on LAMBADA) | **MISSING** | The script uses GPT‑2; the paper’s key claim of SOTA with LLaMA‑7B is not reproduced. |
+| **Parameter‑count equivalence** | “Twice‑size model” claim | **MISSING** | No experiments comparing a half‑size model with CFG to a full‑size baseline. |
+| **Self‑Consistency** | Stacking with CFG | **MISSING** | Not implemented or evaluated. |
+| **Human Preference Study** | 75 % preference for CFG | **MISSING** | No human evaluation pipeline. |
+| **Interpretability** | Entropy reduction & latent‑space visualisation | **MISSING** | No entropy metrics or visualisation code. |
+| **Reproduce.sh** | Full pipeline to match paper results | **PARTIAL** | The script runs the demo and a few benchmarks, but does not reproduce the paper’s reported numbers or experimental protocol. |
+
+**Summary**
+
+The repository implements the core CFG algorithm correctly but falls short on the breadth of experiments, hyperparameter control, and key claims (SOTA on LAMBADA with LLaMA‑7B, parameter‑count equivalence, stacking with Self‑Consistency, human evaluation, and interpretability analyses). To fully match the paper, the following actions are required:
+
+1. Add a configurable γ hyperparameter (and possibly a negative‑prompting flag).  
+2. Extend the benchmark suite to include all tasks reported in the paper.  
+3. Include experiments with LLaMA‑7B (or another large model) to reproduce the SOTA claim.  
+4. Add a half‑size model experiment to validate the “twice‑size” equivalence.  
+5. Implement CFG stacking with Chain‑of‑Thought and Self‑Consistency.  
+6. Add a human‑evaluation script or at least a placeholder for the 75 % preference claim.  
+7. Provide entropy metrics and latent‑space visualisation utilities.  
+8. Update `reproduce.sh` to run the full experimental pipeline and output the paper’s numbers.
+
+Until these items are addressed, the reproduction is incomplete.
+2026-03-14 19:54:37.665284 
+2026-03-14 19:54:37.665418 Generating refined code...
+2026-03-14 19:55:15.527650   Updated: generated_reproduction.txt
+2026-03-14 19:55:15.527736 
+2026-03-14 19:55:15.527774 --- Iteration 5: Observe & Refine ---
+2026-03-14 19:55:22.515130 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Full benchmark suite (zero‑shot QA, commonsense reasoning, sentence completion, etc.) described in the paper.  
+- Evaluation metrics and protocols (accuracy, F1, human preference scores, etc.).  
+- Experiments on models other than GPT‑2 (Pythia, LLaMA‑family).  
+- Chain‑of‑Thought and long‑form generation evaluations.  
+- Assistant‑style prompting experiments (system + user prompts).  
+- Negative‑prompting experiments beyond the single demo.  
+- Human‑evaluation results (75 % preference claim).  
+- Detailed hyperparameter settings (γ values per task, temperature, top‑k/p, etc.).  
+- Hardware / compute budget details (FLOPs, VRAM).  
+- Full reproducibility script that reproduces the paper’s reported numbers.
+
+**INCORRECT**  
+- None identified (the code does not contain any incorrect implementation of the core CFG algorithm as presented; it only implements a minimal version for GPT‑2).
+
+**PARTIAL**  
+- **Core method**: CFG re‑weighting (Eq. 7) is implemented only for GPT‑2; no support for other architectures or negative prompting logic.  
+- **Hyperparameters**: A single γ value (e.g., γ = 5) is hard‑coded in the demo; no systematic sweep or task‑specific tuning.  
+- **Data**: Only a tiny subset of LAMBADA is used; no preprocessing or split logic matching the paper.  
+- **Evaluation**: The script prints generated text but does not compute accuracy or other metrics.  
+- **reproduce.sh**: Installs dependencies and runs a demo, but does not run the full experimental pipeline or output the paper’s results.
+
+**Conclusion**  
+The repository reproduces a very small, toy version of CFG for GPT‑2 but lacks the breadth, depth, and evaluation rigor required to match the paper’s claims. The missing components above must be added to achieve a faithful reproduction.
+2026-03-14 19:55:22.515333 
+2026-03-14 19:55:22.515449 Generating refined code...
+2026-03-14 19:56:18.509146   Updated: generated_reproduction.py
+2026-03-14 19:56:18.509247 
+2026-03-14 19:56:18.509288 ======================================================================
+2026-03-14 19:56:18.509324 REACT BASELINE COMPLETE
+2026-03-14 19:56:18.509357 ======================================================================
+2026-03-14 19:56:18.509390 Total iterations: 6
+2026-03-14 19:56:18.509423 API tokens: 37107 completion, 229598 prompt
+2026-03-14 19:56:18.509470 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial5/stay-on-topic-with-classifier-free-guidance/generated_code_response.txt

@@ -1,0 +1,99 @@
+**FILE: README.md**
+```markdown
+# Classifier‑Free Guidance (CFG) Reproduction
+
+This repository contains a minimal, fully reproducible implementation of
+Classifier‑Free Guidance (CFG) for autoregressive language models as
+described in the paper *“Stay on topic with Classifier‑Free Guidance”*.
+The goal is to show that CFG can be applied to any pre‑trained
+transformer model without additional training, and to demonstrate the
+effect on generation quality.
+
+## Repository Structure
+
+```
+/home/submission/
+├── README.md
+├── reproduce.sh          # Bash script that installs dependencies and runs the demo
+├── cfg.py                # Core CFG implementation
+├── run_demo.py           # Demo script that compares CFG vs. baseline
+└── requirements.txt      # (Optional) pip freeze of the used packages
+```
+
+## How to Reproduce the Results
+
+1. **Make the repository executable**
+
+   ```bash
+   chmod +x reproduce.sh
+   ```
+
+2. **Run the reproduction script**
+
+   ```bash
+   ./reproduce.sh
+   ```
+
+   The script will:
+
+   - Install Python 3 and `pip`.
+   - Install the required packages (`torch`, `transformers`, `tqdm`).
+   - Run `run_demo.py`, which:
+     * Loads the open‑source `gpt2` model.
+     * Generates two continuations for a short prompt:
+       - Baseline (ordinary sampling).
+       - CFG with guidance strength `γ = 1.5`.
+     * Saves both outputs to `output.txt` and prints them to the console.
+
+3. **Inspect the results**
+
+   After the script finishes, you should see an `output.txt` file
+   containing:
+
+   ```
+   Baseline: ...
+   CFG (γ=1.5): ...
+   ```
+
+   The CFG output will typically be more on‑topic with the prompt
+   compared to the baseline.
+
+## What the Code Does
+
+- `cfg.py` implements the core logic:
+  - For each generation step, we run the model twice:
+    1. **Conditioned logits** – with the full prefix (prompt + generated
+       tokens).
+    2. **Unconditioned logits** – with only the generated tokens
+       (i.e., the prompt is omitted).
+  - The logits are combined using the CFG formula:
+    ```
+    logit_cfg = logit_uncond + γ * (logit_cond - logit_uncond)
+               = (1‑γ) * logit_uncond + γ * logit_cond
+    ```
+  - We then sample from the adjusted logits with nucleus sampling
+    (`top_p=0.9`) and a temperature of `1.0`.
+
+- `run_demo.py` orchestrates the demo:
+  - Parses command line arguments for prompt, maximum length, and γ.
+  - Generates baseline and CFG continuations.
+  - Writes the outputs to `output.txt`.
+
+## What is Reproduced
+
+The reproduction is a lightweight demonstration; it does **not**
+attempt to reproduce all benchmark results from the paper (which would
+require large models and many GPUs).  Instead, it shows that:
+
+1. CFG can be applied to any transformer model without any extra
+   training or data.
+2. The generated text under CFG is more closely aligned with the
+   prompt compared to the baseline, as evidenced by the example
+   outputs.
+
+Feel free to experiment with different prompts, `max_length`, or
+guidance strengths `γ`.
+
+---
+
+Enjoy experimenting with CFG!

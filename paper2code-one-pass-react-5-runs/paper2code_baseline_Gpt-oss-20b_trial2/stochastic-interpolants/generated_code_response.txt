@@ -1,0 +1,353 @@
+**FILE: reproduce.sh**  
+```bash
+#!/usr/bin/env bash
+# This script installs dependencies, trains a simple stochastic‑interpolant model on MNIST,
+# and generates a few samples.  The whole process takes well under 7 days on a GPU.
+
+set -e
+
+# Install Python and pip
+apt-get update -qq
+apt-get install -y -qq python3 python3-pip
+
+# Install Python packages
+pip install -q -r requirements.txt
+
+# Train the model
+python3 train.py --epochs 5 --batch-size 128
+
+# Generate samples
+python3 sample.py --num-samples 10 --output-dir samples
+
+echo "Reproduction finished.  Check the 'samples/' directory for generated images."
+```
+
+---
+
+**FILE: README.md**  
+```markdown
+# Reproduction of “Stochastic Interpolants with Data‑Dependent Couplings”
+
+This repository contains a **minimal, self‑contained implementation** of the core ideas from the paper *Stochastic Interpolants with Data‑Dependent Couplings*.  
+The goal is to demonstrate the training of a velocity field via the simple quadratic loss
+proposed in the paper and to generate samples by integrating the resulting probability
+flow ODE.
+
+## Repository Structure
+
+```
+.
+├── assets/                # (optional) placeholder for images
+├── reproduce.sh           # Main reproducibility script
+├── README.md              # This file
+├── requirements.txt       # Python dependencies
+├── train.py               # Training routine
+├── sample.py              # Sampling routine
+├── model.py               # Velocity network & time embedding
+└── samples/               # Generated samples (created after running reproduce.sh)
+```
+
+## How to Run
+
+```bash
+bash reproduce.sh
+```
+
+The script will:
+
+1. Install Python and the required packages (`torch`, `torchvision`, `numpy`, `pillow`).
+2. Train a velocity network on the MNIST dataset for **5 epochs** (change `--epochs`
+   in `train.py` if desired).
+3. Generate **10 samples** by integrating the learned velocity field with a simple
+   Euler solver and save them in the `samples/` directory.
+
+## What to Expect
+
+- **Training log**: The script prints the average training loss per epoch.
+- **Generated images**: The `samples/` folder will contain PNG images that look
+  like MNIST digits.  They are produced by starting from a random Gaussian vector
+  and evolving it through the learned velocity field.
+
+The implementation follows the framework described in the paper:
+
+- **Stochastic interpolant**: \( I_t = (1-t) \, x_0 + t \, x_1 \) with  
+  \( \dot I_t = -x_0 + x_1 \).
+- **Velocity learning**: Minimize  
+  \(\displaystyle \mathbb{E}\big[\,\|\,\hat b_t(I_t)-\dot I_t \,\|^2 \big]\),  
+  which is equivalent to the square‑loss objective in the paper.
+- **Sampling**: Integrate the probability flow ODE  
+  \( \dot X_t = \hat b_t(X_t) \) with a fixed step size.
+
+Feel free to modify hyper‑parameters (e.g., number of epochs, batch size, learning
+rate, network size) to explore the effect on training dynamics and sample quality.
+
+## Credits
+
+The code is inspired by the concepts in the paper and follows the same notation as
+the original authors.  It is written from scratch for clarity and reproducibility.
+```
+
+---
+
+**FILE: requirements.txt**  
+```text
+torch>=1.10
+torchvision>=0.11
+numpy
+pillow
+```
+
+---
+
+**FILE: model.py**  
+```python
+"""
+Minimal velocity network for stochastic interpolants.
+The network predicts the velocity field b_t(x) given (x, t).
+"""
+
+import math
+import torch
+import torch.nn as nn
+
+
+def time_embedding(t, dim=16, device=None):
+    """
+    Sinusoidal time embedding (like in Transformers).
+    t: scalar or tensor of shape (B,)
+    dim: dimension of the embedding (must be even)
+    Returns: tensor of shape (B, dim)
+    """
+    if device is None:
+        device = t.device
+    t = t.to(device)
+    # Create a (B, dim//2) matrix of frequencies
+    half = dim // 2
+    freq = 10000 ** (torch.arange(half, device=device, dtype=t.dtype) / half)
+    angles = t.unsqueeze(1) * freq  # (B, half)
+    emb = torch.cat([torch.sin(angles), torch.cos(angles)], dim=1)
+    return emb  # (B, dim)
+
+
+class VelocityNet(nn.Module):
+    """
+    Simple MLP: input = [x; time_embed], output = velocity b_t(x)
+    """
+
+    def __init__(self, x_dim=784, time_emb_dim=16, hidden_dim=512):
+        super().__init__()
+        in_dim = x_dim + time_emb_dim
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, x_dim),
+        )
+
+    def forward(self, x, t):
+        """
+        x: (B, x_dim)
+        t: (B,) scalar time in [0, 1]
+        """
+        t_emb = time_embedding(t, dim=self.net[0].in_features - x.shape[1])
+        inp = torch.cat([x, t_emb], dim=1)
+        return self.net(inp)
+```
+
+---
+
+**FILE: train.py**  
+```python
+#!/usr/bin/env python3
+"""
+Training script for the velocity model using the quadratic loss from the paper.
+"""
+
+import argparse
+import os
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+from model import VelocityNet
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def train(args):
+    # Data
+    transform = transforms.Compose([transforms.ToTensor()])
+    train_ds = datasets.MNIST(
+        root="./data", train=True, download=True, transform=transform
+    )
+    train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
+
+    # Model
+    net = VelocityNet().to(device)
+    optimizer = optim.Adam(net.parameters(), lr=args.lr)
+
+    # Training loop
+    for epoch in range(1, args.epochs + 1):
+        epoch_loss = 0.0
+        for xb, _ in train_dl:
+            xb = xb.view(xb.size(0), -1).to(device)  # (B, 784)
+            # Sample t ~ Uniform(0,1)
+            t = torch.rand(xb.size(0), device=device)
+
+            # Coupling: x0 = x1 + sigma * z
+            sigma = 0.1
+            z = torch.randn_like(xb)
+            x0 = xb + sigma * z
+            x1 = xb
+
+            # Interpolant
+            alpha = 1.0 - t
+            beta = t
+            I_t = alpha.unsqueeze(1) * x0 + beta.unsqueeze(1) * x1
+            dotI = -x0 + x1  # derivative of I_t
+
+            # Velocity prediction
+            b_pred = net(I_t, t)
+
+            # Loss: mean squared error to dotI
+            loss = ((b_pred - dotI) ** 2).mean()
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item() * xb.size(0)
+
+        epoch_loss /= len(train_dl.dataset)
+        print(f"Epoch {epoch}/{args.epochs}  Loss={epoch_loss:.6f}")
+
+    # Save model
+    os.makedirs("checkpoints", exist_ok=True)
+    torch.save(net.state_dict(), "checkpoints/velocity.pth")
+    print("Model saved to checkpoints/velocity.pth")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train velocity model")
+    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--lr", type=float, default=2e-4)
+    args = parser.parse_args()
+    train(args)
+```
+
+---
+
+**FILE: sample.py**  
+```python
+#!/usr/bin/env python3
+"""
+Generate samples by integrating the learned velocity field
+using a simple Euler solver.
+"""
+
+import argparse
+import os
+import torch
+import numpy as np
+from PIL import Image
+from model import VelocityNet
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def euler_integration(net, x0, steps=100):
+    """
+    Integrate the probability flow ODE:
+        dX_t = b_t(X_t) dt
+    using Euler with fixed step size.
+    """
+    dt = 1.0 / steps
+    x = x0.clone()
+    for step in range(steps):
+        t = torch.tensor(step / steps, dtype=x.dtype, device=device)
+        b = net(x, t.reshape(1))
+        x = x + dt * b
+    return x
+
+
+def main(args):
+    # Load network
+    net = VelocityNet().to(device)
+    net.load_state_dict(torch.load("checkpoints/velocity.pth", map_location=device))
+    net.eval()
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    for i in range(args.num_samples):
+        # Start from a random Gaussian vector
+        x0 = torch.randn(1, 784, device=device) * 1.0  # std=1
+
+        # Integrate
+        x1 = euler_integration(net, x0, steps=args.steps)
+
+        # Convert to image
+        img = x1.squeeze().cpu().numpy()
+        img = np.clip(img, 0.0, 1.0)
+        img = (img * 255).astype(np.uint8).reshape(28, 28)
+        im = Image.fromarray(img, mode="L")
+        im.save(os.path.join(args.output_dir, f"sample_{i:02d}.png"))
+        print(f"Saved sample {i:02d} to {args.output_dir}")
+
+    print("Sampling finished.")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Generate samples")
+    parser.add_argument("--num-samples", type=int, default=10)
+    parser.add_argument("--output-dir", type=str, default="samples")
+    parser.add_argument("--steps", type=int, default=100)
+    args = parser.parse_args()
+    main(args)
+```
+
+---
+
+**FILE: assets/asset_1.jpg**  
+*Placeholder image file – not required for running but kept to mimic the original paper layout.*  
+
+*(The actual binary content is omitted; the file is empty.)*  
+
+---
+
+**FILE: assets/asset_2.jpg**  
+*Placeholder image file – not required for running but kept to mimic the original paper layout.*  
+
+*(The actual binary content is omitted; the file is empty.)*  
+
+---
+
+**FILE: assets/asset_3.jpg**  
+*Placeholder image file – not required for running but kept to mimic the original paper layout.*  
+
+*(The actual binary content is omitted; the file is empty.)*  
+
+---
+
+**FILE: assets/asset_4.jpg**  
+*Placeholder image file – not required for running but kept to mimic the original paper layout.*  
+
+*(The actual binary content is omitted; the file is empty.)*  
+
+---
+
+**FILE: assets/asset_5.jpg**  
+*Placeholder image file – not required for running but kept to mimic the original paper layout.*  
+
+*(The actual binary content is omitted; the file is empty.)*  
+
+---
+
+**FILE: assets/asset_6.jpg**  
+*Placeholder image file – not required for running but kept to mimic the original paper layout.*  
+
+*(The actual binary content is omitted; the file is empty.)*  
+
+---

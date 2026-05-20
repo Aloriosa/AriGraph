@@ -1,0 +1,55 @@
+"""
+Minimal dataset loader based on HuggingFace `datasets`.
+Supports GSM8K, StrategyQA, TruthfulQA, ScienceQA.
+"""
+
+import datasets
+import os
+import json
+
+from pathlib import Path
+
+DATASETS = {
+    "gsm8k": ("gsm8k", "train"),
+    "strategyqa": ("strategyqa", "train"),
+    "truthfulqa": ("truthfulqa", "train"),
+    "scienceqa": ("scienceqa", "train"),
+}
+
+# Save a small config file so that train/eval can load the same split
+CONFIG_FILE = Path("dataset_config.json")
+
+def download_and_cache():
+    """Download all datasets and store a config file."""
+    cfg = {}
+    for name, (repo, split) in DATASETS.items():
+        ds = datasets.load_dataset(repo, split=split, cache_dir="datasets")
+        # Keep only a small subset for quick runs
+        ds = ds.shuffle(seed=42).select(range(2000))  # 2k examples
+        cfg[name] = {
+            "num_examples": len(ds),
+            "fields": ds.column_names,
+        }
+        ds.save_to_disk(f"datasets/{name}")
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
+    print("Datasets downloaded and cached.")
+
+def load_dataset(name, split="train"):
+    """Load a dataset from disk."""
+    path = Path(f"datasets/{name}")
+    if not path.exists():
+        raise FileNotFoundError(f"Dataset {name} not found. Run `python src/dataset.py --download` first.")
+    ds = datasets.load_from_disk(path)
+    return ds
+
+def parse_args():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--download", action="store_true")
+    return parser.parse_args()
+
+if __name__ == "__main__":
+    args = parse_args()
+    if args.download:
+        download_and_cache()

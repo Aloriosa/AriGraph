@@ -1,0 +1,25 @@
+# Reproduction of “Cramming 1568 Tokens into a Single Vector and Back Again”
+
+This repository implements the core idea of the paper **Cramming 1568 Tokens into a Single Vector and Back Again** by performing a per‑sample optimisation of trainable memory vectors (`[mem]`) for a frozen language model.
+
+The reproduction focuses on the following tasks:
+
+1. **Train a set of `[mem]` vectors** that encode a given text sequence.
+2. **Evaluate the decoding capacity** – the longest token sequence that can be reconstructed with a token‑level accuracy above a user‑defined threshold.
+3. **Compute the token‑gain and information‑gain** metrics defined in the paper.
+4. **Compare the empirical capacity with the theoretical upper bound** derived from the embedding dimensionality and vocabulary size.
+5. **Report how capacity scales with the number of `[mem]` vectors** (linear‑scaling trend).
+
+The script is designed to run on a single GPU (the container will use the available NVIDIA A10 GPU). It works with any HuggingFace causal‑LM checkpoint that exposes a tokenizer and a hidden‑size configuration. The default experiment uses `gpt2` and a short repeating sentence, but the script can be easily extended to larger models (e.g. Llama‑3‑1B) and longer texts.
+
+## Repository layout
+
+| File | Purpose |
+|------|---------|
+| `compress.py` | Main executable that runs all experiments and writes a comprehensive `results.json`. |
+| `sample_text.txt` | A longer (≈ 2000 tokens) repeating sentence used for the default experiment. |
+| `config.json` | JSON file describing the experiments that `compress.py` will run. |
+| `requirements.txt` | Python dependencies. |
+| `reproduce.sh` | Bash script that installs the environment and runs `compress.py`. |
+
+## Running the reproduction

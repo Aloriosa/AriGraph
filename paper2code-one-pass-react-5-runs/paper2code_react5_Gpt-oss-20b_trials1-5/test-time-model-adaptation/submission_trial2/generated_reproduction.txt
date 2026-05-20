@@ -1,0 +1,20 @@
+# Test‑Time Model Adaptation with Only Forward Passes (FOA)
+
+This repository contains a lightweight, fully reproducible implementation of the **FOA** method described in  
+*“Test‑Time Model Adaptation with Only Forward Passes”* (Niu et al., 2024).  
+The goal is to demonstrate how a ViT‑Base model can be adapted online at test time **without any backward
+propagation**, using only forward passes and a covariance‑matrix adaptation evolution strategy (CMA‑ES).
+
+## Features
+
+- **Forward‑only adaptation**: learns an input prompt with CMA‑ES, no gradients are used.
+- **Unsupervised fitness**: combines prediction entropy with CLS‑activation discrepancy.
+- **Back‑to‑source activation shifting**: aligns test CLS activations to the source distribution, updated dynamically per batch.
+- **Quantized model support**: optional 8‑bit dynamic quantization (6‑bit is not supported but the framework is ready for it).
+- **ImageNet‑C evaluation**: runs on the full ImageNet‑C dataset (severity level 5) and reports
+  Top‑1 accuracy and Expected Calibration Error (ECE).
+- **Reproducible script**: `reproduce.sh` installs all dependencies, downloads the dataset, runs
+  the full pipeline and writes the results to `results.txt`.
+
+> **Note**: The code is written to run on a GPU if available; otherwise it falls back to the CPU.
+> Running on a single RTX‑3090 can finish the evaluation in ~2 hours.

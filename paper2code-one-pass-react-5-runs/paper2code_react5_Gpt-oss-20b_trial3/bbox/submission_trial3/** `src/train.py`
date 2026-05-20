@@ -1,0 +1,94 @@
+"""
+Online adaptation training loop.
+"""
+
+import os
+import torch
+from tqdm import tqdm
+from transformers import logging
+logging.set_verbosity_error()
+
+from .dataset import load_dataset
+from .blackbox_llm import BlackBoxLLM
+from .adapter import Adapter
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def collate_batch(batch):
+    """Return prompts and answers."""
+    prompts = [ex["question"] if "question" in ex else ex["prompt"] for ex in batch]
+    answers = [ex["answer"] if "answer" in ex else ex["target"] for ex in batch]
+    return prompts, answers
+
+def train_one_epoch(adapter, blackbox, dataset, optimizer, k=3, max_len=64):
+    adapter.train()
+    total_loss = 0.0
+    for prompts, answers in tqdm(dataset, desc="Training"):
+        # Generate k candidates
+        candidates = []
+        for p in prompts:
+            cand = blackbox.generate(p, k=k, max_length=max_len)
+            candidates.append(cand)
+        # Build positive and negative lists
+        pos_texts = []  # prompt + answer
+        neg_texts = []  # prompt + each negative candidate
+        for p, a, cand in zip(prompts, answers, candidates):
+            pos_texts.append(f"{p} {a}")
+            # exclude the positive answer if it appears among candidates
+            for c in cand:
+                if c.strip() == a.strip():
+                    continue
+                neg_texts.append(f"{p} {c}")
+        if not neg_texts:
+            continue  # skip if no negatives
+        # Convert to tensors
+        with torch.no_grad():
+            pos_scores = adapter(pos_texts).to(DEVICE)
+            neg_scores = adapter(neg_texts).to(DEVICE)
+        # Reshape negatives back to (batch, n_neg)
+        n_neg = k  # approximate
+        neg_scores = neg_scores.view(-1, n_neg)
+        loss = Adapter.nce_loss(pos_scores, neg_scores)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+    return total_loss / len(dataset)
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", default="gsm8k", choices=["gsm8k","strategyqa","truthfulqa","scienceqa"])
+    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--k", type=int, default=3)
+    parser.add_argument("--lr", type=float, default=5e-6)
+    parser.add_argument("--max_len", type=int, default=64)
+    parser.add_argument("--ckpt_dir", default="checkpoints")
+    args = parser.parse_args()
+
+    os.makedirs(args.ckpt_dir, exist_ok=True)
+
+    # Load dataset
+    ds = load_dataset(args.dataset, split="train")
+    # Create DataLoader
+    from torch.utils.data import DataLoader
+    dataloader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_batch)
+
+    # Initialize models
+    blackbox = BlackBoxLLM(device=DEVICE)
+    adapter = Adapter().to(DEVICE)
+    optimizer = torch.optim.AdamW(adapter.parameters(), lr=args.lr)
+
+    for epoch in range(1, args.epochs+1):
+        loss = train_one_epoch(adapter, blackbox, dataloader, optimizer,
+                               k=args.k, max_len=args.max_len)
+        print(f"Epoch {epoch}/{args.epochs} | Loss: {loss:.4f}")
+        # Save checkpoint
+        ckpt_path = os.path.join(args.ckpt_dir, f"adapter_epoch{epoch}.pt")
+        torch.save(adapter.state_dict(), ckpt_path)
+
+    print("Training finished.")
+
+if __name__ == "__main__":
+    main()

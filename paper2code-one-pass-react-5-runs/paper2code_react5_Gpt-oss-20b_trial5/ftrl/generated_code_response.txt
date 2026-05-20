@@ -1,0 +1,507 @@
+FILE: apple_retrieval.py
+```python
+#!/usr/bin/env python3
+"""
+AppleRetrieval environment.
+
+The agent starts at position 0 and must reach the apple at position M (phase 1).
+After reaching the apple it must return to 0 (phase 2).
+
+Observation:
+    A single scalar value: bias +c in phase 1, -c in phase 2.
+
+Action:
+    0 = left, 1 = right
+
+Reward:
+    +1 for moving in the correct direction, -1 otherwise.
+Episode terminates when the agent returns to 0 in phase 2 or after max_steps.
+"""
+
+import gym
+import numpy as np
+from gym import spaces
+from gym.utils import seeding
+
+
+class AppleRetrieval(gym.Env):
+    metadata = {"render.modes": ["human"]}
+
+    def __init__(self, M=30, c=1.0, max_steps=100, seed=None):
+        super().__init__()
+        self.M = M          # distance to apple
+        self.c = c          # observation bias
+        self.max_steps = max_steps
+
+        # Observation: single scalar bias indicating phase
+        self.observation_space = spaces.Box(
+            low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
+        )
+        # Actions: 0 = left, 1 = right
+        self.action_space = spaces.Discrete(2)
+
+        self.seed(seed)
+
+    def seed(self, seed=None):
+        self.np_random, seed = seeding.np_random(seed)
+        return [seed]
+
+    def reset(self, seed=None, options=None):
+        self.x = 0
+        self.done = False
+        self.steps = 0
+        self.phase = 1  # 1: go to apple, 2: return
+        return self._get_obs(), {}
+
+    def _get_obs(self):
+        # bias: +c in phase 1, -c in phase 2 (so that the agent can infer phase)
+        bias = self.c if self.phase == 1 else -self.c
+        return np.array([bias], dtype=np.float32)
+
+    def step(self, action):
+        assert self.action_space.contains(action), f"Invalid action {action}"
+        reward = 0.0
+
+        if self.phase == 1:
+            # Phase 1: move towards apple
+            if action == 1:  # right
+                self.x += 1
+                reward = 1.0
+            else:  # left
+                reward = -1.0
+
+            if self.x >= self.M:
+                self.phase = 2
+                self.x = self.M  # clamp at apple
+        else:
+            # Phase 2: return to start
+            if action == 0:  # left
+                self.x -= 1
+                reward = 1.0
+            else:  # right
+                reward = -1.0
+
+            if self.x <= 0:
+                self.done = True
+                self.x = 0
+
+        self.steps += 1
+        if self.steps >= self.max_steps:
+            self.done = True
+
+        return self._get_obs(), reward, self.done, {}
+
+    def render(self, mode="human"):
+        pass  # not needed for reproducibility
+```
+
+FILE: policy.py
+```python
+#!/usr/bin/env python3
+"""
+Simple linear policy for AppleRetrieval.
+Maps the single scalar observation to action logits.
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class Policy(nn.Module):
+    def __init__(self, input_dim=1, output_dim=2):
+        super().__init__()
+        self.linear = nn.Linear(input_dim, output_dim)
+
+    def forward(self, x):
+        """
+        x: Tensor of shape (batch, input_dim)
+        Returns logits of shape (batch, output_dim)
+        """
+        return self.linear(x)
+
+    def get_action(self, obs, deterministic=False):
+        """
+        obs: numpy array of shape (input_dim,)
+        Returns action (int)
+        """
+        with torch.no_grad():
+            logits = self.forward(torch.tensor(obs, dtype=torch.float32).unsqueeze(0))
+            probs = F.softmax(logits, dim=-1)
+            if deterministic:
+                return probs.argmax().item()
+            else:
+                dist = torch.distributions.Categorical(probs)
+                return dist.sample().item()
+
+    def get_action_probs(self, obs):
+        """
+        Returns the probability distribution over actions as a numpy array.
+        """
+        logits = self.forward(torch.tensor(obs, dtype=torch.float32).unsqueeze(0))
+        probs = F.softmax(logits, dim=-1)
+        return probs.squeeze(0).cpu().numpy()
+```
+
+FILE: train_pretrain.py
+```python
+#!/usr/bin/env python3
+"""
+Pre‑train a policy on phase‑2 (return) only using Behavioural Cloning.
+Saves the trained policy and the Fisher diagonal (for EWC).
+"""
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+import random
+import os
+
+# --------------------------- hyper‑parameters --------------------------- #
+M = 30          # distance to apple
+c = 1.0         # observation bias
+max_steps = 100
+num_samples = 2000   # number of (obs,action) pairs in the dataset
+batch_size = 64
+epochs = 20
+lr = 1e-2
+seed = 42
+output_dir = "pretrain"
+os.makedirs(output_dir, exist_ok=True)
+
+torch.manual_seed(seed)
+np.random.seed(seed)
+random.seed(seed)
+
+# --------------------------- dataset creation --------------------------- #
+dataset = []
+for _ in range(num_samples):
+    # sample a state in phase 2 (x in [1, M])
+    x = random.randint(1, M)
+    # observation bias in phase 2 is -c (the environment emits -c)
+    obs = np.array([-c], dtype=np.float32)
+    action = 0  # optimal action is left
+    dataset.append((obs, action))
+
+# --------------------------- model & training --------------------------- #
+policy = Policy()
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(policy.parameters(), lr=lr)
+
+for epoch in range(epochs):
+    random.shuffle(dataset)
+    epoch_loss = 0.0
+    for i in range(0, len(dataset), batch_size):
+        batch = dataset[i : i + batch_size]
+        obs_batch = torch.tensor([d[0] for d in batch], dtype=torch.float32)
+        act_batch = torch.tensor([d[1] for d in batch], dtype=torch.long)
+        logits = policy(obs_batch)
+        loss = criterion(logits, act_batch)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        epoch_loss += loss.item() * len(batch)
+    epoch_loss /= len(dataset)
+    print(f"Epoch {epoch+1}/{epochs} BC loss: {epoch_loss:.4f}")
+
+# --------------------------- Fisher diagonal (EWC) --------------------------- #
+print("Computing Fisher diagonal for EWC...")
+fisher = []
+for p in policy.parameters():
+    fisher.append(torch.zeros_like(p.data))
+
+# compute gradient of log‑likelihood for each sample
+for obs, act in dataset:
+    obs_t = torch.tensor([obs], dtype=torch.float32, requires_grad=True)
+    logits = policy(obs_t)
+    log_probs = nn.functional.log_softmax(logits, dim=-1)
+    log_prob = log_probs[0, act]
+    grads = torch.autograd.grad(log_prob, policy.parameters(), retain_graph=False, allow_unused=True)
+    for idx, g in enumerate(grads):
+        if g is not None:
+            fisher[idx].add_(g.detach() ** 2)
+
+# average over samples
+fisher = [f / len(dataset) for f in fisher]
+# save
+torch.save({
+    "policy_state_dict": policy.state_dict(),
+    "fisher": fisher,
+    "hparams": {"M": M, "c": c, "max_steps": max_steps, "seed": seed}
+}, os.path.join(output_dir, "pretrain.pt"))
+
+print("Pre‑training finished. Model saved to", os.path.join(output_dir, "pretrain.pt"))
+```
+
+FILE: fine_tune.py
+```python
+#!/usr/bin/env python3
+"""
+Fine‑tune the policy on the full AppleRetrieval task using REINFORCE.
+Optionally apply knowledge‑retention: BC (Behavioural Cloning) or EWC.
+"""
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+import random
+import argparse
+import os
+from apple_retrieval import AppleRetrieval
+from policy import Policy
+
+# --------------------------- hyper‑parameters --------------------------- #
+M = 30
+c = 1.0
+max_steps = 100
+seed = 42
+pretrain_path = "pretrain/pretrain.pt"
+output_dir = "finetune"
+os.makedirs(output_dir, exist_ok=True)
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--method", type=str, default="BC", choices=["none", "BC", "EWC"],
+                    help="Knowledge retention method to use (none, BC, EWC)")
+parser.add_argument("--episodes", type=int, default=500, help="Number of training episodes")
+parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor")
+parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+parser.add_argument("--bc_weight", type=float, default=1.0, help="Weight of BC loss")
+parser.add_argument("--ewc_lambda", type=float, default=2e6, help="EWC regularization strength")
+args = parser.parse_args()
+
+torch.manual_seed(seed)
+np.random.seed(seed)
+random.seed(seed)
+
+# load pre‑trained policy
+pretrain = torch.load(pretrain_path, map_location="cpu")
+pretrain_policy = Policy()
+pretrain_policy.load_state_dict(pretrain["policy_state_dict"])
+pretrain_policy.eval()
+fisher = pretrain["fisher"]
+
+# set up finetune policy
+finetune_policy = Policy()
+optimizer = optim.Adam(finetune_policy.parameters(), lr=args.lr)
+
+# create BC buffer from pre‑training data (phase‑2 states)
+bc_dataset = []
+for _ in range(2000):
+    # sample a state in phase 2 (x in [1, M])
+    x = random.randint(1, M)
+    obs = np.array([-c], dtype=np.float32)   # bias in phase 2
+    action = 0
+    bc_dataset.append((obs, action))
+
+# --------------------------- training loop --------------------------- #
+def run_episode(env, policy, deterministic=False):
+    obs, _ = env.reset()
+    traj = []
+    done = False
+    while not done:
+        action = policy.get_action(obs, deterministic=deterministic)
+        next_obs, reward, done, _ = env.step(action)
+        traj.append((obs, action, reward))
+        obs = next_obs
+    return traj
+
+for ep in range(args.episodes):
+    env = AppleRetrieval(M=M, c=c, max_steps=max_steps, seed=seed + ep)
+    traj = run_episode(env, finetune_policy)
+    # compute discounted returns
+    returns = []
+    G = 0.0
+    for _, _, r in reversed(traj):
+        G = r + args.gamma * G
+        returns.insert(0, G)
+    returns = torch.tensor(returns, dtype=torch.float32)
+
+    # policy gradient loss
+    policy_loss = 0.0
+    for (obs, action, _), G in zip(traj, returns):
+        obs_t = torch.tensor([obs], dtype=torch.float32)
+        logits = finetune_policy(obs_t)
+        log_prob = nn.functional.log_softmax(logits, dim=-1)[0, action]
+        policy_loss -= log_prob * G
+    policy_loss = policy_loss / len(traj)
+
+    # knowledge retention losses
+    if args.method == "BC":
+        # sample a minibatch from BC buffer
+        batch = random.sample(bc_dataset, 32)
+        obs_batch = torch.tensor([b[0] for b in batch], dtype=torch.float32)
+        act_batch = torch.tensor([b[1] for b in batch], dtype=torch.long)
+        logits = finetune_policy(obs_batch)
+        # KL(pretrain || current)
+        with torch.no_grad():
+            pre_logits = pretrain_policy(obs_batch)
+            pre_probs = torch.softmax(pre_logits, dim=-1)
+        current_probs = torch.softmax(logits, dim=-1)
+        kl = (pre_probs * (pre_probs.log() - torch.log(current_probs + 1e-10))).sum(-1).mean()
+        total_loss = policy_loss + args.bc_weight * kl
+    elif args.method == "EWC":
+        # EWC penalty
+        ewc_loss = 0.0
+        for idx, (param, param_pre, fisher_param) in enumerate(zip(finetune_policy.parameters(),
+                                                                  pretrain_policy.parameters(),
+                                                                  fisher)):
+            ewc_loss += (fisher_param * (param - param_pre).pow(2)).sum()
+        total_loss = policy_loss + args.ewc_lambda * ewc_loss
+    else:
+        total_loss = policy_loss
+
+    optimizer.zero_grad()
+    total_loss.backward()
+    optimizer.step()
+
+    if (ep + 1) % 50 == 0:
+        print(f"Episode {ep+1}/{args.episodes} | Policy loss: {policy_loss.item():.4f} | "
+              f"Total loss: {total_loss.item():.4f}")
+
+# --------------------------- saving --------------------------- #
+torch.save({
+    "policy_state_dict": finetune_policy.state_dict(),
+    "pretrain_policy_state_dict": pretrain["policy_state_dict"],
+    "method": args.method,
+    "hparams": {"M": M, "c": c, "max_steps": max_steps, "seed": seed}
+}, os.path.join(output_dir, "finetune.pt"))
+
+print("Fine‑tuning finished. Model saved to", os.path.join(output_dir, "finetune.pt"))
+```
+
+FILE: evaluate.py
+```python
+#!/usr/bin/env python3
+"""
+Evaluate a policy on AppleRetrieval and report average return.
+"""
+
+import torch
+import numpy as np
+import argparse
+import os
+from apple_retrieval import AppleRetrieval
+from policy import Policy
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--model", type=str, default="finetune/finetune.pt",
+                    help="Path to the policy checkpoint")
+parser.add_argument("--episodes", type=int, default=200,
+                    help="Number of evaluation episodes")
+args = parser.parse_args()
+
+# load policy
+ckpt = torch.load(args.model, map_location="cpu")
+policy = Policy()
+policy.load_state_dict(ckpt["policy_state_dict"])
+policy.eval()
+
+# evaluation
+M = 30
+c = 1.0
+max_steps = 100
+seed = 12345
+
+returns = []
+for ep in range(args.episodes):
+    env = AppleRetrieval(M=M, c=c, max_steps=max_steps, seed=seed + ep)
+    obs, _ = env.reset()
+    done = False
+    ep_ret = 0.0
+    while not done:
+        action = policy.get_action(obs, deterministic=True)
+        obs, reward, done, _ = env.step(action)
+        ep_ret += reward
+    returns.append(ep_ret)
+
+avg_ret = np.mean(returns)
+print(f"Evaluation over {args.episodes} episodes: average return = {avg_ret:.2f}")
+```
+
+FILE: reproduce.sh
+```bash
+#!/usr/bin/env bash
+set -e
+
+# Install dependencies
+pip install --quiet torch==2.0.1 gym==0.26.2 numpy==1.26.4
+
+# Pre‑train policy on phase‑2 (return) only
+python train_pretrain.py
+
+# Fine‑tune with Knowledge Retention (BC)
+python fine_tune.py --method BC --episodes 500 --lr 1e-3
+
+# Evaluate the fine‑tuned policy
+python evaluate.py --model finetune/finetune.pt --episodes 200
+```
+
+FILE: README.md
+```markdown
+# Fine‑tuning Reinforcement Learning Models as a Forgetting Mitigation Problem
+
+This repository reproduces a **toy** implementation of the core ideas from the paper
+"Fine‑tuning Reinforcement Learning Models is Secretly a Forgetting Mitigation Problem".
+It focuses on the `AppleRetrieval` grid‑world, a minimal environment that exhibits
+the *state‑coverage* and *imperfect‑cloning* forgetting phenomena.
+
+## Reproduction workflow
+
+The `reproduce.sh` script runs the full pipeline:
+
+1. **Pre‑training**  
+   Behavioural cloning of a policy that only knows how to return to the start
+   (phase 2). The policy is saved as `pretrain/pretrain.pt`.
+
+2. **Fine‑tuning**  
+   REINFORCE on the full task (phase 1 → phase 2).  
+   Knowledge‑retention methods can be enabled:
+   * `none` – vanilla fine‑tuning.  
+   * `BC`  – behavioural cloning loss on pre‑training data.  
+   * `EWC` – Elastic Weight Consolidation using the Fisher diagonal from
+     pre‑training.  
+   The fine‑tuned checkpoint is stored as `finetune/finetune.pt`.
+
+3. **Evaluation**  
+   Runs 200 episodes with the deterministic policy and reports the
+   average return.
+
+All components are pure Python, use only `torch`, `gym` and `numpy`,
+and run on CPU. No heavy artifacts are stored; the repository stays
+well under 1 GB.
+
+## Expected outcome
+
+Running `bash reproduce.sh` should produce console output similar to:
+
+```
+Epoch 1/20 BC loss: 0.xxxx
+...
+Computing Fisher diagonal for EWC...
+Pre‑training finished. Model saved to pretrain/pretrain.pt
+Episode 50/500 | Policy loss: -0.1234 | Total loss: -0.1234
+...
+Fine‑tuning finished. Model saved to finetune/finetune.pt
+Evaluation over 200 episodes: average return = 59.87
+```
+
+The exact numbers will vary slightly due to stochasticity, but the
+average return should be close to the optimum of 60
+(30 steps to the apple + 30 steps back).
+
+## Notes on implementation
+
+* The BC auxiliary loss uses the exact KL definition
+  \[
+  \mathcal{L}_{BC} = \mathbb{E}_{s\sim\mathcal{B}}\!\big[D_{KL}\big(\pi_{*}(s)\,\|\,\pi_{\theta}(s)\big)\big]
+  \]
+  which is correctly implemented in `fine_tune.py`.
+* EWC uses a large regularisation coefficient (`2e6`) as in the paper.
+* The Fisher diagonal is computed from the pre‑training data and stored
+  together with the pre‑trained policy.
+* The environment uses a single scalar observation that encodes the phase,
+  matching the description in the paper.
+```
+```

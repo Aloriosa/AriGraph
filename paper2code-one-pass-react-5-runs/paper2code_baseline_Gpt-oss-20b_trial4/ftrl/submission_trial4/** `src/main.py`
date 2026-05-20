@@ -1,0 +1,75 @@
+import os
+import argparse
+import numpy as np
+import torch
+
+from .env import TwoStateMDP
+from .policy import PolicyNet
+from .trainer import Trainer
+from .ewc import EWC
+from .bc import BCBuffer
+
+def main(args):
+    torch.manual_seed(42)
+    np.random.seed(42)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Create environment
+    env = TwoStateMDP(max_steps=20)
+
+    # Create policy
+    policy = PolicyNet().to(device)
+
+    trainer = Trainer(lr=1e-2, gamma=0.99, device=device)
+
+    # ---------- Pre‑training ----------
+    print("\n=== Pre‑training on FAR state only ===")
+    bc_buffer, teacher_state = trainer.pretrain(env, policy, episodes=200, log_every=50)
+
+    # ---------- Fine‑tuning ----------
+    print("\n=== Fine‑tuning (Vanilla) ===")
+    returns_vanilla = trainer.finetune(
+        env, PolicyNet().to(device), teacher_state,
+        method="vanilla", epochs=400, log_every=100
+    )
+
+    print("\n=== Fine‑tuning + EWC ===")
+    # Re‑instantiate policy for fair comparison
+    ewc_policy = PolicyNet().to(device)
+    # Compute EWC after pre‑training
+    ewc_obj = EWC(ewc_policy, fisher_samples=200, device=device)
+    ewc_policy.load_state_dict(teacher_state)
+    returns_ewc = trainer.finetune(
+        env, ewc_policy, teacher_state,
+        ewc=ewc_obj, method="ewc", epochs=400, log_every=100
+    )
+
+    print("\n=== Fine‑tuning + BC ===")
+    bc_policy = PolicyNet().to(device)
+    bc_policy.load_state_dict(teacher_state)
+    returns_bc = trainer.finetune(
+        env, bc_policy, teacher_state,
+        bc_buffer=bc_buffer, method="bc", epochs=400, log_every=100
+    )
+
+    # ---------- Save summary ----------
+    os.makedirs(args.output_dir, exist_ok=True)
+    summary_path = os.path.join(args.output_dir, "summary.txt")
+    with open(summary_path, "w") as f:
+        f.write("Method\tAvgReturn\n")
+        for name, returns in [
+            ("Vanilla", returns_vanilla),
+            ("EWC", returns_ewc),
+            ("BC", returns_bc),
+        ]:
+            avg_ret = np.mean(returns[-10:])
+            f.write(f"{name}\t{avg_ret:.3f}\n")
+    print(f"\nSummary written to {summary_path}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Reproduce forgetting mitigation demo.")
+    parser.add_argument("--output-dir", type=str, default="results",
+                        help="Directory to store results")
+    args = parser.parse_args()
+    main(args)

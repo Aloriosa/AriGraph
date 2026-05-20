@@ -1,0 +1,37 @@
+import torch
+import torch.nn.functional as F
+
+class BCBuffer:
+    """
+    Stores state–action pairs from the pre‑training phase.
+    """
+    def __init__(self, states, actions):
+        self.states = torch.tensor(states, dtype=torch.long)
+        self.actions = torch.tensor(actions, dtype=torch.long)
+
+    def sample(self, batch_size):
+        idx = torch.randint(0, len(self.states), (batch_size,))
+        return self.states[idx], self.actions[idx]
+
+class BCLoss:
+    """
+    Computes the KL‑divergence between teacher (pre‑trained) and student policies
+    on a minibatch of stored states.
+    """
+    def __init__(self, teacher, student, alpha=1.0):
+        self.teacher = teacher
+        self.student = student
+        self.alpha = alpha
+
+    def __call__(self, states):
+        with torch.no_grad():
+            teacher_logits = self.teacher(states)
+            teacher_log_probs = F.log_softmax(teacher_logits, dim=-1)
+        student_logits = self.student(states)
+        student_log_probs = F.log_softmax(student_logits, dim=-1)
+        # KL divergence: sum over actions, then mean over batch
+        kl = F.kl_div(
+            student_log_probs, F.softmax(teacher_logits, dim=-1),
+            reduction="batchmean", log_target=True
+        )
+        return self.alpha * kl

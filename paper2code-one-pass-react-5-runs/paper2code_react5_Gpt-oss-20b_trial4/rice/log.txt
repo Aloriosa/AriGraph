@@ -1,0 +1,193 @@
+2026-03-14 16:07:39.658074 ======================================================================
+2026-03-14 16:07:39.658214 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 16:07:39.658307 ======================================================================
+2026-03-14 16:07:39.658376 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/rice/paper.md
+2026-03-14 16:07:39.658412 Log path: paper2code_react5_Gpt-oss-20b_trial4/rice
+2026-03-14 16:07:39.658446 Model: Openai/Gpt-oss-20b
+2026-03-14 16:07:39.658480 Max iterations: 5
+2026-03-14 16:07:39.658516 Run reproduce.sh: False
+2026-03-14 16:07:39.658569 Run LLM paper check: True
+2026-03-14 16:07:39.658603 
+2026-03-14 16:07:39.658649 Loading paper...
+2026-03-14 16:07:39.659024 Paper length: 106166 chars (using 106166 for prompt)
+2026-03-14 16:07:39.659108 
+2026-03-14 16:07:39.677763 --- Iteration 0: Initial generation ---
+2026-03-14 16:08:33.744688   Created: generated_reproduction.txt
+2026-03-14 16:08:33.744850 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial4/rice/submission (1 files)
+2026-03-14 16:08:33.744909 
+2026-03-14 16:08:33.744965 --- Iteration 1: Observe & Refine ---
+2026-03-14 16:08:36.743125 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core RICE algorithm implementation (roll‑in + exploration, mixed initial state distribution, explanation‑based critical state selection)  
+MISSING: StateMask or alternative explanation method implementation and integration  
+MISSING: Hyperparameter definitions (learning rate, batch size, discount factor, exploration bonus, etc.)  
+MISSING: Data / environment setup (MuJoCo games, cryptocurrency mining, cyber‑defense, autonomous driving, malware mutation)  
+MISSING: Evaluation protocol (metrics, baselines such as JSRL, StateMask‑R, PPO++, etc.)  
+MISSING: Training loop with checkpointing, number of steps, hardware specifications  
+MISSING: `reproduce.sh` or equivalent script to run the full pipeline and generate the paper’s results  
+MISSING: Documentation of theoretical guarantees and sub‑optimality bound implementation  
+MISSING: Logging / result aggregation for comparison with paper figures/tables  
+
+No INCORRECT or PARTIAL items are present because the provided code only contains a `requirements.txt` file.  
+
+**ALL_OK:** No. The reproduction is incomplete.
+2026-03-14 16:08:36.743286 
+2026-03-14 16:08:36.743465 Generating refined code...
+2026-03-14 16:09:28.127367   Updated: requirements.txt
+2026-03-14 16:09:28.127485   Updated: reproduce.sh
+2026-03-14 16:09:28.127551   Updated: README.md
+2026-03-14 16:09:28.127611   Updated: src/__init__.py
+2026-03-14 16:09:28.127670   Updated: src/utils.py
+2026-03-14 16:09:28.127731   Updated: src/rnd_wrapper.py
+2026-03-14 16:09:28.127797   Updated: src/train.py
+2026-03-14 16:09:28.127834 
+2026-03-14 16:09:28.127869 --- Iteration 2: Observe & Refine ---
+2026-03-14 16:09:40.992629 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- State‑mask style explanation method (step‑level importance scores) used to identify *critical* states.  
+- The new objective function and reward bonus for “blinding” introduced in the paper.  
+- Theoretical sub‑optimality analysis and its implementation.  
+- Evaluation on the MuJoCo benchmarks and the four real‑world tasks (crypto mining, cyber defense, autonomous driving, malware mutation).  
+- Comparison with the JSRL baseline and other state‑of‑the‑art refining schemes.  
+- Exact hyper‑parameter settings (learning rate, batch size, number of steps, exploration coefficient, etc.) reported in the paper.  
+- The “roll‑in” + “exploration” procedure as described (reset to critical states, then run a full episode with the refined policy).  
+- The mixed initial state distribution that blends default initial states with *explanation‑derived* critical states (currently it samples uniformly from all visited states).  
+- The use of the pre‑trained policy’s guidance for curriculum design (as in JSRL).  
+- Hardware / training‑time details (e.g., GPU type, total training steps, checkpointing).  
+
+**INCORRECT**  
+- The code uses a Random Network Distillation (RND) bonus instead of the paper’s explanation‑based exploration bonus.  
+- Critical states are collected by simply recording every visited state, not by applying the StateMask explanation.  
+- The environment is CartPole‑v1, whereas the paper evaluates on MuJoCo and real‑world domains.  
+- Training durations (10 k / 20 k timesteps) are arbitrary and not aligned with the paper’s reported training budgets.  
+- The reward bonus for encouraging “blinding” is absent.  
+- The policy architecture is a generic MLP; the paper may use a different network or hyper‑parameters.  
+
+**PARTIAL**  
+- Mixed initial state distribution is implemented, but it is based on random sampling from all visited states rather than explanation‑derived critical states.  
+- The training loop and evaluation metrics (average return) are present, but the protocol (number of episodes, evaluation frequency) does not match the paper.  
+- Seed setting and reproducibility utilities are included, but full reproducibility (e.g., deterministic environment seeds, GPU seeding) is not guaranteed.  
+
+**OK**  
+- Basic structure of training a baseline PPO agent, fine‑tuning it, and writing results to `output.txt`.  
+- The `reproduce.sh` script installs dependencies and runs the training script.  
+
+**Conclusion**  
+The current code reproduces only a toy version of the idea (PPO + RND + random critical states on CartPole). It does **not** implement the core RICE algorithm as described in the paper. Significant additions and corrections are required to match the paper’s methodology and experimental results.
+2026-03-14 16:09:40.992853 
+2026-03-14 16:09:40.993014 Generating refined code...
+2026-03-14 16:11:12.529165   Updated: generated_reproduction.txt
+2026-03-14 16:11:12.529258 
+2026-03-14 16:11:12.529305 --- Iteration 3: Observe & Refine ---
+2026-03-14 16:11:25.193606 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Implementation of the StateMask explanation method (step‑level explanation to identify critical states).  
+- Use of the explanation output to select *critical* states rather than collecting all visited states.  
+- The new reward bonus for encouraging “blinding” as described in the paper.  
+- Evaluation on the MuJoCo environments and real‑world tasks (cryptocurrency mining, cyber‑defense, autonomous driving, malware mutation) that the paper reports.  
+- Any hyper‑parameter values or training schedules that the paper claims to use (e.g., number of training steps, learning rates, exploration coefficients).  
+- The theoretical analysis or sub‑optimality bound guarantees (not required for code but part of the paper’s contribution).  
+
+**INCORRECT**  
+- The “critical states” used for the mixed initial distribution are simply all states visited by the baseline policy; the paper requires states identified by an explanation method.  
+- The exploration bonus is implemented via Random Network Distillation (RND) instead of the paper’s proposed explanation‑based bonus.  
+- The roll‑in step is not explicitly separated from the exploration step as described; the wrapper conflates them.  
+
+**PARTIAL**  
+- Mixed initial state distribution is implemented, but it is based on a random subset of all visited states rather than on explanation‑derived critical states.  
+- The overall RICE pipeline (baseline training → collect states → fine‑tune with mixed init + exploration bonus) is present, but the key explanation component is missing.  
+
+**OK**  
+- Baseline PPO training and fine‑tuning are implemented.  
+- Reproducible seeding and simple evaluation routine are present.  
+- The `reproduce.sh` script runs the full pipeline and writes results to `output.txt`.  
+
+**Conclusion**  
+The current code reproduces only a very simplified version of RICE that lacks the core explanation‑based critical state selection and the specific exploration bonus described in the paper. To match the paper’s contribution, the StateMask explanation module, critical state extraction, and the associated reward bonus must be added, and the experiments should be run on the environments cited in the paper.
+2026-03-14 16:11:25.193865 
+2026-03-14 16:11:25.194032 Generating refined code...
+2026-03-14 16:12:05.806304   Updated: generated_reproduction.txt
+2026-03-14 16:12:05.806413 
+2026-03-14 16:12:05.806453 --- Iteration 4: Observe & Refine ---
+2026-03-14 16:12:25.107643 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Explanation method (StateMask or the paper’s alternative design) – no implementation of step‑level explanation or critical‑state extraction.  
+- Critical‑state identification via explanation – the code simply collects *all* visited states.  
+- Exploration step that uses the mixed initial distribution to drive policy improvement (beyond the RND bonus).  
+- Theoretical analysis / sub‑optimality bound – not reproduced.  
+- Evaluation on the MuJoCo games and real‑world tasks described in the paper.  
+- Baseline comparisons (JSRL, StateMask‑R, etc.) – only a single PPO baseline is trained.  
+- Reward bonus for encouraging “blinding” (the paper’s new bonus) – not implemented.  
+- Reformulated objective function for the explanation module – missing.  
+
+**INCORRECT**  
+- Mixed initial state distribution logic: uses all visited states as “critical” instead of the explanation‑selected subset.  
+- RND is used as an exploration bonus, but RICE’s core idea is to use explanation‑derived states, not RND.  
+- Hyperparameters (learning rate, batch size, timesteps) are arbitrary and not aligned with the paper’s settings.  
+- Policy architecture: the paper’s method is generic, but the code uses the default `MlpPolicy` from stable‑baselines3 without any custom architecture.  
+- Training steps: the paper reports training on complex tasks with many millions of steps; the code uses only 10k/20k steps on CartPole.  
+- Evaluation protocol: the paper evaluates on multiple environments with statistical significance; the code reports a single mean reward over 10 episodes.  
+
+**PARTIAL**  
+- RND wrapper implements an exploration bonus, which is a component of RICE but not the full method.  
+- Mixed initial distribution is partially implemented (probability `p` to reset to a stored state), but the selection of states is not based on explanation.  
+- Seed setting and reproducibility utilities are present but not tied to the paper’s experimental protocol.  
+
+**Conclusion**  
+The current code reproduces only a very small, unrelated fragment of the RICE framework. It lacks the core explanation‑based refinement, the correct mixed‑initial distribution, the exploration frontiers, and the evaluation on the tasks described in the paper. Significant additions and corrections are required before it can be considered a faithful reproduction.
+2026-03-14 16:12:25.107857 
+2026-03-14 16:12:25.107991 Generating refined code...
+2026-03-14 16:13:29.877431   Updated: generated_reproduction.txt
+2026-03-14 16:13:29.877536 
+2026-03-14 16:13:29.877577 --- Iteration 5: Observe & Refine ---
+2026-03-14 16:13:38.069214 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Explanation method (StateMask or its improved variant) used to identify *critical* states.  
+- Reward bonus for “blinding” or any other intrinsic reward derived from the explanation.  
+- Theoretical sub‑optimality bound or any code that verifies it.  
+- Evaluation on the MuJoCo environments and the four real‑world tasks mentioned in the paper.  
+- Baselines such as JSRL, StateMask‑R, or PPO++ for comparison.  
+- Hyperparameter settings (learning rates, batch sizes, etc.) that match the paper’s experiments.  
+- Proper handling of the initial state distribution for the mixed distribution (the paper mixes default initial states with *explanation‑selected* critical states, not all visited states).  
+- Any logging or checkpointing that reproduces the paper’s reported results.  
+
+**INCORRECT**  
+- The code uses Random Network Distillation (RND) for exploration bonus, whereas the paper’s RICE uses an explanation‑derived exploration frontier.  
+- Critical states are collected as *all* states visited by the baseline policy, not filtered by explanation.  
+- The environment used is CartPole‑v1, whereas the paper evaluates on MuJoCo and real‑world domains.  
+
+**PARTIAL**  
+- The roll‑in step (resetting to a critical state with probability `p`) is implemented, but the selection of critical states is not based on explanation.  
+- The exploration step is implicitly handled by RND, but the paper’s exploration strategy is different.  
+- The code sets a global seed, but does not fully seed the gymnasium environment in a reproducible way for all versions.  
+
+**OK**  
+- The overall pipeline (train baseline → collect states → fine‑tune with mixed init and exploration bonus → evaluate) is present.  
+- The `reproduce.sh` script installs dependencies and runs the training script.  
+
+**Recommendation**  
+To match the paper, implement the StateMask explanation, use it to filter critical states, add the appropriate reward bonus, and evaluate on the specified environments with the reported hyperparameters and baselines.
+2026-03-14 16:13:38.069387 
+2026-03-14 16:13:38.069502 Generating refined code...
+2026-03-14 16:14:38.657344   Updated: generated_reproduction.txt
+2026-03-14 16:14:38.657431 
+2026-03-14 16:14:38.657470 ======================================================================
+2026-03-14 16:14:38.657519 REACT BASELINE COMPLETE
+2026-03-14 16:14:38.657550 ======================================================================
+2026-03-14 16:14:38.657585 Total iterations: 6
+2026-03-14 16:14:38.657618 API tokens: 41649 completion, 211647 prompt
+2026-03-14 16:14:38.657649 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial4/rice/generated_code_response.txt

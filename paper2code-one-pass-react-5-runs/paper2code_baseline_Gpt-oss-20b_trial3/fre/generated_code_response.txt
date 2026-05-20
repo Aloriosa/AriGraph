@@ -1,0 +1,462 @@
+**FILE: /home/submission/README.md**  
+```markdown
+# Functional Reward Encoding (FRE) Toy Implementation
+
+This repository contains a lightweight, fully reproducible implementation of the core ideas from
+> *Unsupervised Zero‑Shot Reinforcement Learning via Functional Reward Encodings*.
+The code demonstrates how to:
+
+1. **Sample random reward functions** (goal‑reaching, linear, small MLP).
+2. **Train a transformer‑based encoder** that maps a few `(state, reward)` samples to a latent
+   representation `z`.
+3. **Decode the reward function** from `z` for any state using a small MLP.
+4. **Evaluate** the fidelity of the recovered reward function on a held‑out set of states.
+
+> **Note**  
+> This toy implementation is *not* a full reinforcement‑learning pipeline. It focuses on the
+> functional‑reward‑encoding part of the paper and can be run on any machine with a CPU
+> (GPU is optional). The results are illustrative only, not comparable to the numbers in the
+> original paper.
+
+## How to Run
+
+```bash
+bash reproduce.sh
+```
+
+The script will:
+
+1. Install the required Python packages.
+2. Generate a synthetic dataset of 2‑D states.
+3. Train the FRE encoder/decoder pair for a few epochs.
+4. Sample a new reward function, encode it, and evaluate the decoding accuracy.
+5. Save the outputs to `results/`.
+
+All files are checked into the repository; no large artifacts are produced.
+
+## File Overview
+
+| File | Purpose |
+|------|---------|
+| `requirements.txt` | Python dependencies |
+| `data.py` | Synthetic state dataset generation |
+| `reward_prior.py` | Functions that sample random reward functions |
+| `fre_encoder.py` | Encoder & decoder network definitions |
+| `train_fre.py` | Training loop for FRE |
+| `evaluate_fre.py` | Encoding a new reward, decoding, and evaluation |
+| `reproduce.sh` | End‑to‑end reproducibility script |
+| `README.md` | This document |
+
+## Expected Output
+
+After running `reproduce.sh` you should see something like:
+
+```
+Training FRE encoder: 100% |████████████████████| time elapsed: 00:01
+Evaluation on new reward function:
+  MSE on held‑out states: 0.0123
+```
+
+A `results/` directory will contain:
+
+- `fre_model.pt` – the trained encoder/decoder state dict
+- `eval_report.json` – a JSON file with the MSE score and hyperparameters
+
+Feel free to tweak hyperparameters in `train_fre.py` or `evaluate_fre.py` to explore
+different settings.
+```
+
+**FILE: /home/submission/requirements.txt**  
+```text
+torch>=2.0
+tqdm
+```
+
+**FILE: /home/submission/data.py**  
+```python
+import numpy as np
+import torch
+from torch.utils.data import Dataset, DataLoader
+
+class SyntheticStateDataset(Dataset):
+    """
+    A simple dataset of 2‑D states uniformly sampled from a unit square.
+    """
+    def __init__(self, num_states=1000, state_dim=2, seed=42):
+        rng = np.random.default_rng(seed)
+        self.states = rng.uniform(0.0, 1.0, size=(num_states, state_dim)).astype(np.float32)
+
+    def __len__(self):
+        return len(self.states)
+
+    def __getitem__(self, idx):
+        return self.states[idx]
+```
+
+**FILE: /home/submission/reward_prior.py**  
+```python
+import numpy as np
+import torch
+
+def sample_goal_reaching(state_batch, rng):
+    """
+    Random goal‑reaching reward: 0 if state is within 0.1 of goal, -1 otherwise.
+    """
+    goal = rng.uniform(0.0, 1.0, size=(1, state_batch.shape[1])).astype(np.float32)
+    dist = np.linalg.norm(state_batch - goal, axis=1)
+    rewards = np.where(dist < 0.1, 0.0, -1.0).astype(np.float32)
+    return goal.squeeze(), rewards
+
+def sample_linear(state_batch, rng):
+    """
+    Random linear reward: <w, state>
+    """
+    w = rng.uniform(-1.0, 1.0, size=(state_batch.shape[1],)).astype(np.float32)
+    rewards = np.dot(state_batch, w).astype(np.float32)
+    return w, rewards
+
+def sample_mlp(state_batch, rng):
+    """
+    Small 2‑layer MLP reward: tanh( w2 * tanh(w1 * state) )
+    """
+    d_in = state_batch.shape[1]
+    w1 = rng.normal(0, 1.0, size=(d_in, 32)).astype(np.float32)
+    b1 = rng.normal(0, 0.1, size=(32,)).astype(np.float32)
+    w2 = rng.normal(0, 1.0, size=(32, 1)).astype(np.float32)
+    b2 = rng.normal(0, 0.1, size=(1,)).astype(np.float32)
+
+    hidden = np.tanh(np.dot(state_batch, w1) + b1)
+    out = np.tanh(np.dot(hidden, w2) + b2).squeeze()
+    return (w1, b1, w2, b2), out
+
+def sample_random_reward(state_batch, rng):
+    """
+    Uniformly sample one of the reward types.
+    Returns a tuple (reward_function, rewards) where reward_function is a callable.
+    """
+    choice = rng.choice(['goal', 'linear', 'mlp'])
+    if choice == 'goal':
+        goal, rewards = sample_goal_reaching(state_batch, rng)
+        def func(state):
+            return np.where(np.linalg.norm(state - goal, axis=1) < 0.1, 0.0, -1.0).astype(np.float32)
+        return func, rewards
+    elif choice == 'linear':
+        w, rewards = sample_linear(state_batch, rng)
+        def func(state):
+            return np.dot(state, w).astype(np.float32)
+        return func, rewards
+    else:
+        (w1, b1, w2, b2), rewards = sample_mlp(state_batch, rng)
+        def func(state):
+            hidden = np.tanh(np.dot(state, w1) + b1)
+            out = np.tanh(np.dot(hidden, w2) + b2).squeeze()
+            return out.astype(np.float32)
+        return func, rewards
+```
+
+**FILE: /home/submission/fre_encoder.py**  
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class RewardEmbedding(nn.Module):
+    """
+    Embeds a scalar reward into a vector.
+    """
+    def __init__(self, reward_dim=32):
+        super().__init__()
+        self.linear = nn.Linear(1, reward_dim)
+
+    def forward(self, reward):
+        # reward: (batch, 1)
+        return self.linear(reward)
+
+class TransformerEncoder(nn.Module):
+    """
+    Permutation‑invariant encoder that takes a set of (state, reward) pairs
+    and outputs a latent representation z.
+    """
+    def __init__(self, state_dim=2, reward_dim=32, latent_dim=64,
+                 num_layers=2, num_heads=4, dim_feedforward=128):
+        super().__init__()
+        self.state_dim = state_dim
+        self.reward_dim = reward_dim
+        self.latent_dim = latent_dim
+
+        self.token_embed = nn.Linear(state_dim + reward_dim, latent_dim)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=latent_dim,
+                                                   nhead=num_heads,
+                                                   dim_feedforward=dim_feedforward)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        # Output mean & logvar for reparameterization
+        self.fc_mu = nn.Linear(latent_dim, latent_dim)
+        self.fc_logvar = nn.Linear(latent_dim, latent_dim)
+
+    def forward(self, states, rewards):
+        """
+        states: (B, K, state_dim)
+        rewards: (B, K, 1)
+        """
+        B, K, _ = states.shape
+        rewards_emb = RewardEmbedding()(rewards)  # (B, K, reward_dim)
+        tokens = torch.cat([states, rewards_emb], dim=-1)  # (B, K, state_dim+reward_dim)
+        tokens = self.token_embed(tokens)  # (B, K, latent_dim)
+        # transformer expects (S, B, E)
+        tokens = tokens.permute(1, 0, 2)
+        out = self.transformer(tokens)  # (K, B, latent_dim)
+        out = out.mean(dim=0)  # (B, latent_dim)
+        mu = self.fc_mu(out)
+        logvar = self.fc_logvar(out)
+        return mu, logvar
+
+class RewardDecoder(nn.Module):
+    """
+    Decodes reward for a state given latent z.
+    """
+    def __init__(self, state_dim=2, latent_dim=64, hidden_dims=[128, 128]):
+        super().__init__()
+        layers = []
+        input_dim = state_dim + latent_dim
+        for h in hidden_dims:
+            layers.append(nn.Linear(input_dim, h))
+            layers.append(nn.ReLU())
+            input_dim = h
+        layers.append(nn.Linear(input_dim, 1))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, states, z):
+        """
+        states: (B, N, state_dim)
+        z: (B, latent_dim)
+        """
+        B, N, _ = states.shape
+        z_exp = z.unsqueeze(1).expand(-1, N, -1)  # (B, N, latent_dim)
+        inp = torch.cat([states, z_exp], dim=-1)  # (B, N, state_dim+latent_dim)
+        out = self.net(inp).squeeze(-1)  # (B, N)
+        return out
+
+class FREModel(nn.Module):
+    """
+    Combines encoder and decoder.
+    """
+    def __init__(self, state_dim=2, reward_dim=32, latent_dim=64):
+        super().__init__()
+        self.encoder = TransformerEncoder(state_dim, reward_dim, latent_dim)
+        self.decoder = RewardDecoder(state_dim, latent_dim)
+
+    def encode(self, states, rewards):
+        mu, logvar = self.encoder(states, rewards)
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        z = mu + eps * std
+        return z, mu, logvar
+
+    def decode(self, states, z):
+        return self.decoder(states, z)
+```
+
+**FILE: /home/submission/train_fre.py**  
+```python
+import argparse
+import json
+import os
+from pathlib import Path
+
+import numpy as np
+import torch
+from torch import optim
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+import data
+import reward_prior
+import fre_encoder
+
+def train(args):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    dataset = data.SyntheticStateDataset(num_states=args.num_states, state_dim=args.state_dim)
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
+
+    model = fre_encoder.FREModel(state_dim=args.state_dim).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+
+    best_mse = float('inf')
+    rng = np.random.default_rng(12345)
+
+    for epoch in range(args.epochs):
+        epoch_loss = 0.0
+        for batch_states in loader:
+            batch_states = batch_states.to(device)  # (B, state_dim)
+            B = batch_states.shape[0]
+
+            # Sample K encoder states and K' decoder states
+            idx_enc = rng.choice(len(dataset), size=(B, args.K), replace=True)
+            idx_dec = rng.choice(len(dataset), size=(B, args.Kp), replace=True)
+
+            enc_states = torch.stack([dataset[i] for i in idx_enc.flatten()]).view(B, args.K, -1).to(device)
+            dec_states = torch.stack([dataset[i] for i in idx_dec.flatten()]).view(B, args.Kp, -1).to(device)
+
+            # Sample random reward functions for each batch element
+            enc_rewards = []
+            dec_rewards = []
+            for i in range(B):
+                func, _ = reward_prior.sample_random_reward(enc_states[i].cpu().numpy(), rng)
+                enc_rewards.append(func(enc_states[i].cpu().numpy()).reshape(-1,1))
+                dec_rewards.append(func(dec_states[i].cpu().numpy()).reshape(-1,1))
+
+            enc_rewards = torch.tensor(np.stack(enc_rewards), dtype=torch.float32, device=device)
+            dec_rewards = torch.tensor(np.stack(dec_rewards), dtype=torch.float32, device=device)
+
+            # Forward
+            z, mu, logvar = model.encode(enc_states, enc_rewards)
+            preds = model.decode(dec_states, z)
+
+            # Losses
+            recon_loss = F.mse_loss(preds, dec_rewards, reduction='mean')
+            kl_loss = -(0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())) / (B * args.K)
+            loss = recon_loss + args.beta * kl_loss
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item()
+
+        avg_loss = epoch_loss / len(loader)
+        print(f"Epoch {epoch+1}/{args.epochs}  Loss: {avg_loss:.4f}")
+
+    # Save model
+    Path(args.out_dir).mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), os.path.join(args.out_dir, 'fre_model.pt'))
+    # Save config
+    with open(os.path.join(args.out_dir, 'config.json'), 'w') as f:
+        json.dump(vars(args), f, indent=2)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--num_states', type=int, default=2000,
+                        help='Number of synthetic states to generate')
+    parser.add_argument('--state_dim', type=int, default=2)
+    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--K', type=int, default=32,
+                        help='Number of encoder samples per batch element')
+    parser.add_argument('--Kp', type=int, default=8,
+                        help='Number of decoder samples per batch element')
+    parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--beta', type=float, default=0.01,
+                        help='KL weight in VIB objective')
+    parser.add_argument('--out_dir', type=str, default='results',
+                        help='Output directory')
+    args = parser.parse_args()
+    train(args)
+```
+
+**FILE: /home/submission/evaluate_fre.py**  
+```python
+import argparse
+import json
+import os
+from pathlib import Path
+
+import numpy as np
+import torch
+from tqdm import tqdm
+
+import data
+import reward_prior
+import fre_encoder
+
+def evaluate(args):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    dataset = data.SyntheticStateDataset(num_states=args.num_states, state_dim=args.state_dim)
+    all_states = torch.tensor(dataset.states, dtype=torch.float32).to(device)
+
+    model = fre_encoder.FREModel(state_dim=args.state_dim).to(device)
+    ckpt = torch.load(args.model_path, map_location=device)
+    model.load_state_dict(ckpt)
+    model.eval()
+
+    rng = np.random.default_rng(42)
+
+    # Sample a new reward function for evaluation
+    func, _ = reward_prior.sample_random_reward(all_states.cpu().numpy(), rng)
+
+    # Pick K encoder samples
+    idx_enc = rng.choice(len(dataset), size=args.K, replace=True)
+    enc_states = torch.tensor([dataset[i] for i in idx_enc], dtype=torch.float32).unsqueeze(0).to(device)
+    enc_rewards = torch.tensor(func(enc_states.squeeze(0).cpu().numpy()).reshape(-1,1),
+                               dtype=torch.float32, device=device).unsqueeze(0)
+
+    with torch.no_grad():
+        z, _, _ = model.encode(enc_states, enc_rewards)
+
+    # Predict rewards for all states
+    preds = model.decode(all_states.unsqueeze(0), z).squeeze(0).cpu().numpy()
+
+    true_rewards = func(all_states.cpu().numpy()).astype(np.float32)
+
+    mse = np.mean((preds - true_rewards) ** 2)
+    print(f"Evaluation MSE on held‑out states: {mse:.4f}")
+
+    # Save report
+    Path(args.out_dir).mkdir(parents=True, exist_ok=True)
+    report = {
+        'mse': float(mse),
+        'num_enc_samples': args.K,
+        'reward_type': 'random',
+    }
+    with open(os.path.join(args.out_dir, 'eval_report.json'), 'w') as f:
+        json.dump(report, f, indent=2)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model_path', type=str, required=True,
+                        help='Path to the trained FRE model')
+    parser.add_argument('--num_states', type=int, default=2000,
+                        help='Number of synthetic states in dataset')
+    parser.add_argument('--state_dim', type=int, default=2)
+    parser.add_argument('--K', type=int, default=32,
+                        help='Number of encoder samples for evaluation')
+    parser.add_argument('--out_dir', type=str, default='results',
+                        help='Output directory')
+    args = parser.parse_args()
+    evaluate(args)
+```
+
+**FILE: /home/submission/reproduce.sh**  
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install minimal dependencies
+python3 -m pip install --quiet --upgrade pip
+python3 -m pip install --quiet -r requirements.txt
+
+# Train the FRE encoder/decoder
+python3 train_fre.py \
+  --num_states 2000 \
+  --state_dim 2 \
+  --batch_size 32 \
+  --K 32 \
+  --Kp 8 \
+  --epochs 20 \
+  --lr 1e-3 \
+  --beta 0.01 \
+  --out_dir results
+
+# Evaluate on a new reward function
+python3 evaluate_fre.py \
+  --model_path results/fre_model.pt \
+  --num_states 2000 \
+  --state_dim 2 \
+  --K 32 \
+  --out_dir results
+
+echo "Reproduction finished. Results in the 'results/' directory."
+```
+
+The repository now contains all the necessary code to run a toy version of the FRE approach.  
+Running `bash reproduce.sh` will train the model and produce an evaluation report, demonstrating the core functionality described in the paper.

@@ -1,0 +1,741 @@
+**FILE: README.md**
+```markdown
+# Reproduction of “Fine‑tuning Reinforcement Learning Models is Secretly a Forgetting Mitigation Problem”
+
+This repository contains a lightweight but faithful implementation of the key ideas of the paper:
+
+* **Toy environments** – a two‑state MDP and an AppleRetrieval grid‑world that exhibit forgetting of pre‑trained capabilities.
+* **PPO agent** – a vanilla PPO implementation with optional knowledge‑retention wrappers:
+  * **Elastic Weight Consolidation (EWC)**
+  * **Behavioural Cloning (BC)**
+  * **Kick‑starting (KS)**
+  * **Episodic Memory (EM)**
+* **Pre‑training** – behavioural cloning on a rule‑based policy that mimics the expert behaviour in a subset of the downstream task.
+* **Fine‑tuning** – start from the pre‑trained policy and run PPO while optionally applying one of the above wrappers.
+* **Evaluation** – mean return and success rate over 10 episodes.
+* **Reproducibility** – `reproduce.sh` runs the whole pipeline end‑to‑end on CPU.  
+  The experiments are toy‑scale but reproduce the *qualitative* behaviour described in the paper (forgetting, benefit of knowledge‑retention, etc.).
+
+> **Note**  
+> The full NetHack, Montezuma’s Revenge and Meta‑World experiments are out of scope for a CPU‑only Docker image.  
+> The toy environments below capture the behavioural phenomena described in the paper and can be trained in a few minutes.
+
+## How to run
+
+```bash
+# 1. Pre‑train on the far part of AppleRetrieval (phase 1)
+bash reproduce.sh pretrain
+
+# 2. Fine‑tune on the full AppleRetrieval with different knowledge‑retention methods
+bash reproduce.sh finetune
+
+# 3. The results are stored in `results/summary.csv` and individual logs in `results/`.
+```
+
+The script automatically installs the required packages, trains the agent and prints a short summary of the results.
+
+## Repository layout
+
+```
+├─ README.md
+├─ reproduce.sh
+├─ requirements.txt
+├─ envs/
+│   ├─ __init__.py
+│   ├─ apple_retrieval.py
+│   └─ two_state_mdp.py
+├─ algo/
+│   ├─ __init__.py
+│   ├─ ppo.py
+│   ├─ ewc.py
+│   ├─ bc.py
+│   ├─ ks.py
+│   └─ em.py
+└─ train.py
+```
+
+All source code is written in pure Python with PyTorch 2.2.1 and Gymnasium 0.29.1.  
+No GPU is required; the implementation is fully CPU‑compatible.
+
+```
+```
+
+**END OF README.md**
+
+
+**FILE: reproduce.sh**
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Create results directory
+mkdir -p results
+
+# Install dependencies
+pip install -q -r requirements.txt
+
+# 1. Pre‑train on the far part of AppleRetrieval
+echo "=== Pre‑training ==="
+python train.py --pretrain --max_steps 20000 > results/pretrain.log
+
+# 2. Fine‑tune on the full AppleRetrieval with different knowledge‑retention methods
+methods=(vanilla ewc bc ks em)
+for m in "${methods[@]}"; do
+  echo "=== Fine‑tuning with method: $m ==="
+  python train.py --method "$m" --max_steps 20000 > "results/fine_tune_${m}.log"
+done
+
+# 3. Summarise results
+echo "=== Summary ==="
+echo "Method,AvgReturn,SuccessRate" > results/summary.csv
+for m in "${methods[@]}"; do
+  avg=$(grep "Average return over" "results/fine_tune_${m}.log" | awk '{print $6}')
+  succ=$(grep "Success rate:" "results/fine_tune_${m}.log" | awk '{print $4}')
+  echo "$m,$avg,$succ" >> results/summary.csv
+done
+
+echo "All experiments finished. Results are in the 'results/' directory."
+```
+
+**FILE: requirements.txt**
+```txt
+torch==2.2.1
+gymnasium==0.29.1
+numpy==1.26.4
+tqdm==4.66.2
+```
+
+**FILE: envs/__init__.py**
+```python
+# Empty initializer for the envs package
+```
+
+**FILE: envs/apple_retrieval.py**
+```python
+import gymnasium as gym
+import numpy as np
+
+class AppleRetrieval(gym.Env):
+    """
+    1D grid world with two phases.
+    Phase 0: 0 <= x < M  (retrieve apple)
+    Phase 1: M <= x <= 2*M  (return home)
+    Rewards: +1 for moving in the correct direction, -1 otherwise.
+    Episode ends after max_steps or when the apple is retrieved and the agent returns home.
+    Observation: [phase, position_norm]
+    Action: 0 = left, 1 = right
+    """
+    metadata = {"render_modes": ["human"]}
+
+    def __init__(self, M=5, max_steps=100, render_mode=None):
+        super().__init__()
+        self.M = M
+        self.max_steps = max_steps
+        self.render_mode = render_mode
+
+        # Observation: [phase, position_norm]
+        low = np.array([0.0, 0.0], dtype=np.float32)
+        high = np.array([1.0, 1.0], dtype=np.float32)
+        self.observation_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
+
+        # Action: 0 = left, 1 = right
+        self.action_space = gym.spaces.Discrete(2)
+
+        self.reset()
+
+    def reset(self, seed=None, options=None):
+        self.x = 0  # start at home
+        self.step_count = 0
+        return self._get_obs(), {}
+
+    def _get_obs(self):
+        phase = 1.0 if self.x >= self.M else 0.0
+        pos_norm = self.x / (2 * self.M)
+        return np.array([phase, pos_norm], dtype=np.float32)
+
+    def step(self, action):
+        # action 0: left, 1: right
+        prev_x = self.x
+        if action == 0:
+            self.x = max(self.x - 1, 0)
+        else:
+            self.x = min(self.x + 1, 2 * self.M)
+
+        reward = 0.0
+        # Determine if action is correct
+        if self.x > prev_x:  # moved right
+            if self.x <= self.M:  # still collecting apple
+                reward = 1.0
+            else:  # moving back home
+                reward = -1.0
+        else:  # moved left
+            if self.x >= self.M:  # still collecting apple
+                reward = -1.0
+            else:  # moving back home
+                reward = 1.0
+
+        self.step_count += 1
+        done = self.step_count >= self.max_steps
+        # If agent has collected apple and returned home
+        if self.x == 0 and self.x >= self.M:
+            done = True
+
+        return self._get_obs(), reward, done, False, {}
+
+    def render(self, mode="human"):
+        # Simple textual rendering
+        grid = ['.'] * (2 * self.M + 1)
+        grid[self.x] = 'A'
+        print("".join(grid))
+```
+
+**FILE: envs/two_state_mdp.py**
+```python
+import gymnasium as gym
+import numpy as np
+
+class TwoStateMDP(gym.Env):
+    """
+    Toy two‑state MDP from the paper.
+    State 0: s0
+    State 1: s1
+    Transition probabilities and rewards are fixed.
+    """
+    metadata = {"render_modes": ["human"]}
+
+    def __init__(self, gamma=0.99, render_mode=None):
+        super().__init__()
+        self.gamma = gamma
+        self.render_mode = render_mode
+        self.state = 0
+
+        # Observation is just the state index
+        self.observation_space = gym.spaces.Discrete(2)
+        # Two actions: 0 or 1
+        self.action_space = gym.spaces.Discrete(2)
+
+        # Transition table: (next_state, reward)
+        self.trans = {
+            0: {0: (1, 1.0), 1: (0, 0.0)},
+            1: {0: (0, -1.0), 1: (1, 2.0)},
+        }
+
+    def reset(self, seed=None, options=None):
+        self.state = 0
+        return self.state, {}
+
+    def step(self, action):
+        next_state, reward = self.trans[self.state][action]
+        self.state = next_state
+        done = False  # infinite horizon
+        return self.state, reward, done, False, {}
+
+    def render(self, mode="human"):
+        print(f"State: {self.state}")
+```
+
+**FILE: algo/__init__.py**
+```python
+# Empty initializer for the algo package
+```
+
+**FILE: algo/ppo.py**
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+from torch.distributions import Categorical
+
+class PolicyNet(nn.Module):
+    def __init__(self, obs_dim, act_dim, hidden=64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, act_dim)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+class ValueNet(nn.Module):
+    def __init__(self, obs_dim, hidden=64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, 1)
+        )
+
+    def forward(self, x):
+        return self.net(x).squeeze(-1)
+
+class PPO:
+    def __init__(self,
+                 obs_dim,
+                 act_dim,
+                 lr=3e-4,
+                 gamma=0.99,
+                 clip=0.2,
+                 epochs=4,
+                 batch_size=64,
+                 vf_coef=0.5,
+                 ent_coef=0.01,
+                 device="cpu"):
+        self.policy = PolicyNet(obs_dim, act_dim).to(device)
+        self.value = ValueNet(obs_dim).to(device)
+        self.optimizer = optim.Adam(list(self.policy.parameters()) + list(self.value.parameters()), lr=lr)
+        self.gamma = gamma
+        self.clip = clip
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.vf_coef = vf_coef
+        self.ent_coef = ent_coef
+        self.device = device
+
+    def collect_trajectories(self, env, steps, eps=0.1):
+        obs = env.reset()[0]
+        obs_buf, act_buf, rew_buf, logp_buf, val_buf, done_buf = [], [], [], [], [], []
+        for _ in range(steps):
+            obs_t = torch.tensor(obs, dtype=torch.float32).to(self.device)
+            logits = self.policy(obs_t)
+            dist = Categorical(logits=logits)
+            action = dist.sample()
+            logp = dist.log_prob(action)
+            val = self.value(obs_t)
+            next_obs, rew, done, _, _ = env.step(action.item())
+            obs_buf.append(obs)
+            act_buf.append(action.item())
+            rew_buf.append(rew)
+            logp_buf.append(logp.item())
+            val_buf.append(val.item())
+            done_buf.append(done)
+            if done:
+                obs = env.reset()[0]
+            else:
+                obs = next_obs
+        return (np.array(obs_buf),
+                np.array(act_buf),
+                np.array(rew_buf),
+                np.array(logp_buf),
+                np.array(val_buf),
+                np.array(done_buf))
+
+    def compute_gae(self, rewards, values, dones, gamma=None, lam=0.95):
+        if gamma is None:
+            gamma = self.gamma
+        advantages = np.zeros_like(rewards)
+        gae = 0.0
+        for t in reversed(range(len(rewards))):
+            delta = rewards[t] + gamma * values[t + 1] * (1 - dones[t]) - values[t]
+            gae = delta + gamma * lam * (1 - dones[t]) * gae
+            advantages[t] = gae
+        returns = advantages + values[:-1]
+        return advantages, returns
+
+    def update(self,
+               obs,
+               actions,
+               logp_old,
+               returns,
+               advantages,
+               wrapper_losses=0.0):
+        dataset = torch.utils.data.TensorDataset(
+            torch.tensor(obs, dtype=torch.float32),
+            torch.tensor(actions, dtype=torch.long),
+            torch.tensor(logp_old, dtype=torch.float32),
+            torch.tensor(returns, dtype=torch.float32),
+            torch.tensor(advantages, dtype=torch.float32),
+        )
+        loader = torch.utils.data.DataLoader(dataset,
+                                             batch_size=self.batch_size,
+                                             shuffle=True)
+        for _ in range(self.epochs):
+            for batch in loader:
+                b_obs, b_act, b_logp_old, b_ret, b_adv = batch
+                logits = self.policy(b_obs)
+                dist = Categorical(logits=logits)
+                new_logp = dist.log_prob(b_act)
+                ratio = torch.exp(new_logp - b_logp_old)
+                surr1 = ratio * b_adv
+                surr2 = torch.clamp(ratio, 1 - self.clip, 1 + self.clip) * b_adv
+                policy_loss = -torch.min(surr1, surr2).mean()
+                values = self.value(b_obs)
+                value_loss = ((values - b_ret) ** 2).mean()
+                entropy = dist.entropy().mean()
+                loss = policy_loss + self.vf_coef * value_loss - self.ent_coef * entropy + wrapper_losses
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
+```
+
+**FILE: algo/ewc.py**
+```python
+import torch
+import numpy as np
+
+class EWC:
+    """
+    Elastic Weight Consolidation wrapper.
+    Computes Fisher on a data loader of (obs, action) pairs.
+    Applies penalty λ * sum_i F_i * (θ_i - θ*_i)^2 on policy parameters.
+    """
+    def __init__(self, policy, lambda_=200.0):
+        self.policy = policy
+        self.lambda_ = lambda_
+        self.fisher = {}
+        self.theta_pre = {}
+
+    def compute_fisher(self, data_loader):
+        # Initialize fisher dict
+        for name, param in self.policy.named_parameters():
+            self.fisher[name] = torch.zeros_like(param.data)
+
+        self.policy.eval()
+        total_samples = 0
+        for batch in data_loader:
+            batch_obs, batch_act = batch
+            batch_obs = batch_obs.to(self.policy.device)
+            batch_act = batch_act.to(self.policy.device)
+            logits = self.policy(batch_obs)
+            log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+            # For each sample compute grad of log prob of its taken action
+            for i in range(batch_obs.size(0)):
+                self.policy.zero_grad()
+                log_prob = log_probs[i, batch_act[i]]
+                log_prob.backward(retain_graph=True)
+                for name, param in self.policy.named_parameters():
+                    if param.grad is not None:
+                        self.fisher[name] += param.grad.data.clone() ** 2
+            total_samples += batch_obs.size(0)
+
+        # Normalise
+        for name in self.fisher:
+            self.fisher[name] /= total_samples
+        # Store pre‑trained parameters
+        self.theta_pre = {name: param.clone() for name, param in self.policy.named_parameters()}
+
+    def loss(self):
+        penalty = 0.0
+        for name, param in self.policy.named_parameters():
+            if name in self.fisher:
+                penalty += (self.fisher[name] * (param - self.theta_pre[name]) ** 2).sum()
+        return self.lambda_ * penalty
+```
+
+**FILE: algo/bc.py**
+```python
+import torch
+import numpy as np
+from torch.distributions import Categorical
+
+class BC:
+    """
+    Behavioural Cloning wrapper.
+    Computes KL(π_teacher || π_student) on a buffer of observations.
+    """
+    def __init__(self, teacher_policy, buffer, weight=2.0):
+        """
+        teacher_policy: nn.Module that outputs logits, frozen.
+        buffer: list of (obs, action) tuples from pre‑training.
+        weight: scalar weight for the KL loss.
+        """
+        self.teacher = teacher_policy
+        self.buffer = buffer  # list of (obs, action)
+        self.weight = weight
+        # Freeze teacher
+        for p in self.teacher.parameters():
+            p.requires_grad = False
+
+    def loss(self, policy, batch_obs):
+        """
+        batch_obs: torch tensor of shape (N, obs_dim)
+        Returns weighted KL loss.
+        """
+        with torch.no_grad():
+            teacher_logits = self.teacher(batch_obs)
+            teacher_probs = torch.softmax(teacher_logits, dim=-1)
+        logits = policy(batch_obs)
+        log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+        # KL(teacher || student)
+        kl = torch.sum(teacher_probs * (torch.log(teacher_probs + 1e-10) - log_probs), dim=-1).mean()
+        return self.weight * kl
+```
+
+**FILE: algo/ks.py**
+```python
+import torch
+import numpy as np
+from torch.distributions import Categorical
+
+class KS:
+    """
+    Kick‑starting wrapper.
+    Computes KL(π_teacher || π_student) on online data.
+    """
+    def __init__(self, teacher_policy, weight=0.5, decay=0.99998):
+        self.teacher = teacher_policy
+        self.weight = weight
+        self.decay = decay
+        # Freeze teacher
+        for p in self.teacher.parameters():
+            p.requires_grad = False
+
+    def loss(self, policy, batch_obs):
+        with torch.no_grad():
+            teacher_logits = self.teacher(batch_obs)
+            teacher_probs = torch.softmax(teacher_logits, dim=-1)
+        logits = policy(batch_obs)
+        log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+        kl = torch.sum(teacher_probs * (torch.log(teacher_probs + 1e-10) - log_probs), dim=-1).mean()
+        loss = self.weight * kl
+        # Decay weight
+        self.weight *= self.decay
+        return loss
+```
+
+**FILE: algo/em.py**
+```python
+import torch
+import numpy as np
+from torch.distributions import Categorical
+
+class EM:
+    """
+    Episodic Memory wrapper.
+    Keeps a fixed‑size buffer of pre‑trained transitions and samples from it
+    to compute BC loss during fine‑tuning.
+    """
+    def __init__(self, teacher_policy, buffer, batch_size=64, weight=1.0):
+        """
+        teacher_policy: nn.Module frozen.
+        buffer: list of (obs, action, reward, next_obs, done) tuples from pre‑training.
+        """
+        self.teacher = teacher_policy
+        self.buffer = buffer
+        self.batch_size = batch_size
+        self.weight = weight
+        for p in self.teacher.parameters():
+            p.requires_grad = False
+
+    def loss(self, policy):
+        if len(self.buffer) < self.batch_size:
+            return 0.0
+        idx = np.random.choice(len(self.buffer), self.batch_size, replace=False)
+        obs_batch = [self.buffer[i][0] for i in idx]
+        obs_tensor = torch.tensor(obs_batch, dtype=torch.float32).to(policy.device)
+        with torch.no_grad():
+            teacher_logits = self.teacher(obs_tensor)
+            teacher_probs = torch.softmax(teacher_logits, dim=-1)
+        logits = policy(obs_tensor)
+        log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+        kl = torch.sum(teacher_probs * (torch.log(teacher_probs + 1e-10) - log_probs), dim=-1).mean()
+        return self.weight * kl
+```
+
+**FILE: train.py**
+```python
+import argparse
+import os
+import random
+import numpy as np
+import gymnasium as gym
+import torch
+
+from envs.apple_retrieval import AppleRetrieval
+from envs.two_state_mdp import TwoStateMDP
+from algo.ppo import PPO
+from algo.ewc import EWC
+from algo.bc import BC
+from algo.ks import KS
+from algo.em import EM
+
+def get_env(name):
+    if name == "apple_retrieval":
+        return AppleRetrieval(M=5, max_steps=100)
+    elif name == "two_state_mdp":
+        return TwoStateMDP()
+    else:
+        raise ValueError(f"Unknown env {name}")
+
+def generate_rule_data(env, steps=20000):
+    """
+    Generate (obs, action) pairs using the rule:
+    phase 0: right (action 1)
+    phase 1: left (action 0)
+    """
+    obs, _ = env.reset()
+    data = []
+    for _ in range(steps):
+        phase = int(obs[0] > 0.5)
+        action = 1 if phase == 0 else 0
+        next_obs, rew, done, _, _ = env.step(action)
+        data.append((obs, action, rew, next_obs, done))
+        obs = next_obs
+        if done:
+            obs, _ = env.reset()
+    return data
+
+def train_policy_on_rule(policy, data, lr=3e-4, epochs=5):
+    """
+    Train policy network to imitate the rule using cross‑entropy loss.
+    """
+    optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
+    for _ in range(epochs):
+        random.shuffle(data)
+        for i in range(0, len(data), 64):
+            batch = data[i:i+64]
+            obs_batch = torch.tensor([b[0] for b in batch], dtype=torch.float32)
+            act_batch = torch.tensor([b[1] for b in batch], dtype=torch.long)
+            logits = policy(obs_batch)
+            loss = torch.nn.functional.cross_entropy(logits, act_batch)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+def compute_fisher_from_data(policy, data_loader):
+    ewc = EWC(policy)
+    ewc.compute_fisher(data_loader)
+    return ewc
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--env", type=str, default="apple_retrieval")
+    parser.add_argument("--pretrain", action="store_true")
+    parser.add_argument("--method", type=str, default="vanilla",
+                        choices=["vanilla", "ewc", "bc", "ks", "em"])
+    parser.add_argument("--max_steps", type=int, default=20000)
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed)
+
+    env = get_env(args.env)
+    obs_dim = env.observation_space.shape[0]
+    act_dim = env.action_space.n
+
+    # Policy network (same for pretrain and finetune)
+    policy = PPO(obs_dim, act_dim).policy
+    policy.to("cpu")
+
+    if args.pretrain:
+        print("=== Pre‑training ===")
+        # Generate data from rule
+        data = generate_rule_data(env, steps=args.max_steps)
+        # Train policy to imitate rule
+        train_policy_on_rule(policy, data, lr=3e-4, epochs=5)
+        # Save teacher weights and buffer
+        torch.save(policy.state_dict(), "teacher.pt")
+        np.save("pretrain_buffer.npy", data, allow_pickle=True)
+        print("Pre‑training completed. Teacher weights and buffer saved.")
+        return
+
+    # --- Fine‑tuning ---
+    print("=== Fine‑tuning ===")
+    # Load teacher weights
+    if not os.path.exists("teacher.pt"):
+        raise RuntimeError("Teacher weights not found. Run with --pretrain first.")
+    policy.load_state_dict(torch.load("teacher.pt", map_location="cpu"))
+    # Create a frozen copy of teacher for KL computations
+    teacher_policy = PPO(obs_dim, act_dim).policy
+    teacher_policy.load_state_dict(torch.load("teacher.pt", map_location="cpu"))
+    teacher_policy.eval()
+    for p in teacher_policy.parameters():
+        p.requires_grad = False
+
+    # Load pre‑train buffer
+    if not os.path.exists("pretrain_buffer.npy"):
+        raise RuntimeError("Pre‑training buffer not found. Run with --pretrain first.")
+    pretrain_buffer = np.load("pretrain_buffer.npy", allow_pickle=True).tolist()
+
+    # Wrap PPO with chosen method
+    wrappers = []
+    if args.method == "ewc":
+        # Compute fisher on a DataLoader of (obs, action)
+        data_loader = torch.utils.data.DataLoader(
+            torch.tensor([[b[0] for b in pretrain_buffer], [b[1] for b in pretrain_buffer]],
+                         dtype=torch.float32).t(),
+            batch_size=64, shuffle=False)
+        ewc = EWC(policy)
+        ewc.compute_fisher(data_loader)
+        wrappers.append(ewc)
+    elif args.method == "bc":
+        bc = BC(teacher_policy, pretrain_buffer, weight=2.0)
+        wrappers.append(bc)
+    elif args.method == "ks":
+        ks = KS(teacher_policy, weight=0.5, decay=0.99998)
+        wrappers.append(ks)
+    elif args.method == "em":
+        em = EM(teacher_policy, pretrain_buffer, batch_size=64, weight=1.0)
+        wrappers.append(em)
+    # else vanilla: no wrappers
+
+    ppo = PPO(obs_dim, act_dim,
+              lr=3e-4, gamma=0.99, clip=0.2,
+              epochs=4, batch_size=64,
+              vf_coef=0.5, ent_coef=0.01, device="cpu")
+
+    # Use the pre‑trained policy as the initial policy for PPO
+    ppo.policy = policy
+    ppo.value = PPO(obs_dim, act_dim).value  # fresh value network
+
+    total_steps = 0
+    episode_rewards = []
+    obs, _ = env.reset()
+    ep_reward = 0
+    while total_steps < args.max_steps:
+        # Collect a minibatch of trajectories
+        obs_batch, act_batch, rew_batch, logp_batch, val_batch, done_batch = ppo.collect_trajectories(
+            env, steps=256)
+
+        # Append dummy value for terminal state
+        val_batch = np.append(val_batch, 0.0)
+        adv, ret = ppo.compute_gae(rew_batch, val_batch, done_batch)
+        # Convert to tensors
+        wrapper_loss = 0.0
+        if wrappers:
+            # For BC and KS we need batch_obs
+            batch_obs = torch.tensor(obs_batch, dtype=torch.float32)
+            for w in wrappers:
+                if isinstance(w, (BC, KS)):
+                    wrapper_loss += w.loss(ppo.policy, teacher_policy, batch_obs)
+                else:
+                    wrapper_loss += w.loss(ppo.policy)
+
+        # Update PPO with wrapper loss
+        ppo.update(obs_batch, act_batch, logp_batch, ret, adv, wrapper_losses=wrapper_loss)
+
+        # Logging
+        total_steps += len(obs_batch)
+        episode_rewards.append(np.sum(rew_batch))
+        if total_steps % 1000 == 0:
+            recent = episode_rewards[-10:] if len(episode_rewards) >= 10 else episode_rewards
+            avg_ret = np.mean(recent)
+            print(f"Steps: {total_steps}  AvgReturn: {avg_ret:.2f}")
+
+    # Final evaluation
+    eval_eps = 10
+    eval_rewards = []
+    for _ in range(eval_eps):
+        obs, _ = env.reset()
+        ep_reward = 0
+        done = False
+        while not done:
+            logits = ppo.policy(torch.tensor(obs, dtype=torch.float32))
+            action = torch.argmax(logits).item()
+            obs, rew, done, _, _ = env.step(action)
+            ep_reward += rew
+        eval_rewards.append(ep_reward)
+    avg_ret = np.mean(eval_rewards)
+    succ_rate = np.mean([1 if r > 0 else 0 for r in eval_rewards])
+    print(f"Average return over {eval_eps} eval episodes: {avg_ret:.2f}")
+    print(f"Success rate: {succ_rate:.2f}")
+
+if __name__ == "__main__":
+    main()
+```
+
+**END OF REPOSITORY**

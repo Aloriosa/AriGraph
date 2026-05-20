@@ -1,0 +1,35 @@
+"""
+Utility functions for FOA.
+"""
+
+import torch
+import torch.nn.functional as F
+
+
+def entropy(probs: torch.Tensor) -> torch.Tensor:
+    """
+    Compute the Shannon entropy of a probability vector.
+    Input:
+        probs: Tensor of shape (B, C) with class probabilities.
+    Returns:
+        Tensor of shape (B,) with entropy for each sample.
+    """
+    eps = 1e-12
+    probs = torch.clamp(probs, eps, 1.0)
+    logp = torch.log(probs)
+    ent = -torch.sum(probs * logp, dim=1)  # shape (B,)
+    return ent
+
+
+def compute_activation_stats(cls_tokens: torch.Tensor):
+    """
+    Compute mean and std of CLS tokens across the batch.
+    Input:
+        cls_tokens: Tensor of shape (B, D) where D is hidden dim.
+    Returns:
+        mean: Tensor of shape (D,)
+        std:  Tensor of shape (D,)
+    """
+    mean = cls_tokens.mean(dim=0)
+    std = cls_tokens.std(dim=0, unbiased=False)
+    return mean, std

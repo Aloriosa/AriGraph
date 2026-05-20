@@ -1,0 +1,70 @@
+2026-03-14 15:10:16.225836 ======================================================================
+2026-03-14 15:10:16.226030 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 15:10:16.226081 ======================================================================
+2026-03-14 15:10:16.226159 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/mechanistic-understanding/paper.md
+2026-03-14 15:10:16.226200 Log path: paper2code_react5_Gpt-oss-20b_trial2/mechanistic-understanding
+2026-03-14 15:10:16.226273 Model: Openai/Gpt-oss-20b
+2026-03-14 15:10:16.226310 Max iterations: 5
+2026-03-14 15:10:16.226349 Run reproduce.sh: False
+2026-03-14 15:10:16.226424 Run LLM paper check: True
+2026-03-14 15:10:16.226473 
+2026-03-14 15:10:16.226508 Loading paper...
+2026-03-14 15:10:16.226691 Paper length: 64490 chars (using 64490 for prompt)
+2026-03-14 15:10:16.226774 
+2026-03-14 15:10:16.247973 --- Iteration 0: Initial generation ---
+2026-03-14 15:11:11.317134   Created: generated_reproduction.txt
+2026-03-14 15:11:11.317252 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial2/mechanistic-understanding/submission (1 files)
+2026-03-14 15:11:11.317296 
+2026-03-14 15:11:11.317352 --- Iteration 1: Observe & Refine ---
+2026-03-14 15:11:23.173531 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / incomplete components from the paper**
+
+| Status | Requirement from the paper | Why it’s missing / incomplete |
+|--------|-----------------------------|--------------------------------|
+| **MISSING** | Use of **Llama‑2‑7B** (and comparison with GPT‑2) | Code only loads GPT‑2 medium. |
+| **MISSING** | **Extraction of toxic vectors** via a linear probe trained on the Jigsaw toxic‑comment dataset | No probe training or extraction logic. |
+| **MISSING** | **SVD decomposition** of the extracted toxic vectors | No SVD or analysis of singular vectors. |
+| **MISSING** | **Analysis of MLP value vectors** (promoting/suppressing toxicity) | No inspection or projection of value vectors. |
+| **MISSING** | **GLU gating analysis** for Llama‑2 | No GLU implementation or gating study. |
+| **MISSING** | **Pairwise dataset generation** using PPLM to produce toxic/non‑toxic pairs | Code uses a toy hard‑coded dataset. |
+| **MISSING** | **Exact DPO loss** as defined in Rafailov et al. (2023) | The loss is only vaguely referenced; implementation details are absent. |
+| **MISSING** | **Toxicity evaluation** with a robust metric (e.g., Perspective API, human judgments) | Only a simple regex‑based check is used. |
+| **MISSING** | **Analysis of minimal weight changes / offset bypass** after DPO | No weight‑difference analysis or offset study. |
+| **MISSING** | **Un‑alignment / re‑activation demonstration** | No code to re‑activate toxic vectors or show jailbreak. |
+| **MISSING** | **Hyper‑parameter settings** matching the paper (learning rate, batch size, number of steps, optimizer, etc.) | No reference to paper values; defaults are used. |
+| **MISSING** | **Full experimental pipeline** (data download, preprocessing, training, evaluation, checkpointing) | No `reproduce.sh` or end‑to‑end script. |
+| **MISSING** | **Baseline comparisons** (e.g., PPO, RLHF) | No baseline models or results. |
+| **MISSING** | **Token‑level toxicity analysis** (e.g., per‑token probability shifts) | Not implemented. |
+| **MISSING** | **Perplexity evaluation on a held‑out test set** (beyond the toy set) | Only a very small test set is used. |
+
+| Status | Component | Comment |
+|--------|-----------|---------|
+| **INCORRECT** | DPO fine‑tuning | The loss is referenced but the implementation is not verified against the paper’s exact formulation. |
+| **PARTIAL** | DPO training | The code performs a DPO‑style fine‑tuning on GPT‑2, but uses a toy dataset and does not follow the paper’s data generation or training schedule. |
+| **OK** | GPT‑2 loading | GPT‑2 medium is correctly loaded. |
+| **OK** | Basic fine‑tuning loop | A simple training loop is present. |
+| **OK** | Perplexity calculation | Perplexity is computed on the toy test set. |
+| **OK** | Regex‑based toxicity check | A minimal toxicity metric is implemented (but not the paper’s metric). |
+
+**Conclusion**
+
+The current repository implements only a very small subset of the paper’s contributions (basic GPT‑2 loading, toy DPO fine‑tuning, and a crude toxicity check). All core methodological, analytical, and experimental components described in the paper are missing or incomplete.
+
+**Action items**
+
+1. Add Llama‑2‑7B support and comparative experiments.  
+2. Implement the toxic‑comment probe, SVD, and value‑vector analysis.  
+3. Generate the pairwise dataset with PPLM as described.  
+4. Re‑implement the exact DPO loss and training schedule.  
+5. Replace the regex toxicity metric with a robust detector (e.g., Perspective API).  
+6. Add analysis of weight changes, offset bypass, and re‑activation experiments.  
+7. Provide a `reproduce.sh` script that runs the full pipeline and reproduces the paper’s results.  
+8. Document hyper‑parameters and baselines.
+2026-03-14 15:11:23.173765 
+2026-03-14 15:11:23.174007 Generating refined code...
+2026-03-14 15:12:45.575222   Updated: generated_reproduction.txt
+2026-03-14 15:12:45.575375 
+2026-03-14 15:12:45.575490 --- Iteration 2: Observe & Refine ---

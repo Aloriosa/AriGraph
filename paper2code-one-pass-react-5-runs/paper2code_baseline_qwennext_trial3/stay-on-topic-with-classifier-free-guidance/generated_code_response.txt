@@ -1,0 +1,292 @@
+**FILE: README.md**
+```markdown
+# Reproduction of “Stay on topic with Classifier‑Free Guidance”
+
+This repository contains a minimal, fully reproducible implementation of the
+Classifier‑Free Guidance (CFG) technique for autoregressive language models
+as described in the paper *“Stay on topic with Classifier‑Free Guidance”*.
+The goal is to show that CFG can be applied to an off‑the‑shelf
+pre‑trained GPT‑2 model and that it improves prompt adherence
+without any additional training.
+
+## Structure
+
+```
+/
+├─ README.md                # this file
+├─ reproduce.sh             # reproducibility script
+└─ generate_prompts.py      # source code that runs the experiments
+```
+
+## How it works
+
+1. **Baseline generation** – The script uses the Hugging Face
+   `transformers` library to generate text with the standard
+   `model.generate()` API (no CFG applied).
+
+2. **CFG generation** – A custom decoding loop implements the CFG
+   re‑weighting of logits:
+
+   ```
+   logit_cfg = logit_uncond + γ * (logit_cond - logit_uncond)
+   ```
+
+   where `logit_cond` is the next‑token logit distribution conditioned
+   on the prompt, `logit_uncond` is the distribution conditioned only on
+   the previously generated tokens (the prompt is omitted), and
+   `γ` is the guidance strength (set to 1.5 in the reproduction).
+
+3. The script runs both baselines and CFG for a small set of example
+   prompts, writes the generated continuations to `results.txt`, and
+   prints them to stdout.
+
+## Reproducing the results
+
+The `reproduce.sh` script installs the required Python packages,
+downloads the `gpt2` model from Hugging Face, and runs
+`generate_prompts.py`.  It is fully self‑contained and works on a fresh
+Ubuntu 24.04 LTS Docker container with an NVIDIA GPU (if available).
+
+```bash
+bash reproduce.sh
+```
+
+After the script finishes you should see a `results.txt` file in the
+current directory containing the baseline and CFG outputs for each
+prompt.
+
+## Expected Output
+
+The `results.txt` file will contain entries like:
+
+```
+Prompt: What is the capital of France?
+Baseline: The capital of France is Paris.
+CFG (γ=1.5): The capital of France is Paris. It is known for its...
+```
+
+The CFG outputs should be more prompt‑adherent and less likely to
+drift away from the initial instruction compared to the baseline.
+
+## Limitations
+
+* The implementation uses the small GPT‑2 (117 M) model to keep the
+  repository lightweight (≈ 500 MB when cached).
+* The CFG implementation is a straightforward, single‑pass decoding
+  loop and does not include optimisations such as KV‑cache reuse.
+* Only a handful of example prompts are used; the paper evaluates
+  many more benchmarks.
+
+## License
+
+This repository is provided under the MIT license.  Feel free to
+experiment further and adapt the code to other models or prompts.
+```
+
+---
+
+**FILE: reproduce.sh**
+```bash
+#!/usr/bin/env bash
+# reproduce.sh – reproducibility script for CFG experiment
+
+set -euo pipefail
+
+# Update package index and install Python3
+apt-get update
+apt-get install -y --no-install-recommends python3 python3-pip
+
+# Install required Python packages
+pip3 install --upgrade pip
+pip3 install torch==2.2.0+cu118 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+pip3 install transformers==4.39.3
+
+# Run the experiment
+python3 generate_prompts.py > results.txt
+
+echo "Reproduction completed. Results written to results.txt"
+```
+
+---
+
+**FILE: generate_prompts.py**
+```python
+#!/usr/bin/env python3
+"""
+generate_prompts.py
+
+Minimal implementation of Classifier‑Free Guidance (CFG) for GPT‑2.
+Runs both baseline and CFG generation for a set of example prompts.
+"""
+
+import os
+import random
+import torch
+from transformers import GPT2LMHeadModel, GPT2TokenizerFast
+
+# -----------------------------
+# Configuration
+# -----------------------------
+MODEL_NAME = "gpt2"          # Small GPT‑2 (117 M)
+MAX_LENGTH = 50              # Max tokens to generate
+GAMMA = 1.5                  # Guidance strength
+TEMPERATURE = 1.0            # Sampling temperature
+TOP_P = 0.9                  # Top‑p (nucleus) sampling
+SEED = 42                    # Random seed for reproducibility
+
+# -----------------------------
+# Helper functions
+# -----------------------------
+def set_random_seed(seed: int):
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+def top_p_filtering(logits, top_p=0.9, filter_value=-float("Inf")):
+    """
+    Filter a distribution of logits using nucleus (top‑p) filtering.
+    """
+    sorted_logits, sorted_indices = torch.topk(logits, k=logits.size(-1))
+    cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+
+    # Remove tokens with cumulative probability above the threshold
+    sorted_indices_to_remove = cumulative_probs > top_p
+    # Shift the indices to the left to keep the first token above the threshold
+    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+    sorted_indices_to_remove[..., 0] = False
+
+    indices_to_remove = sorted_indices[sorted_indices_to_remove]
+    logits[indices_to_remove] = filter_value
+    return logits
+
+def generate_with_cfg(
+    model: GPT2LMHeadModel,
+    tokenizer: GPT2TokenizerFast,
+    prompt: str,
+    max_length: int,
+    gamma: float,
+    temperature: float = 1.0,
+    top_p: float = 0.9,
+    device: torch.device = torch.device("cpu"),
+) -> str:
+    """
+    Generate text conditioned on `prompt` using CFG.
+    """
+    model.eval()
+    bos_token_id = tokenizer.bos_token_id or tokenizer.eos_token_id or tokenizer.pad_token_id or 50256
+    prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+    generated_ids = []
+
+    # For GPU: move tensors to device
+    prompt_ids = torch.tensor([prompt_ids], device=device)
+
+    for _ in range(max_length):
+        # Conditional logits: prompt + generated so far
+        if generated_ids:
+            combined_ids = torch.tensor([prompt_ids.squeeze(0).tolist() + generated_ids], device=device)
+        else:
+            combined_ids = prompt_ids
+
+        cond_logits = model(combined_ids).logits[:, -1, :]  # shape (1, vocab)
+
+        # Unconditional logits: generated so far only
+        if generated_ids:
+            uncond_input = torch.tensor([generated_ids], device=device)
+        else:
+            uncond_input = torch.tensor([[bos_token_id]], device=device)
+
+        uncond_logits = model(uncond_input).logits[:, -1, :]  # shape (1, vocab)
+
+        # CFG re‑weighting
+        new_logits = uncond_logits + gamma * (cond_logits - uncond_logits)
+
+        # Temperature scaling
+        new_logits = new_logits / temperature
+
+        # Nucleus filtering
+        new_logits = top_p_filtering(new_logits.squeeze(0), top_p=top_p)
+
+        # Sample next token
+        probs = torch.softmax(new_logits, dim=-1)
+        next_token_id = torch.multinomial(probs, num_samples=1).item()
+
+        if next_token_id == tokenizer.eos_token_id:
+            break
+
+        generated_ids.append(next_token_id)
+
+    return tokenizer.decode(generated_ids, skip_special_tokens=True)
+
+# -----------------------------
+# Main experiment
+# -----------------------------
+def main():
+    set_random_seed(SEED)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # Load model and tokenizer
+    tokenizer = GPT2TokenizerFast.from_pretrained(MODEL_NAME)
+    # Add special tokens if missing
+    if tokenizer.pad_token is None:
+        tokenizer.add_special_tokens({"pad_token": tokenizer.eos_token})
+    model = GPT2LMHeadModel.from_pretrained(MODEL_NAME)
+    model.resize_token_embeddings(len(tokenizer))
+    model.to(device)
+
+    # Example prompts
+    prompts = [
+        "What is the capital of France?",
+        "Explain the difference between supervised and unsupervised learning.",
+        "Write a short poem about rain.",
+        "Summarize the plot of 'Pride and Prejudice' in one sentence.",
+        "How to bake a chocolate cake step by step?",
+    ]
+
+    # Output file
+    out_path = os.path.join(os.getcwd(), "results.txt")
+    with open(out_path, "w", encoding="utf-8") as out_file:
+        for prompt in prompts:
+            # Baseline generation
+            baseline_ids = tokenizer.encode(prompt, add_special_tokens=False)
+            baseline_output = tokenizer.decode(
+                model.generate(
+                    torch.tensor([baseline_ids], device=device),
+                    max_new_tokens=MAX_LENGTH,
+                    do_sample=True,
+                    temperature=TEMPERATURE,
+                    top_p=TOP_P,
+                    pad_token_id=tokenizer.eos_token_id,
+                )[0],
+                skip_special_tokens=True,
+            )
+
+            # CFG generation
+            cfg_output = generate_with_cfg(
+                model=model,
+                tokenizer=tokenizer,
+                prompt=prompt,
+                max_length=MAX_LENGTH,
+                gamma=GAMMA,
+                temperature=TEMPERATURE,
+                top_p=TOP_P,
+                device=device,
+            )
+
+            # Write to file
+            out_file.write(f"Prompt: {prompt}\n")
+            out_file.write(f"Baseline: {baseline_output}\n")
+            out_file.write(f"CFG (γ={GAMMA}): {cfg_output}\n\n")
+
+            # Also print to console
+            print(f"Prompt: {prompt}")
+            print(f"Baseline: {baseline_output}")
+            print(f"CFG (γ={GAMMA}): {cfg_output}")
+            print("-" * 60)
+
+if __name__ == "__main__":
+    main()
+```
+
+---

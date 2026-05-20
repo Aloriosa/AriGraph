@@ -1,0 +1,417 @@
+**Repository Structure**
+
+```
+/home/submission/
+├── README.md
+├── reproduce.sh
+├── requirements.txt
+├── src/
+│   ├── __init__.py
+│   ├── blackbox_llm.py
+│   ├── adapter.py
+│   ├── nce_loss.py
+│   ├── data.py
+│   ├── train.py
+│   └── inference.py
+└── results.txt
+```
+
+---
+
+### FILE: README.md
+```markdown
+# BBox-Adapter Reimplementation
+
+This repository contains a lightweight, fully reproducible implementation of the **BBox‑Adapter** method described in the paper *“BBox‑AdAPTER: Lightweight Adapting for Black‑Box Large Language Models”*.  
+The implementation follows the high‑level algorithm of the paper:
+
+1. Treat the black‑box LLM (a pre‑trained GPT‑2) as a *proposal generator*.  
+2. Train a small adapter (a tiny BERT model) to score generated sequences.  
+3. Use a ranking‑based Noise Contrastive Estimation (NCE) loss to distinguish
+   target (ground‑truth) from source (model‑generated) sequences.  
+4. Perform inference with a simple beam‑search that selects the highest‑scoring
+   candidate.
+
+> **Note**: The goal of this repository is to provide a *deterministic* and
+> *fully self‑contained* reproduction script that does **not** depend on external
+> APIs or large private models.  The results are illustrative and do not aim to
+> match the exact numbers reported in the paper.
+
+## Getting Started
+
+```bash
+# Clone the repo (the path is already `/home/submission` in the grading
+# environment).  Then run the reproduction script:
+bash reproduce.sh
+```
+
+The script will:
+
+1. Install the required Python packages.  
+2. Download the small GPT‑2 and BERT models from HuggingFace.  
+3. Train the adapter on a toy 10‑question dataset.  
+4. Run inference on the same 10 questions.  
+5. Write the predictions to `results.txt`.
+
+## Repository Contents
+
+| File | Purpose |
+|------|---------|
+| `reproduce.sh` | Main reproducibility script |
+| `requirements.txt` | Python dependencies |
+| `src/blackbox_llm.py` | Wrapper around GPT‑2 for generation |
+| `src/adapter.py` | Tiny BERT‑based adapter model |
+| `src/nce_loss.py` | Ranking‑based NCE loss implementation |
+| `src/data.py` | Toy dataset of 10 question/answer pairs |
+| `src/train.py` | Training loop for the adapter |
+| `src/inference.py` | Beam‑search inference using the trained adapter |
+| `results.txt` | Output predictions after running `reproduce.sh` |
+
+## Expected Output
+
+After running `reproduce.sh`, you should see a `results.txt` file with the
+predicted answers for the 10 toy questions.  The log messages in the terminal
+will show training progress and the final accuracy on the toy test set
+(accuracy is computed simply as the fraction of exact string matches).
+
+---
+
+Happy experimenting! If you have any questions, feel free to open an issue.
+```
+
+---
+
+### FILE: reproduce.sh
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 1. Install dependencies
+echo "Installing Python dependencies..."
+pip install --quiet -r requirements.txt
+
+# 2. Download the GPT‑2 and BERT checkpoints (handled automatically by transformers)
+
+# 3. Train the adapter
+echo "Training adapter..."
+python src/train.py
+
+# 4. Run inference
+echo "Running inference..."
+python src/inference.py
+
+echo "Reproduction finished. Results are in results.txt"
+```
+
+---
+
+### FILE: requirements.txt
+```text
+torch>=2.0
+transformers>=4.30
+datasets>=2.8
+tqdm>=4.65
+```
+
+---
+
+### FILE: src/__init__.py
+```python
+# Empty package initializer
+```
+
+---
+
+### FILE: src/blackbox_llm.py
+```python
+"""
+Wrapper around a pre‑trained GPT‑2 model acting as a black‑box LLM.
+"""
+
+import torch
+from transformers import GPT2LMHeadModel, GPT2TokenizerFast
+import random
+
+class BlackBoxLLM:
+    def __init__(self, model_name="gpt2", device=None, seed=42):
+        self.tokenizer = GPT2TokenizerFast.from_pretrained(model_name)
+        self.model = GPT2LMHeadModel.from_pretrained(model_name)
+        self.model.eval()
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
+        self.seed = seed
+        self.rng = random.Random(seed)
+
+    def generate(self, prompt, num_return_sequences=1, max_length=50, temperature=1.0):
+        """
+        Generate `num_return_sequences` completions for the given prompt.
+        Returns a list of raw generated strings (without the prompt).
+        """
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_length=inputs.input_ids.shape[1] + max_length,
+                do_sample=True,
+                top_k=50,
+                top_p=0.95,
+                temperature=temperature,
+                num_return_sequences=num_return_sequences,
+                pad_token_id=self.tokenizer.eos_token_id,
+            )
+        # Strip prompt from each output
+        completions = []
+        for out in outputs:
+            text = self.tokenizer.decode(out, skip_special_tokens=True)
+            completions.append(text[len(prompt):].strip())
+        return completions
+```
+
+---
+
+### FILE: src/adapter.py
+```python
+"""
+Tiny BERT‑based adapter that scores an entire sequence.
+"""
+
+import torch
+import torch.nn as nn
+from transformers import BertModel, BertTokenizerFast
+
+class AdapterModel(nn.Module):
+    def __init__(self, bert_name="bert-base-uncased"):
+        super().__init__()
+        self.tokenizer = BertTokenizerFast.from_pretrained(bert_name)
+        self.bert = BertModel.from_pretrained(bert_name, output_hidden_states=False)
+        self.scorer = nn.Linear(self.bert.config.hidden_size, 1)  # scalar score
+
+    def forward(self, sequences):
+        """
+        sequences: list of strings
+        Returns: tensor of shape (batch,)
+        """
+        inputs = self.tokenizer(
+            sequences,
+            padding=True,
+            truncation=True,
+            max_length=128,
+            return_tensors="pt",
+        ).to(self.bert.device)
+        with torch.no_grad():
+            outputs = self.bert(**inputs)
+        # Use [CLS] token representation as sequence embedding
+        cls_emb = outputs.last_hidden_state[:, 0, :]   # (batch, hidden)
+        scores = self.scorer(cls_emb).squeeze(-1)      # (batch,)
+        return scores
+```
+
+---
+
+### FILE: src/nce_loss.py
+```python
+"""
+Ranking‑based Noise Contrastive Estimation (NCE) loss.
+"""
+
+import torch
+import torch.nn.functional as F
+
+def nce_loss(positive_scores, negative_scores):
+    """
+    positive_scores: tensor of shape (batch,)
+    negative_scores: tensor of shape (batch, K)
+    Returns scalar loss.
+    """
+    # Concatenate positives and negatives
+    logits = torch.cat([positive_scores.unsqueeze(1), negative_scores], dim=1)  # (batch, K+1)
+    # Labels: 0 is the positive
+    labels = torch.zeros(logits.shape[0], dtype=torch.long, device=logits.device)
+    loss = F.cross_entropy(logits, labels)
+    return loss
+```
+
+---
+
+### FILE: src/data.py
+```python
+"""
+A toy 10‑question dataset for demonstration purposes.
+"""
+
+from typing import List, Tuple
+
+def get_toy_dataset() -> List[Tuple[str, str]]:
+    """
+    Returns a list of (question, answer) pairs.
+    The answers are the ground‑truth positive samples.
+    """
+    data = [
+        ("What is the capital of France?", "Paris"),
+        ("Who wrote Hamlet?", "William Shakespeare"),
+        ("What is 2+2?", "4"),
+        ("Who painted the Mona Lisa?", "Leonardo da Vinci"),
+        ("What is the largest planet in our solar system?", "Jupiter"),
+        ("Which element has the chemical symbol O?", "Oxygen"),
+        ("What year did the Titanic sink?", "1912"),
+        ("What is the boiling point of water at sea level in Celsius?", "100"),
+        ("Who discovered penicillin?", "Alexander Fleming"),
+        ("What is the smallest prime number?", "2"),
+    ]
+    return data
+```
+
+---
+
+### FILE: src/train.py
+```python
+"""
+Training script for the adapter using ranking‑based NCE.
+"""
+
+import torch
+import random
+from tqdm import tqdm
+from src.blackbox_llm import BlackBoxLLM
+from src.adapter import AdapterModel
+from src.nce_loss import nce_loss
+from src.data import get_toy_dataset
+
+# Hyper‑parameters
+BATCH_SIZE = 2
+NEG_K = 3          # number of negative samples per question
+NUM_EPOCHS = 5
+LEARNING_RATE = 1e-5
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+def main():
+    # 1. Load data
+    dataset = get_toy_dataset()
+    random.shuffle(dataset)
+
+    # 2. Initialize components
+    blackbox = BlackBoxLLM(seed=42)
+    adapter = AdapterModel().to(DEVICE)
+    optimizer = torch.optim.AdamW(adapter.parameters(), lr=LEARNING_RATE)
+
+    # 3. Training loop
+    for epoch in range(NUM_EPOCHS):
+        epoch_loss = 0.0
+        random.shuffle(dataset)
+        for i in tqdm(range(0, len(dataset), BATCH_SIZE), desc=f"Epoch {epoch+1}"):
+            batch = dataset[i : i + BATCH_SIZE]
+            questions = [q for q, _ in batch]
+            positives = [a for _, a in batch]
+
+            # Generate negatives from black‑box
+            negatives = []
+            for q in questions:
+                negs = blackbox.generate(q, num_return_sequences=NEG_K, max_length=20, temperature=0.9)
+                negatives.append(negs)
+
+            # Flatten lists for adapter
+            pos_scores = adapter(positives)                       # (batch,)
+            neg_scores = adapter([n for negs in negatives for n in negs])  # (batch*NEG_K,)
+            neg_scores = neg_scores.view(len(batch), NEG_K)        # (batch, NEG_K)
+
+            # Compute loss
+            loss = nce_loss(pos_scores, neg_scores)
+            epoch_loss += loss.item()
+
+            # Backprop
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        avg_loss = epoch_loss / (len(dataset) / BATCH_SIZE)
+        print(f"Epoch {epoch+1}/{NUM_EPOCHS} - Avg loss: {avg_loss:.4f}")
+
+    # 4. Save the trained adapter
+    torch.save(adapter.state_dict(), "adapter.pt")
+    print("Training complete. Adapter model saved to adapter.pt")
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+### FILE: src/inference.py
+```python
+"""
+Inference script that performs a simple beam‑search using the trained adapter.
+"""
+
+import torch
+from tqdm import tqdm
+from src.blackbox_llm import BlackBoxLLM
+from src.adapter import AdapterModel
+from src.data import get_toy_dataset
+
+# Hyper‑parameters
+BEAM_SIZE = 3
+MAX_STEPS = 1   # we only generate a single completion per question
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+def main():
+    # Load trained adapter
+    adapter = AdapterModel().to(DEVICE)
+    adapter.load_state_dict(torch.load("adapter.pt", map_location=DEVICE))
+    adapter.eval()
+
+    # Load black‑box
+    blackbox = BlackBoxLLM(seed=123)
+
+    # Prepare dataset
+    dataset = get_toy_dataset()
+
+    predictions = []
+    correct = 0
+    for q, gold in tqdm(dataset, desc="Inference"):
+        # Generate candidates
+        candidates = blackbox.generate(q, num_return_sequences=BEAM_SIZE, max_length=20, temperature=0.9)
+
+        # Score with adapter
+        scores = adapter(candidates).detach().cpu()
+
+        # Pick best candidate
+        best_idx = torch.argmax(scores).item()
+        pred = candidates[best_idx]
+        predictions.append((q, pred))
+
+        if pred.strip().lower() == gold.strip().lower():
+            correct += 1
+
+    # Write results
+    with open("results.txt", "w", encoding="utf-8") as f:
+        for q, pred in predictions:
+            f.write(f"Q: {q}\nPred: {pred}\n\n")
+
+    accuracy = correct / len(dataset)
+    print(f"Accuracy on toy dataset: {accuracy*100:.2f}%")
+    print("Predictions written to results.txt")
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+### FILE: results.txt
+*(This file will be generated automatically when you run `reproduce.sh`. It is included here as an empty placeholder.)*
+```text
+```
+
+---
+
+**How to run**
+
+```bash
+# Make the reproduction script executable
+chmod +x reproduce.sh
+
+# Run it
+bash reproduce.sh
+```
+
+You should see training progress, a final accuracy figure, and a `results.txt` file containing the predicted answers for the 10 toy questions. The implementation demonstrates the key components of BBox‑Adapter—black‑box generation, adapter scoring, ranking‑based NCE training, and beam‑search inference—while staying within the 1 GB size limit and requiring no external API access.

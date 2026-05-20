@@ -1,0 +1,169 @@
+2026-03-14 14:11:21.527687 ======================================================================
+2026-03-14 14:11:21.527810 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 14:11:21.527868 ======================================================================
+2026-03-14 14:11:21.527906 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/self-expansion/paper.md
+2026-03-14 14:11:21.527938 Log path: paper2code_react5_Gpt-oss-20b_trial5/self-expansion
+2026-03-14 14:11:21.527971 Model: Openai/Gpt-oss-20b
+2026-03-14 14:11:21.528001 Max iterations: 5
+2026-03-14 14:11:21.528034 Run reproduce.sh: False
+2026-03-14 14:11:21.528069 Run LLM paper check: True
+2026-03-14 14:11:21.528099 
+2026-03-14 14:11:21.528128 Loading paper...
+2026-03-14 14:11:21.528333 Paper length: 84481 chars (using 84481 for prompt)
+2026-03-14 14:11:21.528374 
+2026-03-14 14:11:21.548091 --- Iteration 0: Initial generation ---
+2026-03-14 14:12:28.735244   Created: generated_reproduction.txt
+2026-03-14 14:12:28.735364 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial5/self-expansion/submission (1 files)
+2026-03-14 14:12:28.735406 
+2026-03-14 14:12:28.735457 --- Iteration 1: Observe & Refine ---
+2026-03-14 14:12:45.014131 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Checklist – What the paper requires vs. what the current repo implements**
+
+| # | Requirement (from paper) | Status in repo | Notes / Fixes |
+|---|---------------------------|----------------|---------------|
+| 1 | **Frozen ViT backbone** (pre‑trained, no fine‑tune) | OK | The ViT‑B/16 is loaded and frozen. |
+| 2 | **Modular adapters** – functional adapter + representation descriptor per layer | PARTIAL | Adapters are added only to the last 3 transformer blocks; the paper allows any layer. Expand to all layers or make layer‑selection configurable. |
+| 3 | **Representation descriptor** – trained as a distribution‑shift indicator (auto‑encoder or VAE) | PARTIAL | A lightweight AE is used, but the training objective and loss weighting are not fully exposed. Add explicit reconstruction loss and optional KL term if VAE. |
+| 4 | **Expandable weighting router** – learns soft mixture of adapters | PARTIAL | Router exists but is not expandable (fixed number of adapters). Implement dynamic expansion of router weights when a new adapter is added. |
+| 5 | **Self‑expansion trigger** – uses descriptor’s reconstruction error (z‑score) to decide when/where to add a new adapter | PARTIAL | Threshold logic is present but hard‑coded; expose hyper‑parameters (threshold, window size) and allow per‑layer thresholds. |
+| 6 | **Sub‑linear expansion** – only add adapters when necessary | PARTIAL | Current code adds a new adapter for every task (if shift detected) but does not enforce sub‑linear growth across layers. Add logic to reuse existing adapters when possible. |
+| 7 | **No rehearsal / memory buffer** | OK | No replay buffer is used. |
+| 8 | **Training loop** – freeze previous adapters, train new ones, joint training of router | PARTIAL | Previous adapters are frozen, but router is not jointly updated with new adapters (it is re‑initialized). Implement joint back‑prop for router and new adapter. |
+| 9 | **Hyper‑parameters** – learning rate, batch size, optimizer, scheduler, weight decay, etc. | MISSING | Add a config file or argparse section that matches the paper’s values (e.g., lr=1e‑4, batch=32, AdamW, cosine LR). |
+|10 | **Dataset & splits** – CIFAR‑100 class‑incremental (10 tasks, 10 classes each) | OK | Matches typical experiments, but confirm that the split matches the paper’s exact ordering. |
+|11 | **Evaluation metrics** – average accuracy, forgetting, per‑task accuracy | MISSING | Implement accuracy over all seen classes after each task, forgetting metric (Δ accuracy), and optionally per‑task curves. |
+|12 | **Baselines** – compare against other PTM‑based CL methods (e.g., DualPrompt, L2P) | MISSING | Add scripts to run baselines or at least provide placeholders. |
+|13 | **Reproduce.sh** – single script that runs the full pipeline and outputs the paper’s numbers | MISSING | Add a reproducible shell script that sets seeds, runs training, evaluation, and prints results. |
+|14 | **Reproducibility** – fixed random seeds, deterministic ops | PARTIAL | Seeds are set but deterministic ops (e.g., CuDNN) may not be fully controlled. |
+|15 | **Documentation** – README with experiment instructions | PARTIAL | Provide clear instructions, dependencies, and how to reproduce the results. |
+
+**Summary**
+
+- **Missing**: Hyper‑parameter config, evaluation metrics, baselines, reproducibility script, full sub‑linear expansion logic.
+- **Incorrect**: None identified; the core components are present but not fully aligned with the paper’s description.
+- **Partial**: Adapter placement, descriptor training, router expansion, self‑expansion logic, training loop jointness, documentation.
+
+**Actionable Fixes**
+
+1. Add a `config.yaml` or argparse section with the exact hyper‑parameters from the paper.
+2. Extend the adapter module to be added to *any* transformer block, not just the last three.
+3. Implement a dynamic router that expands its weight matrix when a new adapter is added.
+4. Use the representation descriptor’s reconstruction error to trigger expansion per layer, with configurable thresholds.
+5. Freeze previous adapters and jointly train the router and new adapters.
+6. Compute and log average accuracy, forgetting, and per‑task accuracy after each task.
+7. Provide a `reproduce.sh` that sets seeds, runs training, evaluation, and prints the final metrics.
+8. Add baseline scripts or at least placeholders for comparison.
+9. Update README with clear steps and dependencies.
+
+Once these items are addressed, the repo will faithfully reproduce the key contributions of the paper.
+2026-03-14 14:12:45.014359 
+2026-03-14 14:12:45.014565 Generating refined code...
+2026-03-14 14:13:41.973550   Updated: generated_reproduction.txt
+2026-03-14 14:13:41.973663 
+2026-03-14 14:13:41.973707 --- Iteration 2: Observe & Refine ---
+2026-03-14 14:13:49.171315 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Unimplemented Core Components**
+
+- **MISSING:** Full implementation of the **SEMA architecture** – modular adapters consisting of a functional adapter and a representation descriptor.  
+- **MISSING:** Implementation of the **expandable weighting router** that learns a weighted mixture of adapters.  
+- **MISSING:** Logic for **self‑expansion**: detecting distribution shift via representation descriptors and adding new adapters at the appropriate transformer layer.  
+- **MISSING:** Mechanism to **freeze previously learned adapters** to prevent catastrophic forgetting while training new ones.  
+
+**Missing Hyper‑parameter / Training Details**
+
+- **MISSING:** Explicit hyper‑parameters (learning rate, batch size, optimizer type, weight decay, scheduler, number of epochs per task).  
+- **MISSING:** Code that sets these hyper‑parameters from `config.yaml` or hard‑codes them in `main.py`.  
+
+**Missing Data & Preprocessing**
+
+- **MISSING:** Dataset loading and preprocessing pipeline for the class‑incremental learning tasks used in the paper (e.g., split into tasks, image transforms).  
+- **MISSING:** Code that ensures non‑overlapping class sets across tasks and correct data shuffling.  
+
+**Missing Evaluation & Metrics**
+
+- **MISSING:** Implementation of evaluation metrics used in the paper (overall accuracy, average forgetting, etc.).  
+- **MISSING:** Code that logs and reports these metrics after each task.  
+
+**Missing Baselines & Comparison**
+
+- **MISSING:** Implementation or integration of baseline methods (e.g., DualPrompt, L2P, other PTM‑based CL methods) for fair comparison.  
+
+**Missing Experimental Setup**
+
+- **MISSING:** Explicit training loop that iterates over tasks, performs self‑expansion, freezes modules, and evaluates after each task.  
+- **MISSING:** Checkpointing logic to save and load model states per task.  
+- **MISSING:** Hardware configuration (GPU/CPU usage) and reproducibility seeds.  
+
+**Missing `reproduce.sh`**
+
+- **MISSING:** A shell script that installs dependencies, prepares data, runs training, and generates the results reported in the paper.  
+
+**Conclusion**
+
+All critical components required to reproduce the SEMA method and its experimental results are currently missing from the provided code skeleton. No part of the core algorithm, training procedure, data handling, evaluation, or reproducibility pipeline is present.  
+
+**ALL_OK:** *No – reproduction is incomplete.*
+2026-03-14 14:13:49.171564 
+2026-03-14 14:13:49.171727 Generating refined code...
+2026-03-14 14:14:53.128877   Updated: generated_reproduction.txt
+2026-03-14 14:14:53.129014 
+2026-03-14 14:14:53.129080 --- Iteration 3: Observe & Refine ---
+2026-03-14 14:14:58.487150 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core method/algorithm – no implementation of the modular adapters, representation descriptors, or expandable weighting router.  
+MISSING: Hyperparameters – learning rate, batch size, optimizer settings, training epochs, etc. are not defined.  
+MISSING: Data setup – no dataset loading, preprocessing, or class‑incremental split logic.  
+MISSING: Evaluation – no code for computing accuracy, forgetting metrics, or comparing against baselines.  
+MISSING: Experimental setup – no training loop, checkpointing, or hardware configuration.  
+MISSING: reproduce.sh – no script to run the full pipeline and generate the paper’s results.
+2026-03-14 14:14:58.487319 
+2026-03-14 14:14:58.487470 Generating refined code...
+2026-03-14 14:15:25.448034   Updated: generated_reproduction.txt
+2026-03-14 14:15:25.448162 
+2026-03-14 14:15:25.448214 --- Iteration 4: Observe & Refine ---
+2026-03-14 14:15:27.593700 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core method/algorithm (SEMA architecture, modular adapters, representation descriptors, expandable router, self‑expansion logic)  
+MISSING: Hyperparameters (learning rate, batch size, optimizer settings, training epochs, etc.)  
+MISSING: Data setup (datasets, preprocessing, train/validation splits, class‑incremental task ordering)  
+MISSING: Evaluation (metrics, test protocol, baseline comparisons, reporting format)  
+MISSING: Experimental setup (hardware configuration, training steps, checkpointing, logging)  
+MISSING: reproduce.sh (script to run the full training/evaluation pipeline and reproduce the paper’s results)
+2026-03-14 14:15:27.593907 
+2026-03-14 14:15:27.594120 Generating refined code...
+2026-03-14 14:16:18.962116   Updated: generated_reproduction.txt
+2026-03-14 14:16:18.962231 
+2026-03-14 14:16:18.962314 --- Iteration 5: Observe & Refine ---
+2026-03-14 14:16:21.306351 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core method/algorithm (SEMA architecture, modular adapters, representation descriptors, expandable router, self‑expansion logic)  
+MISSING: Training procedure (optimizer, learning‑rate schedule, loss functions, task‑wise training loop)  
+MISSING: Hyperparameters (learning rate, batch size, number of epochs, weight decay, etc.)  
+MISSING: Data setup (datasets used, preprocessing steps, train/validation splits, class‑incremental protocol)  
+MISSING: Evaluation (metrics, test procedure, baseline comparisons)  
+MISSING: Experimental setup (hardware specifications, checkpointing, logging)  
+MISSING: reproduce.sh (script to run the full training/evaluation pipeline)  
+
+All critical components from the paper are absent in the provided code.
+2026-03-14 14:16:21.306527 
+2026-03-14 14:16:21.306688 Generating refined code...
+2026-03-14 14:17:24.740112   Updated: generated_reproduction.txt
+2026-03-14 14:17:24.740221 
+2026-03-14 14:17:24.740263 ======================================================================
+2026-03-14 14:17:24.740301 REACT BASELINE COMPLETE
+2026-03-14 14:17:24.740335 ======================================================================
+2026-03-14 14:17:24.740378 Total iterations: 6
+2026-03-14 14:17:24.740415 API tokens: 39789 completion, 166385 prompt
+2026-03-14 14:17:24.740450 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial5/self-expansion/generated_code_response.txt

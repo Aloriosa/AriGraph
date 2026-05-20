@@ -1,0 +1,170 @@
+2026-03-14 15:27:22.388671 ======================================================================
+2026-03-14 15:27:22.388800 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 15:27:22.388860 ======================================================================
+2026-03-14 15:27:22.388926 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/adaptive-pruning/paper.md
+2026-03-14 15:27:22.388975 Log path: paper2code_react5_Gpt-oss-20b_trial1/adaptive-pruning
+2026-03-14 15:27:22.389013 Model: Openai/Gpt-oss-20b
+2026-03-14 15:27:22.389064 Max iterations: 5
+2026-03-14 15:27:22.389101 Run reproduce.sh: False
+2026-03-14 15:27:22.389154 Run LLM paper check: True
+2026-03-14 15:27:22.389188 
+2026-03-14 15:27:22.389222 Loading paper...
+2026-03-14 15:27:22.389860 Paper length: 91398 chars (using 91398 for prompt)
+2026-03-14 15:27:22.389930 
+2026-03-14 15:27:22.408948 --- Iteration 0: Initial generation ---
+2026-03-14 15:28:16.999408   Created: generated_reproduction.txt
+2026-03-14 15:28:16.999509 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial1/adaptive-pruning/submission (1 files)
+2026-03-14 15:28:16.999551 
+2026-03-14 15:28:16.999602 --- Iteration 1: Observe & Refine ---
+2026-03-14 15:28:27.285617 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / incomplete aspects compared to the paper**
+
+| Status | Requirement from the paper | Reason |
+|--------|----------------------------|--------|
+| **MISSING** | Outlier‑aware salience scoring for pruning masks | Code only removes heads statically; no salience metric or dynamic mask update. |
+| **MISSING** | Dynamic adjustment of LoRA rank during training (adaptive tuning) | Code shows a fixed‑rank LoRA adapter; no logic to increase rank based on layer importance. |
+| **MISSING** | Self‑distillation loss that shares teacher and student parameters | The script mentions a “lightweight distillation loss” but no concrete implementation or loss function is shown. |
+| **MISSING** | Training‑time and inference‑time efficiency metrics (speed‑up, memory footprint) | No measurement or reporting of FLOPs, runtime, or memory usage. |
+| **MISSING** | Exact hyper‑parameter settings (learning rate, batch size, number of steps, optimizer, scheduler) | The script uses defaults; paper specifies specific values for fair comparison. |
+| **MISSING** | Dataset and task coverage (RoBERTa/T5/LLaMA on multiple GLUE, SQuAD, etc.) | Only SST‑2 is used; the paper evaluates on many tasks and models. |
+| **MISSING** | Evaluation protocol (accuracy, F1, etc. across tasks) | Only accuracy on SST‑2 is reported; no multi‑task evaluation. |
+| **MISSING** | Baseline comparisons (LoRA, SPA, LRP, etc.) | No baseline runs or comparative plots. |
+| **MISSING** | Experimental setup details (GPU type, number of epochs, checkpointing) | Not documented; paper reports 8× speed‑up, 70 % memory reduction, etc. |
+| **MISSING** | `reproduce.sh` or a single script that reproduces the paper’s results | No such script is provided. |
+
+**Partial / potentially incorrect aspects**
+
+| Status | Requirement | Comment |
+|--------|-------------|---------|
+| **PARTIAL** | Adaptive pruning logic | The code prunes attention heads early but lacks the paper’s dynamic mask update and salience scoring. |
+| **PARTIAL** | LoRA‑style adapter | A LoRA adapter is used, but the rank is fixed; the paper’s adaptive rank adjustment is missing. |
+| **PARTIAL** | Self‑distillation | Mentioned but not fully implemented; unclear if teacher/student share parameters as described. |
+
+**OK**
+
+| Status | Requirement | Comment |
+|--------|-------------|---------|
+| **OK** | Basic use of Hugging‑Face `transformers`, `datasets`, `peft`, `accelerate` | The code correctly imports and uses these libraries. |
+| **OK** | Fine‑tuning a RoBERTa‑Base on SST‑2 | The script runs a valid fine‑tuning pipeline. |
+| **OK** | Reporting final accuracy | Accuracy is printed after training. |
+
+**Conclusion**
+
+The provided code only implements a very simplified, proof‑of‑concept version of APT and does **not** reproduce the core algorithmic contributions, hyper‑parameters, evaluation protocol, or experimental results described in the paper. Significant additions and corrections are required to match the paper’s methodology.
+2026-03-14 15:28:27.285803 
+2026-03-14 15:28:27.286006 Generating refined code...
+2026-03-14 15:29:25.948265   Updated: generated_reproduction.txt
+2026-03-14 15:29:25.948368 
+2026-03-14 15:29:25.948411 --- Iteration 2: Observe & Refine ---
+2026-03-14 15:29:30.413082 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core method/algorithm (APT implementation)  
+MISSING: Hyperparameters (learning rate, batch size, etc.)  
+MISSING: Data setup (datasets, preprocessing, splits)  
+MISSING: Evaluation (metrics, protocol, baselines)  
+MISSING: Experimental setup (hardware, training steps, checkpoints)  
+MISSING: reproduce.sh (full pipeline to reproduce paper results)
+2026-03-14 15:29:30.413233 
+2026-03-14 15:29:30.413375 Generating refined code...
+2026-03-14 15:30:11.039608   Updated: generated_reproduction.txt
+2026-03-14 15:30:11.039722 
+2026-03-14 15:30:11.039765 --- Iteration 3: Observe & Refine ---
+2026-03-14 15:30:19.194187 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Explicit hyper‑parameter settings (learning rate, batch size, weight‑decay, optimizer, scheduler, number of training steps, etc.) as reported in the paper.  
+- Full data‑processing pipeline and train/validation/test splits for all tasks used in the paper (e.g., SST‑2, other GLUE tasks, T5 tasks, LLaMA fine‑tuning).  
+- Implementation of the *outlier‑aware salience scoring* function that drives the pruning mask updates.  
+- Logic for *adaptive pruning* that adjusts the pruning masks \(\mathcal{M}_t\) during training according to the salience scores.  
+- Logic for *adaptive tuning* that adjusts the LoRA rank \(\mathcal{R}_t\) based on layer importance, not just a fixed schedule.  
+- Self‑distillation procedure that shares teacher and student parameters and uses a teacher‑student loss as described in the paper.  
+- Evaluation protocol that reports task performance relative to the full‑fine‑tuned baseline (e.g., “98 % task performance when pruning 60 % of parameters”).  
+- Baseline comparisons (LoRA, pruning‑only, SPA, LRP, etc.) to demonstrate the claimed speed‑up and memory savings.  
+- Detailed experimental setup: hardware specifications, number of GPUs, batch size per GPU, total training time, checkpointing strategy.  
+- A `reproduce.sh` (or equivalent) script that runs the entire pipeline end‑to‑end and reproduces the paper’s results.  
+
+**PARTIAL**  
+- Core idea of *adaptive pruning* is partially implemented as pruning a fixed fraction of attention heads, but it lacks the dynamic, salience‑driven mask updates described in the paper.  
+- Core idea of *adaptive tuning* is partially implemented as a simple LoRA‑style rank increase, but it does not adapt the rank per layer based on importance or use the proposed adaptive schedule.  
+- Self‑distillation is mentioned but the actual implementation details (shared parameters, loss formulation) are not shown.  
+
+**INCORRECT**  
+- None identified beyond the missing components; the existing code does not contain obvious logic errors that contradict the paper.  
+
+**OK**  
+- The code demonstrates a minimal, runnable example that trains a RoBERTa‑base model on SST‑2, showing that the framework can be executed.  
+
+**Conclusion**  
+The reproduction is incomplete: many essential components of APT (adaptive pruning masks, salience scoring, adaptive rank tuning, self‑distillation, evaluation, baselines, hyper‑parameters, reproducibility script) are missing or only partially implemented. The developer must add these elements to achieve a faithful reproduction of the paper’s results.
+2026-03-14 15:30:19.194390 
+2026-03-14 15:30:19.194627 Generating refined code...
+2026-03-14 15:31:12.257516   Updated: generated_reproduction.txt
+2026-03-14 15:31:12.257628 
+2026-03-14 15:31:12.257677 --- Iteration 4: Observe & Refine ---
+2026-03-14 15:31:19.197272 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incomplete Elements (must be added or fixed)**  
+
+| Category | Requirement from the paper | Status in the current repo |
+|----------|-----------------------------|----------------------------|
+| Core Method | Full implementation of the **APT adapter** (dynamic input/output dimensions, rank `r_apt`, and integration into the transformer layers). | **MISSING** – `apt.py` contains only a placeholder class; no dynamic resizing or rank adjustment logic. |
+| Core Method | **Outlier‑aware salience scoring** to generate pruning masks during early training. | **MISSING** – no salience function or mask‑generation code. |
+| Core Method | **Self‑distillation** that shares teacher and student parameters to aid pruning. | **MISSING** – no distillation loss or teacher‑student loop. |
+| Training Procedure | **Dynamic pruning schedule**: increase sparsity `γ_t` early, then add tuning parameters. | **MISSING** – `train.py` runs a single static training loop with no pruning schedule. |
+| Hyperparameters | Target sparsity `γ_T`, pruning thresholds `γ_t`, tuning parameter budget `Δ_t`, learning rate, batch size, number of training steps, optimizer settings. | **MISSING** – `train.py` uses hard‑coded defaults; no configuration file or command‑line args for these values. |
+| Data Setup | Dataset selection (e.g., GLUE, SQuAD, etc.), preprocessing steps, train/validation splits, tokenization. | **MISSING** – `utils.py` contains only a stub; no dataset loading or preprocessing logic. |
+| Evaluation | Metrics (accuracy, F1, etc.), evaluation protocol, checkpointing, and logging of results. | **MISSING** – no evaluation code; `train.py` only prints training loss. |
+| Baselines | Implementation or invocation of baseline methods (LoRA, SPA, LRP, etc.) for comparison. | **MISSING** – no baseline code or scripts. |
+| Reproducibility Script | `reproduce.sh` should orchestrate data download, environment setup, training, evaluation, and result aggregation. | **MISSING** – `reproduce.sh` is empty. |
+| Hardware / Training Steps | Explicit training steps, GPU usage, mixed‑precision settings, checkpoint frequency. | **MISSING** – no hardware configuration or step count. |
+| Documentation | README should describe how to run experiments, reproduce results, and interpret outputs. | **PARTIAL** – README exists but lacks detailed instructions. |
+
+**Summary**  
+All critical components of the APT method (dynamic pruning, salience scoring, adapter design, self‑distillation, training schedule, evaluation, and reproducibility) are currently missing or incomplete. The repository needs substantial additions to faithfully reproduce the paper’s experiments.
+2026-03-14 15:31:19.197457 
+2026-03-14 15:31:19.197568 Generating refined code...
+2026-03-14 15:32:11.620204   Updated: generated_reproduction.txt
+2026-03-14 15:32:11.620302 
+2026-03-14 15:32:11.620344 --- Iteration 5: Observe & Refine ---
+2026-03-14 15:32:18.663003 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- **Core APT algorithm** – No implementation of the outlier‑aware salience scoring, pruning‑mask update, or adaptive rank expansion logic described in the paper.  
+- **Self‑distillation** – No code that shares teacher and student parameters or performs knowledge‑distillation during fine‑tuning.  
+- **Training loop with constraints** – No enforcement of the sparsity target γt or tuning‑parameter budget Δt per training step.  
+- **Dataset handling** – No code that loads the benchmark datasets (e.g., GLUE, SQuAD, LLaMA‑specific data), applies the preprocessing pipeline, or splits train/validation/test sets as in the experiments.  
+- **Evaluation** – No metrics computation (accuracy, F1, etc.) or comparison against the baselines listed in the paper (LoRA, SPA, LRP, etc.).  
+- **Hyperparameters** – No explicit values for learning rate, batch size, number of training steps, pruning schedule, rank schedule, or optimizer settings that match the paper.  
+- **reproduce.sh** – The script does not invoke the full training, pruning, and evaluation pipeline; it merely installs dependencies.  
+- **Logging / checkpointing** – No mechanism to save intermediate models, pruning masks, or logs for reproducing the reported results.  
+
+**PARTIAL**  
+- The repository contains a skeleton `APT` adapter module, but it lacks the dynamic resizing of input/output dimensions and rank (`r_apt`) that the paper emphasizes.  
+- A placeholder for a salience‑scoring function exists, but it is not connected to the pruning mask updates.  
+
+**INCORRECT**  
+- (None identified – the current code does not contain any of the key components, so correctness cannot be assessed.)  
+
+**Conclusion**  
+All critical components required to reproduce the paper’s results are missing or incomplete. The repository needs a full implementation of the APT algorithm, proper hyperparameter settings, dataset pipelines, evaluation routines, and a working `reproduce.sh` that runs the entire experiment.
+2026-03-14 15:32:18.663211 
+2026-03-14 15:32:18.663321 Generating refined code...
+2026-03-14 15:33:06.563802   Updated: generated_reproduction.txt
+2026-03-14 15:33:06.563907 
+2026-03-14 15:33:06.563948 ======================================================================
+2026-03-14 15:33:06.563998 REACT BASELINE COMPLETE
+2026-03-14 15:33:06.564033 ======================================================================
+2026-03-14 15:33:06.564082 Total iterations: 6
+2026-03-14 15:33:06.564115 API tokens: 35251 completion, 189335 prompt
+2026-03-14 15:33:06.564148 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial1/adaptive-pruning/generated_code_response.txt

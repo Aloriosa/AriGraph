@@ -1,0 +1,234 @@
+#!/usr/bin/env python
+"""Training script for DPMs-ANT (simplified).
+
+The script:
+- Loads a pre-trained Stable Diffusion 1.5 UNet (DDPM backbone).
+- Adds a LoRA adapter to every linear layer in the UNet.
+- Builds a tiny binary classifier (SimNet) that predicts source vs. target for a noised image.
+- Implements a similarity‑guided loss term `γ * ∇x log p(y|x)` added to the denoising loss.
+- Performs a PGD loop to find a “worst‑case” noise for each minibatch.
+- Trains only the LoRA parameters.
+
+Author: ChatGPT
+"""
+
+import argparse
+from pathlib import Path
+import os
+import random
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from diffusers import AutoencoderKL, UNet2DConditionModel, \
+    DDPMScheduler, StableDiffusionPipeline
+from diffusers.training_utils import EMAModel
+from diffusers.optimization import get_scheduler
+from accelerate import Accelerator
+from transformers import AutoTokenizer
+from datasets import load_from_disk
+import numpy as np
+
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
+class LoRALinear(nn.Module):
+    """Simple LoRA linear layer."""
+    def __init__(self, module: nn.Linear, r=4):
+        super().__init__()
+        self.module = module
+        self.r = r
+        self.lora_a = nn.Parameter(torch.randn(r, module.in_features) * 0.01)
+        self.lora_b = nn.Parameter(torch.randn(module.out_features, r) * 0.01)
+        # Freeze the original weights
+        for p in self.module.parameters():
+            p.requires_grad = False
+
+    def forward(self, x):
+        return self.module(x) + (self.lora_b @ (self.lora_a @ x.transpose(-1, -2))).transpose(-1, -2)
+
+def replace_lora(model: nn.Module, r=4):
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Linear):
+            setattr(model, name, LoRALinear(module, r=r))
+    return model
+
+class SimNet(nn.Module):
+    """Very small binary classifier on a flattened noisy image."""
+    def __init__(self, img_size=64, channels=3):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(channels * img_size * img_size, 512),
+            nn.ReLU(),
+            nn.Linear(512, 1)
+        )
+
+    def forward(self, x):
+        return torch.sigmoid(self.net(x))
+
+# --------------------------------------------------------------------------- #
+# Main training loop
+# --------------------------------------------------------------------------- #
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source_model", type=str, required=True,
+                        help="HF repo id or local path of pre-trained diffusion model")
+    parser.add_argument("--target_dataset", type=str, required=True,
+                        help="Path to target dataset (datasets format)")
+    parser.add_argument("--output_dir", type=str, default="outputs",
+                        help="Where to save checkpoints and logs")
+    parser.add_argument("--train_steps", type=int, default=300,
+                        help="Number of gradient steps")
+    parser.add_argument("--batch_size", type=int, default=4,
+                        help="Batch size")
+    parser.add_argument("--learning_rate", type=float, default=5e-5,
+                        help="Learning rate for LoRA")
+    parser.add_argument("--gamma", type=float, default=5.0,
+                        help="Weight of similarity guided term")
+    parser.add_argument("--pgd_steps", type=int, default=10,
+                        help="PGD steps for adversarial noise")
+    parser.add_argument("--pgd_lr", type=float, default=0.02,
+                        help="PGD step size")
+    args = parser.parse_args()
+
+    accelerator = Accelerator()
+    device = accelerator.device
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # ------------------------------------------------------------------ #
+    # 0. Load pretrained diffusion components
+    # ------------------------------------------------------------------ #
+    print("Loading pretrained diffusion model…")
+    pipe = StableDiffusionPipeline.from_pretrained(
+        args.source_model,
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        safety_checker=None,
+        requires_safety_checker=False
+    )
+    pipe = pipe.to(device)
+    pipe.train()
+
+    # Replace UNet with LoRA adapters
+    print("Adding LoRA adapters…")
+    pipe.unet = replace_lora(pipe.unet)
+    # Freeze all other params
+    for name, param in pipe.named_parameters():
+        if "lora" not in name:
+            param.requires_grad = False
+
+    # ------------------------------------------------------------------ #
+    # 1. Prepare dataset
+    # ------------------------------------------------------------------ #
+    print("Preparing target dataset…")
+    ds = load_from_disk(args.target_dataset)
+    # Resize images to 64x64 for simplicity
+    def preprocess(example):
+        img = example["image"].convert("RGB").resize((64, 64))
+        arr = np.array(img).astype(np.float32) / 127.5 - 1.0  # [-1,1]
+        example["pixel_values"] = torch.from_numpy(arr).permute(2, 0, 1)
+        return example
+
+    ds = ds.map(preprocess, remove_columns=ds.column_names)
+    loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True)
+
+    # ------------------------------------------------------------------ #
+    # 2. Build similarity classifier
+    # ------------------------------------------------------------------ #
+    simnet = SimNet(img_size=64).to(device)
+
+    # ------------------------------------------------------------------ #
+    # 3. Optimizer & scheduler
+    # ------------------------------------------------------------------ #
+    optimizer = torch.optim.AdamW(
+        list(pipe.unet.parameters()) + list(simnet.parameters()),
+        lr=args.learning_rate,
+        weight_decay=0.01
+    )
+    lr_scheduler = get_scheduler(
+        name="linear",
+        optimizer=optimizer,
+        num_warmup_steps=10,
+        num_training_steps=args.train_steps
+    )
+
+    # ------------------------------------------------------------------ #
+    # 4. Training loop
+    # ------------------------------------------------------------------ #
+    pipe.unet.train()
+    simnet.train()
+
+    noise_scheduler = DDPMScheduler.from_pretrained(
+        args.source_model, subfolder="scheduler")
+
+    for step, batch in tqdm(enumerate(loader), total=args.train_steps):
+        if step >= args.train_steps:
+            break
+
+        batch = {k: v.to(device) for k, v in batch.items()}
+        imgs = batch["pixel_values"]
+
+        # Sample random t
+        timesteps = torch.randint(
+            0, noise_scheduler.num_train_timesteps, (imgs.shape[0],), device=device)
+
+        # Get noisy images
+        noise = torch.randn_like(imgs)
+        noisy_imgs = noise_scheduler.add_noise(imgs, noise, timesteps)
+
+        # PGD to find worst‑case noise
+        adv_noise = noise.clone().detach().requires_grad_(True)
+        for _ in range(args.pgd_steps):
+            # Forward pass through UNet
+            with torch.enable_grad():
+                eps_pred = pipe.unet(
+                    noisy_imgs,
+                    timesteps
+                ).sample
+            loss_pgd = ((adv_noise - eps_pred).square()).mean()
+            grad = torch.autograd.grad(loss_pgd, adv_noise)[0]
+            adv_noise = adv_noise + args.pgd_lr * grad.sign()
+            adv_noise = adv_noise.clamp(-1, 1)  # keep in [-1,1] range
+        adv_noise = adv_noise.detach()
+
+        # Recompute noisy images with adversarial noise
+        noisy_imgs_adv = noise_scheduler.add_noise(imgs, adv_noise, timesteps)
+
+        # Classifier‑free guidance style loss
+        eps_pred = pipe.unet(
+            noisy_imgs_adv,
+            timesteps
+        ).sample
+
+        # Ground‑truth noise
+        true_noise = adv_noise
+
+        # Similarity guidance term
+        logits = simnet(noisy_imgs_adv)
+        # For the target image, label=1, source=0
+        labels = torch.ones_like(logits)
+        sim_loss = F.binary_cross_entropy(logits, labels)
+
+        # Combine losses
+        loss = ((true_noise - eps_pred).square()).mean() + args.gamma * sim_loss
+
+        optimizer.zero_grad()
+        accelerator.backward(loss)
+        optimizer.step()
+        lr_scheduler.step()
+
+        if step % 50 == 0:
+            print(f"step {step} loss {loss.item():.4f} sim_loss {sim_loss.item():.4f}")
+
+    # ------------------------------------------------------------------ #
+    # 5. Save LoRA weights
+    # ------------------------------------------------------------------ #
+    print("Saving LoRA adapter…")
+    torch.save(pipe.unet.state_dict(), os.path.join(args.output_dir, "model_adapter.bin"))
+    torch.save(simnet.state_dict(), os.path.join(args.output_dir, "simnet.bin"))
+    print(f"Adapter and classifier saved to {args.output_dir}")
+
+if __name__ == "__main__":
+    main()

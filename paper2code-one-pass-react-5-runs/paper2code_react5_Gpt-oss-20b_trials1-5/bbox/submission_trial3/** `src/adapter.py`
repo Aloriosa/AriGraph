@@ -1,0 +1,43 @@
+"""
+Adapter model and ranking‑based NCE loss.
+"""
+
+import torch
+import torch.nn as nn
+from transformers import DebertaV2Model, DebertaV2TokenizerFast
+from torch.nn.functional import logsumexp
+
+class Adapter(nn.Module):
+    def __init__(self, base_model="microsoft/deberta-v3-base"):
+        super().__init__()
+        self.tokenizer = DebertaV2TokenizerFast.from_pretrained(base_model)
+        self.encoder = DebertaV2Model.from_pretrained(base_model)
+        self.scorer = nn.Linear(self.encoder.config.hidden_size, 1)
+
+    def forward(self, texts):
+        """
+        texts: list of strings (batch)
+        Returns: (batch, 1) scores
+        """
+        enc = self.tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=256)
+        input_ids = enc.input_ids.to(self.encoder.device)
+        attention_mask = enc.attention_mask.to(self.encoder.device)
+        outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+        # use [CLS] token representation
+        cls = outputs.last_hidden_state[:, 0, :]
+        scores = self.scorer(cls).squeeze(-1)  # (batch,)
+        return scores
+
+    @staticmethod
+    def nce_loss(scores_pos, scores_neg):
+        """
+        Ranking‑based NCE loss.
+        scores_pos: (batch,)
+        scores_neg: (batch, n_neg)
+        """
+        # Concatenate positive and negatives
+        all_scores = torch.cat([scores_pos.unsqueeze(1), scores_neg], dim=1)  # (batch, 1+n)
+        # Log-sum-exp
+        lse = logsumexp(all_scores, dim=1)  # (batch,)
+        loss = - (scores_pos - lse)  # (batch,)
+        return loss.mean()

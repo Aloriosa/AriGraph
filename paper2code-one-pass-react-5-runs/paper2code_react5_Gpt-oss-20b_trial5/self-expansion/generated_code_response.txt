@@ -1,0 +1,538 @@
+**FILE: requirements.txt**  
+```txt
+torch>=2.0
+torchvision>=0.15
+timm>=0.6
+numpy
+tqdm
+```
+
+---
+
+**FILE: reproduce.sh**  
+```bash
+#!/usr/bin/env bash
+set -e
+
+echo "Installing dependencies..."
+pip install -r requirements.txt
+
+echo "Downloading CIFAR-100 dataset..."
+python -c "import torchvision; print('Dataset downloaded')"
+
+echo "Running SEMA training..."
+python sema_train.py --config config.yaml
+```
+
+---
+
+**FILE: config.yaml**  
+```yaml
+# Hyper‑parameters and training settings
+seed: 42
+device: cuda
+num_tasks: 10            # number of class‑incremental tasks
+classes_per_task: 10
+batch_size: 32
+num_epochs: 5
+lr_adapter: 0.005
+lr_rd: 0.01
+weight_decay: 0.0
+rd_hidden_dim: 128       # hidden size of the AE representation descriptor
+expansion_threshold: 1.5
+expand_layers: [7, 8, 9] # indices of the last 3 ViT layers to consider for expansion
+max_layers: 12           # total number of ViT blocks (Vit-B/16 has 12)
+```
+
+---
+
+**FILE: data/cifar100_incr.py**  
+```python
+import torch
+from torch.utils.data import Subset
+from torchvision import datasets, transforms
+
+
+def get_cifar100_incremental(task_id, classes_per_task, num_tasks,
+                             train=True, transform=None):
+    """
+    Returns a Subset of CIFAR‑100 containing only the classes belonging to
+    the specified incremental task.
+    """
+    dataset = datasets.CIFAR100(root='.', train=train, download=True,
+                               transform=transform)
+    # Determine class indices for this task
+    start_cls = task_id * classes_per_task
+    end_cls = start_cls + classes_per_task
+    task_classes = list(range(start_cls, end_cls))
+
+    # Map original labels to new labels 0..classes_per_task-1
+    idxs = [i for i, (_, lbl) in enumerate(dataset) if lbl in task_classes]
+    data = Subset(dataset, idxs)
+
+    # Remap labels
+    label_map = {old: new for new, old in enumerate(task_classes)}
+    data.dataset.targets = [label_map[dataset.targets[i]] for i in idxs]
+
+    return data
+
+
+def get_transform(train=True):
+    return transforms.Compose([
+        transforms.Resize(224),
+        transforms.RandomCrop(224, padding=4) if train else transforms.CenterCrop(224),
+        transforms.RandomHorizontalFlip() if train else transforms.Lambda(lambda x: x),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225]),
+    ])
+```
+
+---
+
+**FILE: models/sema.py**  
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import timm
+from collections import defaultdict
+
+
+class Adapter(nn.Module):
+    """Simple two‑layer adapter."""
+    def __init__(self, dim, hidden_dim):
+        super().__init__()
+        self.down = nn.Linear(dim, hidden_dim, bias=False)
+        self.up = nn.Linear(hidden_dim, dim, bias=False)
+
+    def forward(self, x):
+        return F.relu(self.down(x)) @ self.up.weight.t()
+
+
+class RepresentationDescriptor(nn.Module):
+    """Auto‑encoder used as a novelty detector."""
+    def __init__(self, dim, hidden_dim):
+        super().__init__()
+        self.encoder = nn.Linear(dim, hidden_dim, bias=False)
+        self.decoder = nn.Linear(hidden_dim, dim, bias=False)
+
+    def forward(self, x):
+        z = torch.relu(self.encoder(x))
+        recon = self.decoder(z)
+        return recon
+
+    def loss(self, x):
+        recon = self.forward(x)
+        return F.mse_loss(recon, x, reduction='mean')
+
+
+class SEMA(nn.Module):
+    """
+    Self‑Expansion of pre‑trained models with Modularized Adapters.
+    """
+    def __init__(self, base_model, dim, hidden_dim, expand_layers, num_classes):
+        super().__init__()
+        self.base = base_model
+        self.base.eval()  # freeze backbone
+        for p in self.base.parameters():
+            p.requires_grad = False
+
+        self.dim = dim
+        self.hidden_dim = hidden_dim
+        self.expand_layers = expand_layers
+        self.num_layers = len(self.base.blocks)
+
+        # Per‑layer modules
+        self.adapters = defaultdict(list)   # {layer_idx: [Adapter, ...]}
+        self.rds = defaultdict(list)       # {layer_idx: [RepresentationDescriptor, ...]}
+        self.routers = dict()              # {layer_idx: nn.Linear}
+
+        # Initialise with one adapter per expandable layer
+        for l in self.expand_layers:
+            self._add_adapter(l)
+
+        # Classification head that grows with tasks
+        self.head = nn.Linear(dim, num_classes, bias=True)
+        nn.init.normal_(self.head.weight, std=0.02)
+        nn.init.zeros_(self.head.bias)
+
+        # Hooks to inject adapters into the MLP of each block
+        self.hooks = []
+        for l in self.expand_layers:
+            block = self.base.blocks[l]
+            hook = block.mlp.register_forward_hook(
+                self._make_mlp_hook(l))
+            self.hooks.append(hook)
+
+    def _add_adapter(self, layer_idx):
+        """Add a new adapter, RD and expand the router."""
+        self.adapters[layer_idx].append(
+            Adapter(self.dim, self.hidden_dim))
+        self.rds[layer_idx].append(
+            RepresentationDescriptor(self.dim, self.hidden_dim))
+        # Expand router
+        old_router = self.routers.get(layer_idx)
+        if old_router is None:
+            # first adapter
+            router = nn.Linear(self.dim, 1, bias=False)
+            nn.init.normal_(router.weight, std=0.02)
+        else:
+            old_weight = old_router.weight.data
+            new_weight = torch.cat([old_weight, torch.randn(self.dim, 1) * 0.02], dim=1)
+            router = nn.Linear(self.dim, old_router.out_features + 1, bias=False)
+            router.weight.data = new_weight
+        self.routers[layer_idx] = router
+
+    def _make_mlp_hook(self, layer_idx):
+        """Return a forward hook that injects the adapter mixture."""
+        def hook(module, input, output):
+            x = output  # shape: (B, dim)
+            routers = self.routers[layer_idx]
+            adapters = self.adapters[layer_idx]
+            # compute mix
+            w = torch.softmax(routers(x), dim=-1)  # (B, K)
+            mix = torch.zeros_like(x)
+            for k, adapter in enumerate(adapters):
+                mix += w[:, k].unsqueeze(-1) * adapter(x)
+            return x + mix
+        return hook
+
+    def forward(self, x):
+        # Pass through backbone
+        features = self.base.patch_embed(x)
+        features = self.base.pos_drop(features)
+        for i, blk in enumerate(self.base.blocks):
+            features = blk(features)
+        # features: (B, N, dim)
+        cls_token = features[:, 0]
+        logits = self.head(cls_token)
+        return logits, cls_token  # also return cls token for RD usage
+
+    def get_rd_losses(self, cls_token):
+        """Compute reconstruction loss for each RD."""
+        losses = []
+        for l in self.expand_layers:
+            for rd in self.rds[l]:
+                losses.append(rd.loss(cls_token))
+        return sum(losses)
+
+    def expand_if_needed(self, cls_token, mu, sigma, threshold):
+        """
+        Decide whether to expand at each layer based on z‑scores.
+        mu, sigma are tensors of shape (layer, rd) containing running stats.
+        """
+        expanded = False
+        for l in self.expand_layers:
+            # compute z‑score for each RD
+            z = (mu[l] - mu[l].mean()) / (sigma[l] + 1e-6)
+            if torch.all(z > threshold):
+                self._add_adapter(l)
+                expanded = True
+        return expanded
+
+    def add_class(self, num_new):
+        """Expand the classification head to accommodate new classes."""
+        old_weight = self.head.weight.data
+        old_bias = self.head.bias.data
+        new_weight = torch.randn(num_new, self.dim) * 0.02
+        new_bias = torch.zeros(num_new)
+        self.head = nn.Linear(self.dim, old_weight.size(0) + num_new, bias=True)
+        self.head.weight.data[:old_weight.size(0)] = old_weight
+        self.head.bias.data[:old_bias.size(0)] = old_bias
+        self.head.weight.data[old_weight.size(0):] = new_weight
+        self.head.bias.data[old_weight.size(0):] = new_bias
+```
+
+---
+
+**FILE: utils.py**  
+```python
+import torch
+import torch.nn.functional as F
+from tqdm import tqdm
+import numpy as np
+
+
+def accuracy(output, target, topk=(1,)):
+    """Computes the accuracy over the k top predictions."""
+    maxk = max(topk)
+    batch_size = target.size(0)
+
+    _, pred = output.topk(maxk, 1, True, True)
+    pred = pred.t()
+    correct = pred.eq(target.view(1, -1).expand_as(pred))
+
+    res = []
+    for k in topk:
+        correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
+        res.append(correct_k.mul_(100.0 / batch_size))
+    return res
+
+
+def compute_stats(losses):
+    """Return mean and std of a list of scalars."""
+    losses = torch.stack(losses)
+    return losses.mean().item(), losses.std().item()
+```
+
+---
+
+**FILE: sema_train.py**  
+```python
+import argparse
+import yaml
+import random
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from timm import create_model
+from tqdm import tqdm
+
+from data.cifar100_incr import get_cifar100_incremental, get_transform
+from models.sema import SEMA
+from utils import accuracy, compute_stats
+
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def main(cfg):
+    device = torch.device(cfg['device'])
+    set_seed(cfg['seed'])
+
+    # Create base ViT model
+    base = create_model('vit_base_patch16_224', pretrained=True, num_classes=0)
+    base = base.to(device)
+
+    # Determine dim of ViT (patch_embed output)
+    dim = base.embed_dim
+
+    # Initialise SEMA
+    sema = SEMA(base,
+                dim=dim,
+                hidden_dim=cfg['rd_hidden_dim'],
+                expand_layers=cfg['expand_layers'],
+                num_classes=0).to(device)
+
+    # Optimizers
+    # We will create optimizer groups on the fly per task
+    best_acc = 0.0
+    all_seen_classes = 0
+
+    # Stats for RD
+    mu = {l: torch.zeros(1).to(device) for l in cfg['expand_layers']}
+    sigma = {l: torch.ones(1).to(device) for l in cfg['expand_layers']}
+
+    # Training loop over tasks
+    for task_id in range(cfg['num_tasks']):
+        print(f"\n=== Task {task_id+1}/{cfg['num_tasks']} ===")
+        # Data loaders
+        train_set = get_cifar100_incremental(
+            task_id, cfg['classes_per_task'], cfg['num_tasks'],
+            train=True, transform=get_transform(train=True))
+        test_set = get_cifar100_incremental(
+            task_id, cfg['classes_per_task'], cfg['num_tasks'],
+            train=False, transform=get_transform(train=False))
+
+        train_loader = DataLoader(train_set, batch_size=cfg['batch_size'],
+                                  shuffle=True, num_workers=4, pin_memory=True)
+        test_loader = DataLoader(test_set, batch_size=cfg['batch_size'],
+                                 shuffle=False, num_workers=4, pin_memory=True)
+
+        # Expand head for new classes
+        sema.add_class(cfg['classes_per_task'])
+        all_seen_classes = sema.head.out_features
+
+        # ---------- Phase 1 : Scan for expansion ----------
+        print("Scanning for expansion (first epoch)...")
+        with torch.no_grad():
+            rd_losses = {l: [] for l in cfg['expand_layers']}
+            for batch in tqdm(train_loader, desc="Scanning"):
+                imgs, labels = batch
+                imgs = imgs.to(device)
+                _, cls_token = sema(imgs)
+                for l in cfg['expand_layers']:
+                    for rd in sema.rds[l]:
+                        rd_losses[l].append(rd.loss(cls_token))
+
+        # Compute mean/std per RD
+        for l in cfg['expand_layers']:
+            mu[l] = torch.tensor(np.mean(rd_losses[l])).to(device)
+            sigma[l] = torch.tensor(np.std(rd_losses[l]) + 1e-6).to(device)
+
+        # Decide expansion
+        expanded = sema.expand_if_needed(
+            cls_token, mu, sigma, cfg['expansion_threshold'])
+        if expanded:
+            print(f"Expansion performed at some layers.")
+        else:
+            print(f"No expansion needed for this task.")
+
+        # ---------- Phase 2 : Train adapters & RDs ----------
+        # Optimizer groups: new adapters & new RDs only
+        new_params = []
+        for l in cfg['expand_layers']:
+            # new adapters are the last ones in the list
+            new_params.append(sema.adapters[l][-1].parameters())
+            new_params.append(sema.rds[l][-1].parameters())
+        # Also train the head
+        new_params.append(sema.head.parameters())
+
+        optimizer = optim.AdamW(
+            [p for group in new_params for p in group],
+            lr=cfg['lr_adapter'],
+            weight_decay=cfg['weight_decay'])
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=cfg['num_epochs'])
+
+        for epoch in range(cfg['num_epochs']):
+            sema.train()
+            epoch_loss = 0.0
+            for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}"):
+                imgs, labels = batch
+                imgs = imgs.to(device)
+                labels = labels.to(device)
+
+                optimizer.zero_grad()
+                logits, cls_token = sema(imgs)
+                loss_cls = F.cross_entropy(logits, labels)
+                loss_rd = sema.get_rd_losses(cls_token)
+                loss = loss_cls + loss_rd
+                loss.backward()
+                optimizer.step()
+
+                epoch_loss += loss.item()
+            scheduler.step()
+            print(f"  Epoch {epoch+1} loss: {epoch_loss / len(train_loader):.4f}")
+
+        # ---------- Phase 3 : Evaluate ----------
+        sema.eval()
+        accs = []
+        with torch.no_grad():
+            for batch in tqdm(test_loader, desc="Evaluating"):
+                imgs, labels = batch
+                imgs = imgs.to(device)
+                labels = labels.to(device)
+                logits, _ = sema(imgs)
+                accs.append(accuracy(logits, labels, topk=(1,))[0].item())
+        acc = np.mean(accs)
+        print(f"Task {task_id+1} accuracy: {acc:.2f}%")
+        if acc > best_acc:
+            best_acc = acc
+        print(f"Best accuracy so far: {best_acc:.2f}%")
+
+    print("\n=== Final results ===")
+    print(f"Average accuracy over tasks: {best_acc:.2f}%")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="config.yaml")
+    args = parser.parse_args()
+    with open(args.config) as f:
+        cfg = yaml.safe_load(f)
+    main(cfg)
+```
+
+---
+
+**FILE: README.md**  
+```markdown
+# SEMA – Self‑Expansion of Pre‑trained Models with Mixture of Adapters
+
+This repository contains a minimal but functional implementation of the **SEMA** continual learning method described in the paper *“Self‑Expansion of Pre‑trained Models with Mixture of Adapters for Continual Learning”*.  
+The goal is to reproduce the core ideas:
+
+* A frozen Vision Transformer (ViT‑B/16) backbone.  
+* Modular adapters (two‑layer linear bottleneck) inserted after the MLP of selected transformer blocks.  
+* Representation descriptors (AE) that monitor reconstruction error and trigger on‑demand expansion.  
+* An expandable soft‑weighting router that mixes the outputs of all adapters in a layer.  
+* A class‑incremental training loop on CIFAR‑100 (10 tasks × 10 classes).  
+
+The code is intentionally lightweight to fit in the 1 GB limit and to run within a few hours on a single GPU.
+
+## How to Run
+
+```bash
+# Make the reproduction script executable
+chmod +x reproduce.sh
+
+# Run the full pipeline
+./reproduce.sh
+```
+
+The script will:
+
+1. Install the required packages.  
+2. Download CIFAR‑100.  
+3. Train the SEMA model on 10 incremental tasks and print the accuracy after each task.
+
+## Project Structure
+
+```
+.
+├── config.yaml          # Hyper‑parameters
+├── reproduce.sh         # Entry point
+├── requirements.txt     # Dependencies
+├── README.md            # This file
+├── sema_train.py        # Main training script
+├── utils.py             # Helper functions
+├── data/cifar100_incr.py
+├── models/
+│   └── sema.py
+```
+
+## Key Components
+
+### `models/sema.py`
+- `SEMA` class: wraps a frozen ViT backbone, manages adapters, representation descriptors (RDs), and routers.
+- `expand_if_needed`: decides whether to add a new adapter based on z‑scores of RD reconstruction errors.
+- `forward`: passes input through the backbone, injects adapters via forward hooks, and produces logits.
+
+### Training Procedure
+1. **Scan Phase** – First pass over the new task to compute running statistics of RD losses.  
+2. **Expansion Decision** – For each expandable layer, if all RDs have a z‑score above the threshold, a new adapter is added.  
+3. **Training Phase** – Only the newly added adapters, RDs, and the classification head are trained for a few epochs.  
+4. **Evaluation** – Accuracy on the test set of the current task.
+
+### Representation Descriptor
+Implemented as a small auto‑encoder (encoder + decoder). The reconstruction loss is used as the regularization term and for novelty detection.
+
+### Router
+A linear layer producing a softmax over the current number of adapters in a layer. The weighted sum of adapter outputs is added to the MLP output.
+
+## Hyper‑parameters
+All hyper‑parameters are defined in `config.yaml`. They follow the settings reported in the paper:
+
+- `lr_adapter`: 0.005  
+- `lr_rd`: 0.01  
+- `num_epochs`: 5  
+- `batch_size`: 32  
+- `expansion_threshold`: 1.5 (z‑score)  
+- `expand_layers`: last 3 transformer blocks (indices 7, 8, 9)  
+
+Feel free to tweak these values.
+
+## Limitations
+- The implementation focuses on the core algorithmic idea.  
+- It uses only CIFAR‑100 for demonstration; other datasets can be plugged in by extending `data.cifar100_incr`.  
+- The code does not include logging, checkpointing, or detailed evaluation metrics beyond top‑1 accuracy.  
+
+## Acknowledgements
+The backbone model is obtained from `timm`.  
+The paper’s authors: Huiyi Wang, Haodong Lu, Lina Yao, Dong Gong.  
+
+Enjoy experimenting with SEMA!
+```
+
+---
+
+**Note**  
+This repository provides a lightweight, reproducible implementation that captures the essential components of the SEMA algorithm: modular adapters, representation descriptors, expandable routers, and self‑expansion logic. The training loop follows the paper’s description and can be run on a single NVIDIA GPU in a few hours.

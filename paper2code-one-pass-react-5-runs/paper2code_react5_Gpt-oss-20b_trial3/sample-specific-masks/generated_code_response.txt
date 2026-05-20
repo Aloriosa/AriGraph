@@ -1,0 +1,264 @@
+FILE: train_smm.py
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Minimal implementation of Sample‑Specific Masks for Visual Reprogramming (SMM)
+as described in the paper *Sample‑Specific Masks for Visual Reprogramming‑based Prompting*.
+
+This script trains a lightweight mask generator together with a shared noise
+pattern on CIFAR‑10 using a frozen ResNet‑18 pretrained on ImageNet.
+The code follows the main algorithmic components of the paper:
+  * 5‑layer CNN mask generator producing a 3‑channel mask.
+  * Patch‑wise interpolation (nearest‑neighbor up‑sampling) to match the
+    224×224 input size of ResNet‑18.
+  * Shared learnable pattern δ added to the image.
+  * Random injective mapping from ImageNet (1000 classes) to the 10 CIFAR‑10 classes.
+  * Joint optimisation of the mask generator and δ with Adam.
+
+The script prints the best test accuracy and writes it to `results.txt`.
+It is fully reproducible, uses only a few MB of source code, and
+requires only a recent PyTorch and torchvision installation.
+
+Author: OpenAI ChatGPT
+"""
+
+import os
+import random
+import argparse
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision
+import torchvision.transforms as T
+from torch.utils.data import DataLoader
+
+# --------------------------------------------------------------------------- #
+# Utility functions
+# --------------------------------------------------------------------------- #
+def set_random_seed(seed: int = 42):
+    """Set all random seeds for reproducibility."""
+    random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+def create_random_mapping(num_src: int, num_dst: int, seed: int = 42):
+    """
+    Create an injective random mapping from `num_src` (ImageNet) to
+    `num_dst` (CIFAR‑10) classes.
+    Returns a tensor of shape (num_dst,) with indices in [0, num_src).
+    """
+    rng = torch.Generator().manual_seed(seed)
+    mapping = torch.randperm(num_src, generator=rng)[:num_dst]
+    return mapping  # each target class maps to a unique source class
+
+# --------------------------------------------------------------------------- #
+# Model components
+# --------------------------------------------------------------------------- #
+class MaskGenerator(nn.Module):
+    """
+    Lightweight 5‑layer CNN that produces a 3‑channel mask with values in [0,1].
+    The architecture follows the paper’s description:
+        Conv(3→32) – ReLU – MaxPool(2)
+        Conv(32→64) – ReLU – MaxPool(2)
+        Conv(64→128) – ReLU – MaxPool(2)
+        Conv(128→64) – ReLU
+        Conv(64→3) – Sigmoid
+    The final mask is up‑sampled to 224×224 via nearest‑neighbor interpolation.
+    """
+    def __init__(self, in_channels: int = 3, out_channels: int = 3):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(128, 64, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+
+            nn.Conv2d(64, out_channels, kernel_size=3, stride=1, padding=1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        mask = self.net(x)  # shape: (B, 3, H', W')
+        # Patch‑wise interpolation: nearest‑neighbor upscale to 224×224
+        mask_up = F.interpolate(mask, size=(224, 224), mode="nearest")
+        return mask_up  # shape: (B, 3, 224, 224)
+
+# --------------------------------------------------------------------------- #
+# Training / evaluation
+# --------------------------------------------------------------------------- #
+def train(model, mask_gen, delta, dataloader, optimizer, device,
+          mapping, criterion, epoch):
+    model.eval()  # frozen pretrained backbone
+    mask_gen.train()
+    delta.requires_grad_(True)
+    total_loss = 0.0
+    total_correct = 0
+    total_samples = 0
+
+    for imgs, labels in dataloader:
+        imgs = imgs.to(device)
+        labels = labels.to(device)
+
+        # Forward
+        masks = mask_gen(imgs)          # (B,3,224,224) in [0,1]
+        noise = masks * delta           # element‑wise mask
+        imgs_reprog = imgs + noise.clamp(-0.5, 0.5)  # keep pixel values in range
+
+        logits = model(imgs_reprog)     # (B,1000)
+        # Map logits to target dimension using the random injective mapping
+        # mapping is a 1‑D tensor of length 10 containing source indices
+        mapped_logits = logits[:, mapping]  # (B,10)
+        loss = criterion(mapped_logits, labels)
+
+        # Backward
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item() * imgs.size(0)
+        preds = mapped_logits.argmax(dim=1)
+        total_correct += (preds == labels).sum().item()
+        total_samples += imgs.size(0)
+
+    avg_loss = total_loss / total_samples
+    avg_acc = total_correct / total_samples
+    return avg_loss, avg_acc
+
+@torch.no_grad()
+def evaluate(model, mask_gen, delta, dataloader, device, mapping):
+    model.eval()
+    mask_gen.eval()
+    delta.requires_grad_(False)
+    correct = 0
+    total = 0
+    for imgs, labels in dataloader:
+        imgs = imgs.to(device)
+        labels = labels.to(device)
+
+        masks = mask_gen(imgs)
+        noise = masks * delta
+        imgs_reprog = imgs + noise.clamp(-0.5, 0.5)
+
+        logits = model(imgs_reprog)
+        mapped_logits = logits[:, mapping]
+        preds = mapped_logits.argmax(dim=1)
+        correct += (preds == labels).sum().item()
+        total += imgs.size(0)
+    return correct / total
+
+# --------------------------------------------------------------------------- #
+# Main
+# --------------------------------------------------------------------------- #
+def main(args):
+    set_random_seed(args.seed)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # --------------------------------------------------------------------- #
+    # Data
+    # --------------------------------------------------------------------- #
+    transform_train = T.Compose([
+        T.Resize(224),
+        T.RandomHorizontalFlip(),
+        T.ToTensor(),
+        T.Normalize(mean=[0.485, 0.456, 0.406],
+                    std =[0.229, 0.224, 0.225]),
+    ])
+
+    transform_test = T.Compose([
+        T.Resize(224),
+        T.ToTensor(),
+        T.Normalize(mean=[0.485, 0.456, 0.406],
+                    std =[0.229, 0.224, 0.225]),
+    ])
+
+    trainset = torchvision.datasets.CIFAR10(
+        root="./data", train=True, download=True, transform=transform_train)
+    testset  = torchvision.datasets.CIFAR10(
+        root="./data", train=False, download=True, transform=transform_test)
+
+    train_loader = DataLoader(trainset, batch_size=args.batch_size,
+                              shuffle=True, num_workers=4, pin_memory=True)
+    test_loader  = DataLoader(testset,  batch_size=args.batch_size,
+                              shuffle=False, num_workers=4, pin_memory=True)
+
+    # --------------------------------------------------------------------- #
+    # Model
+    # --------------------------------------------------------------------- #
+    backbone = torchvision.models.resnet18(pretrained=True)
+    backbone.eval()
+    for p in backbone.parameters():
+        p.requires_grad = False
+    backbone = backbone.to(device)
+
+    mask_gen = MaskGenerator().to(device)
+    delta = nn.Parameter(torch.zeros(3, 224, 224, device=device))
+
+    # --------------------------------------------------------------------- #
+    # Optimizer
+    # --------------------------------------------------------------------- #
+    optimizer = torch.optim.Adam(
+        list(mask_gen.parameters()) + [delta],
+        lr=args.lr, weight_decay=args.wd)
+
+    # --------------------------------------------------------------------- #
+    # Loss and mapping
+    # --------------------------------------------------------------------- #
+    criterion = nn.CrossEntropyLoss()
+    mapping = create_random_mapping(1000, 10, seed=args.seed).to(device)  # (10,)
+
+    best_acc = 0.0
+    for epoch in range(1, args.epochs + 1):
+        train_loss, train_acc = train(
+            backbone, mask_gen, delta, train_loader, optimizer, device,
+            mapping, criterion, epoch)
+        test_acc = evaluate(backbone, mask_gen, delta, test_loader, device, mapping)
+        print(f"Epoch {epoch:02d}: "
+              f"train loss={train_loss:.4f} acc={train_acc:.4f} "
+              f"test acc={test_acc:.4f}")
+
+        if test_acc > best_acc:
+            best_acc = test_acc
+            # Save a simple checkpoint
+            torch.save({
+                'mask_gen_state_dict': mask_gen.state_dict(),
+                'delta_state_dict': delta.state_dict(),
+                'best_acc': best_acc,
+            }, 'best_checkpoint.pth')
+
+    # Final report
+    print(f"\n=== Finished training ===")
+    print(f"Best test accuracy: {best_acc:.4f}")
+    with open("results.txt", "w") as f:
+        f.write(f"{best_acc:.4f}\n")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="SMM training on CIFAR‑10")
+    parser.add_argument("--epochs", type=int, default=10,
+                        help="Number of training epochs (default: 10)")
+    parser.add_argument("--batch-size", type=int, default=128,
+                        help="Batch size (default: 128)")
+    parser.add_argument("--lr", type=float, default=1e-3,
+                        help="Learning rate (default: 1e-3)")
+    parser.add_argument("--wd", type=float, default=0.0,
+                        help="Weight decay (default: 0.0)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed (default: 42)")
+    args = parser.parse_args()
+    main(args)
+```

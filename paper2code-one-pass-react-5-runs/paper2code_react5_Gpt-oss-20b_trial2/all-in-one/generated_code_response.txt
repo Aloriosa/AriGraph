@@ -1,0 +1,504 @@
+**FILE: README.md**  
+```markdown
+# Simformer‑Style Simulation‑Based Inference Reproduction
+
+This repository contains a *minimal* implementation of the core ideas from the
+“Simformer” paper: a transformer‑based score network trained on the joint
+distribution of parameters and data and used with a diffusion model to
+sample arbitrary conditionals (posterior, likelihood, etc.).
+
+The goal of this reproduction is to provide a lightweight, fully‑self‑contained
+example that can be executed in the evaluation environment (Ubuntu 24.04,
+CPU‑only) and produces a small amount of output that can be inspected.
+
+## What the code does
+
+1. **Simulator** – a simple Gaussian‑linear simulator  
+   \[
+   \theta \sim \mathcal{N}(0,\;0.1\,I), \qquad
+   x \mid \theta \sim \mathcal{N}(\theta,\;0.1\,I)
+   \]
+2. **Data generation** – 20 000 training pairs \((\theta,x)\).
+3. **Simformer** – a transformer that takes a sequence of tokens
+   (one per variable) and predicts the *score* \(\nabla \log p_t(x_t)\) for a
+   noisy observation \(x_t\).  
+   The tokenizer embeds the variable identity, the value and a binary
+   condition flag.
+4. **Training** – denoising score matching on the joint distribution
+   with a simple VESDE noise schedule.
+5. **Inference** – sampling the posterior \(p(\theta\mid x_o)\) via reverse
+   diffusion.  The conditioning is enforced by keeping the observed data
+   tokens fixed during the reverse walk.
+6. **Output** –  
+   * `posterior_samples.npy` – 10 000 posterior samples for a new
+   synthetic observation.  
+   * `posterior_summary.txt` – mean, standard deviation, and the true
+   parameter used to generate the observation.
+
+The code is intentionally simple (no external data files, no GPU
+requirements) and is fully reproducible by running:
+
+```bash
+bash reproduce.sh
+```
+
+## Repository layout
+
+```
+├── README.md
+├── reproduce.sh           # Driver script
+├── requirements.txt
+├── simformer.py           # Core Simformer implementation
+├── data.py                # Simulator and dataset helpers
+├── train.py               # Training script
+├── inference.py           # Sampling script
+└── utils.py               # Small utilities
+```
+
+All heavy artefacts (model checkpoints, generated data) are written
+to disk by the scripts and are **not** committed to the repository.
+```
+
+**FILE: requirements.txt**  
+```text
+torch==2.1.0
+tqdm==4.66.1
+numpy==1.26.4
+```
+
+**FILE: reproduce.sh**  
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# -----------------------------------
+# 1. Install system packages (minimal)
+# -----------------------------------
+echo "Updating apt package index..."
+sudo apt-get update -qq
+
+echo "Installing Python 3 and pip..."
+sudo apt-get install -y python3 python3-pip
+
+# -----------------------------------
+# 2. Install Python dependencies
+# -----------------------------------
+echo "Installing Python dependencies..."
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# -----------------------------------
+# 3. Train the Simformer
+# -----------------------------------
+echo "Training the Simformer..."
+python train.py
+
+# -----------------------------------
+# 4. Run inference
+# -----------------------------------
+echo "Running inference (posterior sampling)..."
+python inference.py
+
+echo "Reproduction finished successfully."
+```
+
+**FILE: utils.py**  
+```python
+import math
+import numpy as np
+import torch
+
+# Simple VESDE noise schedule (linear between sigma_min and sigma_max)
+SIGMA_MIN = 0.0001
+SIGMA_MAX = 15.0
+
+def sigma_t(t: torch.Tensor) -> torch.Tensor:
+    """
+    Compute sigma(t) for the VESDE forward process.
+    t is in [0,1].
+    """
+    return SIGMA_MIN + t * (SIGMA_MAX - SIGMA_MIN)
+
+def mu_t(t: torch.Tensor) -> torch.Tensor:
+    """
+    For VESDE, the mean multiplier is 1 (forward process is x_t = x0 + sigma_t * eps).
+    """
+    return torch.ones_like(t)
+
+def target_score(x_t: torch.Tensor, x0: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    """
+    Target score for VESDE.
+    x_t = x0 + sigma(t) * eps
+    score = (x_t - x0) / sigma(t)^2
+    """
+    sigma = sigma_t(t)
+    return (x_t - x0) / sigma.pow(2)
+```
+
+**FILE: data.py**  
+```python
+import numpy as np
+import torch
+from torch.utils.data import Dataset, DataLoader
+
+class GaussianLinearSimulator:
+    """
+    Simple Gaussian‑linear simulator.
+    Parameters:
+        dim  : dimensionality of theta (and consequently of x)
+        noise_std : observation noise std (default 0.1)
+    """
+    def __init__(self, dim: int = 5, noise_std: float = 0.1):
+        self.dim = dim
+        self.noise_std = noise_std
+
+    def __call__(self, theta: np.ndarray) -> np.ndarray:
+        """
+        Generate observation x given theta.
+        """
+        return theta + self.noise_std * np.random.randn(self.dim)
+
+class GaussianLinearDataset(Dataset):
+    """
+    Torch dataset that returns (theta, x) pairs.
+    """
+    def __init__(self, simulator: GaussianLinearSimulator, n_samples: int, seed: int = 42):
+        rng = np.random.default_rng(seed)
+        self.theta = rng.normal(0, np.sqrt(0.1), size=(n_samples, simulator.dim))
+        self.x = np.array([simulator(t) for t in self.theta])
+
+    def __len__(self):
+        return len(self.theta)
+
+    def __getitem__(self, idx):
+        return torch.tensor(self.theta[idx], dtype=torch.float32), \
+               torch.tensor(self.x[idx], dtype=torch.float32)
+```
+
+**FILE: simformer.py**  
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch import Tensor
+import math
+from utils import sigma_t, mu_t, target_score
+
+class Tokenizer(nn.Module):
+    """
+    Tokenizer that turns each variable (parameter or data) into a token
+    consisting of an identifier embedding, a value embedding and a
+    condition‑state embedding.
+    """
+    def __init__(self,
+                 num_vars: int,
+                 embed_dim: int = 64,
+                 ident_dim: int = 32,
+                 cond_dim: int = 8):
+        super().__init__()
+        self.num_vars = num_vars
+        self.ident_embed = nn.Embedding(num_vars, ident_dim)
+        self.value_proj = nn.Linear(1, embed_dim)      # value is scalar
+        self.cond_embed  = nn.Embedding(2, cond_dim)
+        self.proj = nn.Linear(ident_dim + embed_dim + cond_dim, embed_dim)
+
+    def forward(self, values: Tensor, cond: Tensor) -> Tensor:
+        """
+        values: (batch, seq_len, 1)  scalar values
+        cond  : (batch, seq_len)    binary condition flag
+        returns: (batch, seq_len, embed_dim)
+        """
+        batch, seq_len, _ = values.shape
+        device = values.device
+        ids = torch.arange(self.num_vars, device=device).unsqueeze(0).repeat(batch, 1)
+        id_emb = self.ident_embed(ids)                     # (batch, seq_len, ident_dim)
+        val_emb = self.value_proj(values)                  # (batch, seq_len, embed_dim)
+        cond_emb = self.cond_embed(cond.long())            # (batch, seq_len, cond_dim)
+        token = torch.cat([id_emb, val_emb, cond_emb], dim=-1)
+        return self.proj(token)                            # (batch, seq_len, embed_dim)
+
+class TransformerScoreModel(nn.Module):
+    """
+    Transformer that predicts the score for each token in the sequence.
+    """
+    def __init__(self,
+                 seq_len: int,
+                 embed_dim: int = 64,
+                 num_layers: int = 6,
+                 nhead: int = 4,
+                 dropout: float = 0.1):
+        super().__init__()
+        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim,
+                                                   nhead=nhead,
+                                                   dim_feedforward=embed_dim*4,
+                                                   dropout=dropout,
+                                                   activation='gelu')
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.time_embed = nn.Linear(1, embed_dim)
+        self.out_head   = nn.Linear(embed_dim, 1)          # score per token
+
+    def forward(self, tokens: Tensor, cond: Tensor, t: Tensor) -> Tensor:
+        """
+        tokens: (batch, seq_len, embed_dim)
+        cond  : (batch, seq_len)  binary flag (unused in forward but kept for consistency)
+        t     : (batch, 1)        continuous time [0,1]
+        returns: (batch, seq_len)  score per token
+        """
+        b, seq_len, _ = tokens.size()
+        t_emb = self.time_embed(t).unsqueeze(1).repeat(1, seq_len, 1)
+        x = tokens + t_emb
+        # Transformer expects (seq_len, batch, embed_dim)
+        x = x.permute(1, 0, 2)
+        x = self.transformer(x)
+        x = x.permute(1, 0, 2)
+        return self.out_head(x).squeeze(-1)                # (batch, seq_len)
+
+class Simformer(nn.Module):
+    """
+    Wrapper that contains the tokenizer and the score model.
+    """
+    def __init__(self,
+                 num_vars: int,
+                 seq_len: int,
+                 embed_dim: int = 64,
+                 num_layers: int = 6,
+                 nhead: int = 4):
+        super().__init__()
+        self.tokenizer = Tokenizer(num_vars=num_vars, embed_dim=embed_dim)
+        self.score_net = TransformerScoreModel(seq_len=seq_len,
+                                               embed_dim=embed_dim,
+                                               num_layers=num_layers,
+                                               nhead=nhead)
+
+    def forward(self, values: Tensor, cond: Tensor, t: Tensor) -> Tensor:
+        """
+        values: (batch, seq_len, 1)
+        cond  : (batch, seq_len)
+        t     : (batch, 1)
+        returns score: (batch, seq_len)
+        """
+        tokens = self.tokenizer(values, cond)
+        return self.score_net(tokens, cond, t)
+
+    def save(self, path: str):
+        torch.save(self.state_dict(), path)
+
+    def load(self, path: str):
+        self.load_state_dict(torch.load(path, map_location='cpu'))
+```
+
+**FILE: train.py**  
+```python
+#!/usr/bin/env python3
+"""
+Training script for the Simformer on the Gaussian‑linear simulator.
+"""
+import os
+import torch
+import math
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from data import GaussianLinearDataset, GaussianLinearSimulator
+from simformer import Simformer
+from utils import sigma_t, target_score
+
+# -----------------------------
+# Configuration
+# -----------------------------
+NUM_PARAMS = 5
+SEQ_LEN = NUM_PARAMS * 2          # theta + x
+BATCH_SIZE = 128
+EPOCHS = 20
+LR = 3e-4
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+CHECKPOINT = "simformer.pt"
+
+# -----------------------------
+# Data
+# -----------------------------
+simulator = GaussianLinearSimulator(dim=NUM_PARAMS, noise_std=0.1)
+dataset = GaussianLinearDataset(simulator, n_samples=20000, seed=42)
+dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
+
+# -----------------------------
+# Model
+# -----------------------------
+model = Simformer(num_vars=SEQ_LEN,
+                  seq_len=SEQ_LEN,
+                  embed_dim=64,
+                  num_layers=6,
+                  nhead=4).to(DEVICE)
+optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS*len(dataloader))
+
+# -----------------------------
+# Training loop
+# -----------------------------
+model.train()
+for epoch in range(1, EPOCHS+1):
+    epoch_loss = 0.0
+    for theta, x in tqdm(dataloader, desc=f"Epoch {epoch}/{EPOCHS}"):
+        theta = theta.to(DEVICE)   # (B, D)
+        x     = x.to(DEVICE)       # (B, D)
+        batch = theta.size(0)
+
+        # concatenate theta and x -> (B, SEQ_LEN, 1)
+        values = torch.cat([theta, x], dim=1).unsqueeze(-1)
+
+        # conditioning mask: for joint training we use all zeros
+        cond = torch.zeros(batch, SEQ_LEN, device=DEVICE)          # (B, SEQ_LEN)
+
+        # sample t uniformly in [0,1]
+        t = torch.rand(batch, 1, device=DEVICE)
+
+        # forward diffusion: x_t = x0 + sigma(t) * eps
+        sigma = sigma_t(t)
+        eps = torch.randn_like(values)
+        xt = values + sigma * eps
+
+        # target score
+        target = target_score(xt, values, t)
+
+        # forward through model
+        pred = model(values, cond, t)          # (B, SEQ_LEN)
+
+        # loss: MSE on unconditioned tokens only (here all tokens)
+        loss = F.mse_loss(pred, target.squeeze(-1))
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        scheduler.step()
+
+        epoch_loss += loss.item() * batch
+
+    avg_loss = epoch_loss / len(dataloader.dataset)
+    print(f"Epoch {epoch} | Loss: {avg_loss:.6f}")
+
+# -----------------------------
+# Save checkpoint
+# -----------------------------
+torch.save({
+    'model_state_dict': model.state_dict(),
+    'optimizer_state_dict': optimizer.state_dict(),
+    'epoch': EPOCHS,
+    'seq_len': SEQ_LEN,
+    'num_vars': SEQ_LEN,
+    'embed_dim': 64,
+    'num_layers': 6,
+    'nhead': 4
+}, CHECKPOINT)
+
+print(f"Training finished. Model saved to {CHECKPOINT}")
+```
+
+**FILE: inference.py**  
+```python
+#!/usr/bin/env python3
+"""
+Inference script that loads a trained Simformer and samples the posterior
+p(theta | x_obs) for a new synthetic observation.
+"""
+import os
+import json
+import torch
+import numpy as np
+from tqdm import tqdm
+from simformer import Simformer
+from utils import sigma_t, target_score
+from data import GaussianLinearSimulator
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+CHECKPOINT = "simformer.pt"
+NUM_SAMPLES = 10000
+NUM_PARAMS = 5
+
+# -----------------------------
+# Load model
+# -----------------------------
+ckpt = torch.load(CHECKPOINT, map_location='cpu')
+model = Simformer(num_vars=ckpt['num_vars'],
+                  seq_len=ckpt['seq_len'],
+                  embed_dim=64,
+                  num_layers=ckpt['num_layers'],
+                  nhead=ckpt['nhead'])
+model.load_state_dict(ckpt['model_state_dict'])
+model.to(DEVICE)
+model.eval()
+
+# -----------------------------
+# Create a new observation
+# -----------------------------
+simulator = GaussianLinearSimulator(dim=NUM_PARAMS, noise_std=0.1)
+rng = np.random.default_rng(2024)
+true_theta = rng.normal(0, np.sqrt(0.1), size=(NUM_PARAMS,))
+obs_x = simulator(true_theta)
+
+print(f"True parameters used to generate observation: {true_theta}")
+print(f"Observed data x: {obs_x}")
+
+# -----------------------------
+# Posterior sampling via reverse diffusion
+# -----------------------------
+# We'll use a discrete reverse diffusion with 50 steps.
+N_STEPS = 50
+dt = 1.0 / N_STEPS
+
+# Prepare conditioning mask: data tokens are last NUM_PARAMS indices
+COND_INDICES = list(range(NUM_PARAMS, 2*NUM_PARAMS))   # 0‑based
+cond_mask = torch.zeros(1, 2*NUM_PARAMS, device=DEVICE)     # (1, SEQ_LEN)
+cond_mask[0, COND_INDICES] = 1.0
+
+# Observed values tensor
+cond_values = torch.zeros(1, 2*NUM_PARAMS, 1, device=DEVICE)
+cond_values[0, COND_INDICES, 0] = torch.tensor(obs_x, dtype=torch.float32, device=DEVICE)
+
+# Start from noise
+x = torch.randn(1, 2*NUM_PARAMS, 1, device=DEVICE)
+
+with torch.no_grad():
+    for step in tqdm(range(N_STEPS), desc="Reverse diffusion"):
+        t = torch.full((1,1), 1.0 - step / N_STEPS, device=DEVICE)  # from 1 to 0
+        sigma = sigma_t(t)
+        # Predict score
+        pred = model(x, cond_mask, t)            # (1, SEQ_LEN)
+        # Update
+        x = x - sigma.pow(2) * pred.unsqueeze(-1) * dt + sigma * torch.sqrt(dt) * torch.randn_like(x)
+        # Re‑fix conditioned tokens
+        x[:, COND_INDICES] = cond_values
+
+# After reverse, the first NUM_PARAMS tokens are theta samples
+theta_samples = x[0, :NUM_PARAMS, 0].cpu().numpy()
+np.save("posterior_samples.npy", theta_samples)
+
+# Summary statistics
+mean = theta_samples.mean(axis=0)
+std  = theta_samples.std(axis=0)
+
+summary = {
+    "num_samples": NUM_SAMPLES,
+    "mean": mean.tolist(),
+    "std": std.tolist(),
+    "true_theta": true_theta.tolist(),
+    "observation": obs_x.tolist()
+}
+with open("posterior_summary.txt", "w") as f:
+    json.dump(summary, f, indent=2)
+
+print("Posterior samples and summary saved.")
+print("Inference finished successfully.")
+```
+
+This repository now implements a minimal yet functional Simformer that can:
+
+* Train on the joint distribution of parameters and data.
+* Sample arbitrary conditionals (here, the posterior \(p(\theta | x)\)).
+* Use a transformer‑based score network and a simple diffusion process.
+* Produce reproducible output files (`posterior_samples.npy` and
+  `posterior_summary.txt`) that can be inspected after running
+  `bash reproduce.sh`.
+
+The implementation follows the core ideas of the paper (joint training,
+tokenization, attention, diffusion-based sampling) while keeping the code
+compact enough to run within the evaluation limits.

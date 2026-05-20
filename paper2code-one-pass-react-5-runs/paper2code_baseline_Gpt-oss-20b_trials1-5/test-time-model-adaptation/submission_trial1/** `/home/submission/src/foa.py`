@@ -1,0 +1,216 @@
+"""
+Implementation of Forward‑Only Adaptation (FOA).
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import cma
+from typing import Tuple, List, Optional
+
+from .utils import entropy, compute_activation_stats
+
+
+class Prompt(nn.Module):
+    """
+    Learnable prompt to be concatenated to the patch embeddings.
+    The prompt is a set of tokens of shape (N_p, D).
+    """
+
+    def __init__(self, num_tokens: int, dim: int):
+        super().__init__()
+        self.num_tokens = num_tokens
+        # Initialize uniformly in [-1, 1]
+        init = torch.empty(num_tokens, dim).uniform_(-1.0, 1.0)
+        self.prompt = nn.Parameter(init)
+
+    def forward(self):
+        return self.prompt  # shape (N_p, D)
+
+
+class FOA:
+    """
+    Forward‑Only Adaptation class.
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        num_prompt_tokens: int = 3,
+        lambda_fitness: float = 0.1,
+        cma_popsize: int = 28,
+        device: torch.device = torch.device("cpu"),
+    ):
+        self.model = model
+        self.model.eval()  # Freeze backbone
+        self.device = device
+        self.lambda_fitness = lambda_fitness
+
+        # Create prompt (will be replaced during adaptation)
+        dummy_input = torch.rand(1, 3, 224, 224, device=self.device)
+        self.patch_dim = model.patch_embed.proj.out_channels
+        self.prompt_module = Prompt(num_prompt_tokens, self.patch_dim).to(self.device)
+
+        # CMA‑ES configuration
+        self.cma_popsize = cma_popsize
+        self.cma_options = {
+            "popsize": self.cma_popsize,
+            "tolx": 1e-3,
+            "tolfun": 1e-3,
+            "verb_disp": 0,  # suppress CMA output
+        }
+
+        # Store source statistics (CLS token mean & std)
+        self.source_cls_mean: Optional[torch.Tensor] = None
+        self.source_cls_std: Optional[torch.Tensor] = None
+
+    # -------------------------------------------------------------
+    # Helper methods
+    # -------------------------------------------------------------
+    def _register_hooks(self):
+        """
+        Register forward hooks to capture CLS token activations.
+        """
+        self.cls_token = None
+
+        def hook(module, input, output):
+            # output shape: (B, seq_len, D). CLS token is first token.
+            self.cls_token = output[:, 0, :].detach()
+
+        # ViT's last block produces the token embeddings
+        # The exact module depends on timm's ViT implementation.
+        # We capture the output of the last transformer block.
+        # For timm ViT, the block list is `model.blocks`.
+        self.model.blocks[-1].register_forward_hook(hook)
+
+    def compute_source_stats(self, loader):
+        """
+        Compute CLS token mean and std on a few source samples.
+        """
+        self._register_hooks()
+        all_cls = []
+
+        with torch.no_grad():
+            for imgs, _ in loader:
+                imgs = imgs.to(self.device)
+                _ = self.model(imgs)  # forward pass triggers hook
+                if self.cls_token is not None:
+                    all_cls.append(self.cls_token.cpu())
+            all_cls = torch.cat(all_cls, dim=0)  # (N, D)
+
+        self.source_cls_mean, self.source_cls_std = compute_activation_stats(all_cls)
+        self.source_cls_mean = self.source_cls_mean.to(self.device)
+        self.source_cls_std = self.source_cls_std.to(self.device)
+        print("[FOA] Source CLS mean/std computed.")
+
+    def _cma_objective(self, prompt_vec: np.ndarray) -> float:
+        """
+        CMA objective: lower fitness is better.
+        """
+        # Convert to tensor and reshape
+        prompt_tensor = torch.from_numpy(prompt_vec.reshape(
+            self.prompt_module.num_tokens, self.patch_dim)).float().to(self.device)
+
+        # Replace the prompt in the module
+        self.prompt_module.prompt.data.copy_(prompt_tensor)
+
+        # Forward pass with a single batch (handled outside)
+        # The caller will provide the batch and compute predictions.
+
+        # The objective function is computed in the outer loop.
+        # Here we return 0; the actual fitness is computed elsewhere.
+        return 0.0
+
+    # -------------------------------------------------------------
+    # Public API
+    # -------------------------------------------------------------
+    def adapt_batch(
+        self,
+        imgs: torch.Tensor,
+        cls_token_batch: torch.Tensor,
+        probs_batch: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Adapt the prompt for a single batch.
+        Returns the adapted prompt tensor and the fitness value.
+        """
+        B, D = cls_token_batch.shape
+
+        # Compute fitness for the current prompt (before CMA)
+        ent = entropy(probs_batch).mean()  # scalar
+        src_mean = self.source_cls_mean
+        src_std = self.source_cls_std
+        tgt_mean, tgt_std = compute_activation_stats(cls_token_batch)
+
+        diff = torch.norm(tgt_mean - src_mean) + torch.norm(tgt_std - src_std)
+        fitness = ent + self.lambda_fitness * diff
+        fitness_val = fitness.item()
+
+        # CMA‑ES optimization
+        # Flatten prompt to 1‑D np array
+        init_prompt = self.prompt_module.prompt.detach().cpu().numpy().flatten()
+        es = cma.CMAEvolutionStrategy(init_prompt, 0.5, self.cma_options)
+
+        best_prompt = None
+        best_fitness = float("inf")
+
+        # CMA loop: evaluate K candidates
+        for _ in range(self.cma_popsize):
+            solutions = es.ask()  # list of np.ndarray
+            for sol in solutions:
+                prompt_tensor = torch.from_numpy(sol.reshape(
+                    self.prompt_module.num_tokens, self.patch_dim)).float().to(self.device)
+                self.prompt_module.prompt.data.copy_(prompt_tensor)
+
+                # Forward pass for this candidate
+                with torch.no_grad():
+                    _ = self.model(imgs)
+
+                # Compute CLS token and probs
+                cls_token = self.cls_token  # shape (B, D)
+                logits = self.model.head(cls_token)  # (B, C)
+                probs = F.softmax(logits, dim=1)
+
+                # Compute fitness
+                ent_k = entropy(probs).mean()
+                tgt_mean_k, tgt_std_k = compute_activation_stats(cls_token)
+                diff_k = torch.norm(tgt_mean_k - src_mean) + torch.norm(tgt_std_k - src_std)
+                fitness_k = ent_k + self.lambda_fitness * diff_k
+
+                if fitness_k < best_fitness:
+                    best_fitness = fitness_k.item()
+                    best_prompt = sol.copy()
+
+        # Update with best prompt
+        best_prompt_tensor = torch.from_numpy(best_prompt.reshape(
+            self.prompt_module.num_tokens, self.patch_dim)).float().to(self.device)
+        self.prompt_module.prompt.data.copy_(best_prompt_tensor)
+
+        return best_prompt_tensor, best_fitness
+
+    def forward_with_prompt(self, imgs: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass that injects the current prompt into the ViT.
+        """
+        # ViT expects patches: we use the patch_embed module
+        # Compute patch embeddings of the image
+        patches = self.model.patch_embed(imgs)  # (B, N, D)
+        # Now prepend the prompt tokens
+        prompt = self.prompt_module().unsqueeze(0).expand(
+            patches.shape[0], -1, -1)  # (B, N_p, D)
+        x = torch.cat([prompt, patches], dim=1)  # (B, N_p + N, D)
+        # Pass through blocks
+        for blk in self.model.blocks:
+            x = blk(x)
+        # CLS token is first token
+        cls_token = x[:, 0, :]
+        return cls_token
+
+    def activate_shifting(self, cls_token: torch.Tensor,
+                          source_mean: torch.Tensor,
+                          gamma: float = 1.0) -> torch.Tensor:
+        """
+        Shift CLS activations towards the source mean.
+        """
+        return cls_token + gamma * (source_mean - cls_token)

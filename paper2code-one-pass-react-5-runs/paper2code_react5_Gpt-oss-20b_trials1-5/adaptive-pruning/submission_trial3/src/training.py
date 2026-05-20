@@ -1,0 +1,540 @@
+# src/training.py
+"""
+A lightweight implementation of APT (Adaptive Pruning & Tuning) for BERT on the
+GLUE benchmark with self‑knowledge distillation and dynamic LoRA rank growth.
+"""
+
+import math
+import os
+import json
+import time
+from pathlib import Path
+from collections import defaultdict
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
+
+from datasets import load_dataset, load_metric
+from transformers import (
+    AutoTokenizer,
+    AutoModelForSequenceClassification,
+    get_linear_schedule_with_warmup,
+)
+
+# --------------------------------------------------------------------------- #
+# 1. Configuration
+# --------------------------------------------------------------------------- #
+
+MODEL_NAME = "bert-base-uncased"  # Change to "roberta-base" for RoBERTa
+MAX_SEQ_LENGTH = 128
+BATCH_SIZE = 32
+EPOCHS_PER_TASK = 5          # Reduced to keep runtime short
+LR = 2e-4
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Pruning settings
+TARGET_PRUNE_RATIO = 0.60     # Final ratio of pruned dimensions
+PRUNE_SCHEDULE = "cubic"      # 'cubic' or 'linear'
+
+# LoRA settings
+INITIAL_RANK = 4
+MAX_RANK = 8
+LORA_ALPHA = 32
+
+# Distillation
+DISTILL_WEIGHT = 0.5
+DISTILL_EPOCHS = 3
+
+# Salience moving average
+SALIENT_ALPHA = 0.99
+
+# --------------------------------------------------------------------------- #
+# 2. Seed for reproducibility
+# --------------------------------------------------------------------------- #
+SEED = 42
+torch.manual_seed(SEED)
+np.random.seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+
+# --------------------------------------------------------------------------- #
+# 3. Helper classes
+# --------------------------------------------------------------------------- #
+
+class LoRALinear(nn.Module):
+    """
+    A linear layer with optional LoRA adaptation and binary input/output masks.
+    The base weight is frozen during pruning; only the LoRA weights are updated.
+    """
+    def __init__(self, in_features, out_features, bias=True,
+                 r=INITIAL_RANK, alpha=LORA_ALPHA):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.bias = bias
+
+        # Base (frozen) weight
+        self.weight = nn.Parameter(torch.empty(out_features, in_features))
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if bias:
+            self.bias_param = nn.Parameter(torch.empty(out_features))
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in)
+            nn.init.uniform_(self.bias_param, -bound, bound)
+        else:
+            self.register_parameter("bias_param", None)
+
+        # LoRA parameters (trainable)
+        self.r = r
+        self.alpha = alpha
+        self.scaling = alpha / r
+        self.lora_A = nn.Parameter(torch.empty(r, in_features))
+        self.lora_B = nn.Parameter(torch.empty(out_features, r))
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B)
+
+        # Masks: 1.0 for kept dim, 0.0 for pruned
+        self.mask_in = nn.Parameter(torch.ones(in_features), requires_grad=False)
+        self.mask_out = nn.Parameter(torch.ones(out_features), requires_grad=False)
+
+    def forward(self, x):
+        # x: (batch, seq_len, in_features)
+        # Apply input mask
+        x_masked = x * self.mask_in  # broadcast over batch & seq
+        # LoRA update
+        lora_part = (self.lora_B @ (self.lora_A @ x_masked.transpose(-1, -2))).transpose(-1, -2)
+        # Base weight (masked on output dim)
+        base_part = F.linear(x, self.weight * self.mask_out, bias=None)
+        out = base_part + self.scaling * lora_part
+        if self.bias_param is not None:
+            out = out + self.bias_param
+        return out
+
+    def set_new_rank(self, new_r):
+        """Increase LoRA rank by adding new columns."""
+        if new_r <= self.r:
+            return
+        in_f = self.in_features
+        out_f = self.out_features
+        # New parameters
+        new_A = nn.Parameter(torch.empty(new_r, in_f))
+        new_B = nn.Parameter(torch.empty(out_f, new_r))
+        nn.init.kaiming_uniform_(new_A, a=math.sqrt(5))
+        nn.init.zeros_(new_B)
+
+        # Copy old weights
+        new_A[:self.r, :] = self.lora_A.data
+        new_B[:, :self.r] = self.lora_B.data
+
+        # Replace
+        self.lora_A = new_A
+        self.lora_B = new_B
+        self.r = new_r
+        self.scaling = self.alpha / self.r
+
+# --------------------------------------------------------------------------- #
+# 4. Model preparation
+# --------------------------------------------------------------------------- #
+
+def insert_lora_modules(model, target_modules=("query", "value")):
+    """
+    Replace Linear layers inside target_modules (e.g., 'query', 'value')
+    with LoRA wrappers. Returns list of LoRA modules and a mapping from
+    original module to its LoRA replacement.
+    """
+    lora_modules = []
+    orig_to_lora = {}
+
+    for name, submodule in model.named_modules():
+        # Skip already wrapped modules
+        if isinstance(submodule, LoRALinear):
+            continue
+        # Look for target linear attributes
+        for attr in target_modules:
+            if hasattr(submodule, attr):
+                linear = getattr(submodule, attr)
+                if isinstance(linear, nn.Linear):
+                    lora = LoRALinear(
+                        in_features=linear.in_features,
+                        out_features=linear.out_features,
+                        bias=linear.bias is not None,
+                        r=INITIAL_RANK,
+                        alpha=LORA_ALPHA,
+                    )
+                    # Copy base weight & bias
+                    lora.weight.data = linear.weight.data.clone()
+                    if linear.bias is not None:
+                        lora.bias_param.data = linear.bias.data.clone()
+                    # Replace
+                    setattr(submodule, attr, lora)
+                    lora_modules.append(lora)
+                    orig_to_lora[linear] = lora
+    return lora_modules, orig_to_lora
+
+def get_ffn_layers(model):
+    """
+    Return the feed‑forward linear layers inside encoder.
+    For BERT, these are intermediate.dense and output.dense.
+    """
+    ffn_layers = []
+    for name, module in model.named_modules():
+        if "intermediate" in name or "output" in name:
+            if isinstance(module, nn.Linear):
+                ffn_layers.append(module)
+    return ffn_layers
+
+def get_attention_modules(model):
+    """
+    Return all BertSelfAttention modules.
+    """
+    heads = []
+    for module in model.modules():
+        if hasattr(module, "attention") and hasattr(module.attention, "self"):
+            heads.append(module)
+    return heads
+
+# --------------------------------------------------------------------------- #
+# 5. Salience utilities
+# --------------------------------------------------------------------------- #
+
+def kurtosis(tensor):
+    """Compute kurtosis of a tensor along all dimensions."""
+    mean = tensor.mean()
+    std = tensor.std(unbiased=False) + 1e-12
+    m4 = ((tensor - mean) ** 4).mean()
+    return m4 / (std ** 4) - 3.0
+
+def register_forward_hooks(layers, activations):
+    """
+    Register forward hooks to capture activations for salience calculation.
+    activations: dict mapping layer id -> list of activations.
+    """
+    hooks = []
+    for layer in layers:
+        def _hook(module, input, output, key=layer.id):
+            activations[key].append(output.detach())
+        hook = layer.register_forward_hook(_hook)
+        hooks.append(hook)
+    return hooks
+
+def compute_salience(layer, grad, activation):
+    """
+    Compute salience for a linear layer.
+    sal_in: importance per input dimension.
+    sal_out: importance per output dimension.
+    """
+    if grad is None:
+        return None, None
+    # Weight gradient * weight
+    w_grad = grad
+    w = layer.weight
+    # per input dim: sum over outputs
+    sal_in = (w.abs() * w_grad.abs()).sum(dim=0)
+    # per output dim: sum over inputs
+    sal_out = (w.abs() * w_grad.abs()).sum(dim=1)
+    # Add sqrt(kurtosis) of activations to both
+    k = torch.sqrt(kurtosis(activation))
+    sal_in += k
+    sal_out += k
+    return sal_in, sal_out
+
+def compute_lora_salience(lora, grad):
+    """
+    Salience of a LoRA module (sum over all elements).
+    """
+    if grad is None:
+        return None
+    return (lora.lora_B.abs() * grad.abs()).sum()
+
+# --------------------------------------------------------------------------- #
+# 6. Training / evaluation
+# --------------------------------------------------------------------------- #
+
+def load_glue_dataset(task_name):
+    """Load and tokenize GLUE dataset."""
+    raw = load_dataset("glue", task_name)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
+
+    def tokenize(batch):
+        return tokenizer(
+            batch["sentence"] if "sentence" in batch else batch["sentence1"],
+            truncation=True,
+            max_length=MAX_SEQ_LENGTH,
+            padding="max_length",
+        )
+
+    tokenized = raw.map(tokenize, batched=True, remove_columns=raw["train"].column_names)
+    tokenized.set_format("torch")
+    return tokenized, tokenizer
+
+def evaluate_glue(model, task_name):
+    """Evaluate model on GLUE validation set and return metric."""
+    tokenized, _ = load_glue_dataset(task_name)
+    val_loader = DataLoader(tokenized["validation"], batch_size=BATCH_SIZE)
+    model.eval()
+    preds = []
+    labels = []
+
+    with torch.no_grad():
+        for batch in tqdm(val_loader, desc=f"Eval {task_name}"):
+            batch = {k: v.to(DEVICE) for k, v in batch.items()}
+            outputs = model(**batch)
+            logits = outputs.logits
+            preds.append(torch.argmax(logits, dim=-1).cpu())
+            labels.append(batch["label"].cpu())
+
+    preds = torch.cat(preds)
+    labels = torch.cat(labels)
+
+    if task_name in ["sst2", "mnli", "qqp", "qnli", "mrpc", "cola", "rte"]:
+        metric = load_metric("accuracy")
+        acc = metric.compute(predictions=preds.tolist(), references=labels.tolist())["accuracy"]
+        return acc
+    elif task_name == "sts-b":
+        metric = load_metric("pearson")
+        corr = metric.compute(predictions=preds.tolist(), references=labels.tolist())["pearson"]
+        return corr
+    else:
+        return None
+
+def train_apt():
+    """Main training loop for APT on the GLUE benchmark."""
+    # 1. Load base model
+    base_model = AutoModelForSequenceClassification.from_pretrained(
+        MODEL_NAME, num_labels=2, output_hidden_states=True
+    )
+    base_model.to(DEVICE)
+    base_model.train()
+
+    # 2. Insert LoRA adapters
+    lora_modules, orig_to_lora = insert_lora_modules(base_model)
+    print(f"Inserted {len(lora_modules)} LoRA adapters.")
+
+    # 3. Prepare layers for pruning
+    ffn_layers = get_ffn_layers(base_model)
+    attention_modules = get_attention_modules(base_model)
+
+    # 4. Create masks for hidden dimension pruning
+    hidden_dim_mask = torch.ones(base_model.config.hidden_size, device=DEVICE)
+
+    # 5. Salience accumulators
+    salience_in_acc = {id(l): torch.zeros(l.in_features, device=DEVICE) for l in ffn_layers}
+    salience_out_acc = {id(l): torch.zeros(l.out_features, device=DEVICE) for l in ffn_layers}
+    lora_salience_acc = {id(l): torch.tensor(0.0, device=DEVICE) for l in lora_modules}
+    head_salience_acc = {mod: torch.zeros(mod.attention.self.num_attention_heads, device=DEVICE)
+                         for mod in attention_modules}
+
+    # 6. Teacher (frozen base model)
+    teacher = AutoModelForSequenceClassification.from_pretrained(
+        MODEL_NAME, num_labels=2, output_hidden_states=True
+    )
+    teacher.to(DEVICE)
+    teacher.eval()
+    for p in teacher.parameters():
+        p.requires_grad = False
+
+    # 7. Optimizer & scheduler
+    optimizer = torch.optim.AdamW(base_model.parameters(), lr=LR)
+    total_steps = 0  # will be updated per task
+    scheduler = None
+
+    # 8. Training loop over tasks
+    all_metrics = {}
+    for task in ["sst2", "mnli", "qqp", "qnli", "mrpc", "cola", "rte", "sts-b"]:
+        print(f"\n=== Task: {task} ===")
+        tokenized, _ = load_glue_dataset(task)
+        train_loader = DataLoader(tokenized["train"], batch_size=BATCH_SIZE, shuffle=True)
+
+        # Update total steps
+        total_steps = len(train_loader) * EPOCHS_PER_TASK
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=int(0.1 * total_steps),
+            num_training_steps=total_steps,
+        )
+
+        # 9. Forward hooks for activations
+        activations = defaultdict(list)
+        for l in ffn_layers:
+            l.id = id(l)
+        hooks = register_forward_hooks(ffn_layers, activations)
+
+        # 10. Per-epoch loop
+        for epoch in range(1, EPOCHS_PER_TASK + 1):
+            epoch_loss = 0.0
+            base_model.train()
+            start_time = time.time()
+
+            for batch in tqdm(train_loader, desc=f"Epoch {epoch}", leave=False):
+                batch = {k: v.to(DEVICE) for k, v in batch.items()}
+                optimizer.zero_grad()
+
+                # Forward student
+                outputs = base_model(**batch, output_hidden_states=True)
+                logits = outputs.logits
+                ce_loss = nn.CrossEntropyLoss()(logits, batch["label"])
+
+                # Distillation loss
+                with torch.no_grad():
+                    teacher_outputs = teacher(**batch, output_hidden_states=True)
+                mse_loss = 0.0
+                for sh, th in zip(outputs.hidden_states, teacher_outputs.hidden_states):
+                    mse_loss += F.mse_loss(sh, th, reduction="sum")
+                mse_loss = mse_loss / batch["label"].numel()
+                loss = ce_loss + DISTILL_WEIGHT * mse_loss
+                loss.backward()
+
+                # Salience accumulation
+                for l in ffn_layers:
+                    grad = l.weight.grad
+                    act = activations[id(l)].pop(0) if activations[id(l)] else None
+                    sal_in, sal_out = compute_salience(l, grad, act) if act is not None else (None, None)
+                    if sal_in is not None:
+                        salience_in_acc[id(l)] += sal_in.detach()
+                        salience_out_acc[id(l)] += sal_out.detach()
+
+                for lora in lora_modules:
+                    grad = lora.lora_B.grad
+                    sal = compute_lora_salience(lora, grad)
+                    if sal is not None:
+                        lora_salience_acc[id(lora)] += sal.detach()
+
+                for mod in attention_modules:
+                    grad = mod.attention.self.query.weight.grad
+                    if grad is None:
+                        continue
+                    q_w = mod.attention.self.query.weight
+                    head_dim = q_w.shape[0] // mod.attention.self.num_attention_heads
+                    for h in range(mod.attention.self.num_attention_heads):
+                        start = h * head_dim
+                        end = (h + 1) * head_dim
+                        slice_w = q_w[start:end]
+                        slice_g = grad[start:end]
+                        sal = (slice_w.abs() * slice_g.abs()).sum()
+                        head_salience_acc[mod][h] += sal.detach()
+
+                optimizer.step()
+                scheduler.step()
+
+                # Update peak memory
+                torch.cuda.empty_cache()
+
+                epoch_loss += loss.item()
+
+            # 11. Pruning update (after each epoch)
+            if PRUNE_SCHEDULE == "cubic":
+                prune_ratio = TARGET_PRUNE_RATIO + (1 - TARGET_PRUNE_RATIO) * ((1 - epoch / EPOCHS_PER_TASK) ** 3)
+            else:
+                prune_ratio = TARGET_PRUNE_RATIO * epoch / EPOCHS_PER_TASK
+            keep_ratio = 1.0 - prune_ratio
+
+            # Update hidden dimension mask
+            sal_dim = torch.zeros_like(hidden_dim_mask)
+            for l in ffn_layers:
+                sal_dim += salience_in_acc[id(l)] + salience_out_acc[id(l)]
+            keep_dims = int(hidden_dim_mask.sum().item() * keep_ratio)
+            keep_dims = max(1, keep_dims)
+            new_mask = torch.zeros_like(hidden_dim_mask)
+            new_mask[torch.argsort(sal_dim, descending=True)[:keep_dims]] = 1
+            hidden_dim_mask.copy_(new_mask)
+
+            # Apply hidden dim mask to all layers
+            for l in ffn_layers:
+                l.weight.data = l.weight.data * hidden_dim_mask.unsqueeze(0)
+                if l.bias is not None:
+                    l.bias_param.data = l.bias_param.data * hidden_dim_mask
+
+            # Update attention head masks
+            for mod in attention_modules:
+                sal = head_salience_acc[mod]
+                keep_heads = int(head_masks[mod].sum().item() * keep_ratio)
+                keep_heads = max(1, keep_heads)
+                new_mask = torch.zeros_like(head_masks[mod])
+                new_mask[torch.argsort(sal, descending=True)[:keep_heads]] = 1
+                head_masks[mod].copy_(new_mask)
+
+                # Zero out pruned heads in query/value weights
+                head_dim = mod.attention.self.query.weight.shape[0] // mod.attention.self.num_attention_heads
+                for h in range(mod.attention.self.num_attention_heads):
+                    if new_mask[h] == 0:
+                        start = h * head_dim
+                        end = (h + 1) * head_dim
+                        mod.attention.self.query.weight.data[:, start:end] = 0
+                        mod.attention.self.value.weight.data[:, start:end] = 0
+
+            # 12. LoRA rank adaptation
+            lora_salience = [(id(l), lora_salience_acc[id(l)]) for l in lora_modules]
+            lora_salience = [(lid, s) for lid, s in lora_salience if s is not None]
+            lora_salience.sort(key=lambda x: x[1], reverse=True)
+            top_half = len(lora_salience) // 2
+            for lid, _ in lora_salience[:top_half]:
+                lora = next(l for l in lora_modules if id(l) == lid)
+                if lora.r < MAX_RANK:
+                    lora.set_new_rank(min(lora.r + 1, MAX_RANK))
+
+            # 13. Teacher update (copy base weights once)
+            if epoch == 1:
+                with torch.no_grad():
+                    for p_s, p_t in zip(base_model.parameters(), teacher.parameters()):
+                        if p_s is p_t:
+                            continue
+                        if p_s.requires_grad:
+                            p_t.copy_(p_s)
+
+            epoch_time = time.time() - start_time
+            print(f"Epoch {epoch} finished. "
+                  f"Loss={epoch_loss/len(train_loader):.4f} "
+                  f"Time={epoch_time:.1f}s")
+
+            # Reset salience accumulators
+            for key in salience_in_acc:
+                salience_in_acc[key].zero_()
+            for key in salience_out_acc:
+                salience_out_acc[key].zero_()
+            for key in lora_salience_acc:
+                lora_salience_acc[key].zero_()
+            for mod in head_salience_acc:
+                head_salience_acc[mod].zero_()
+
+        # 14. Evaluation after training on this task
+        acc = evaluate_glue(base_model, task)
+        all_metrics[task] = acc
+        print(f"Validation accuracy ({task}): {acc:.4f}")
+
+    # 15. Logging results
+    ckpt_dir = Path("outputs/apt")
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(base_model.state_dict(), ckpt_dir / "model.pt")
+    torch.save({
+        "hidden_dim_mask": hidden_dim_mask.cpu(),
+        "head_masks": {id(m): m.cpu() for m in attention_modules}
+    }, ckpt_dir / "metadata.pt")
+
+    # Inference profiling
+    model = base_model.eval()
+    infer_loader = DataLoader(tokenized["validation"], batch_size=32)
+    t0 = time.time()
+    with torch.no_grad():
+        for batch in infer_loader:
+            batch = {k: v.to(DEVICE) for k, v in batch.items()}
+            model(**batch)
+    infer_time_ms = (time.time() - t0) * 1000 / len(infer_loader)
+
+    metrics = {
+        "train_time_sec": sum(t for t in all_metrics.values()) / len(all_metrics),
+        "infer_time_ms": infer_time_ms,
+        "train_mem_peak_MiB": torch.cuda.max_memory_allocated(DEVICE) / (1024 ** 2),
+        "infer_mem_peak_MiB": torch.cuda.max_memory_allocated(DEVICE) / (1024 ** 2),
+    }
+    metrics.update(all_metrics)
+    with open(ckpt_dir / "metrics.json", "w") as f:
+        json.dump(metrics, f, indent=2)
+    print(f"Results written to {ckpt_dir / 'metrics.json'}")
+    return metrics
+
+if __name__ == "__main__":
+    train_apt()

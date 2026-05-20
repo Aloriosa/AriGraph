@@ -1,0 +1,119 @@
+"""
+Main script that runs FOA on a synthetic dataset.
+"""
+
+import os
+import torch
+import timm
+import numpy as np
+from torch.utils.data import DataLoader
+
+from .dataset import get_random_loader
+from .foa import FOA
+from .utils import entropy
+
+# ------------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------------
+BATCH_SIZE = 32
+NUM_BATCHES = 10  # total number of batches in synthetic stream
+NUM_PROMPT_TOKENS = 3
+LAMBDA_FITNESS = 0.1
+CMA_POPSIZE = 28
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# ------------------------------------------------------------------
+# 1. Load pretrained ViT (freeze all params)
+# ------------------------------------------------------------------
+print("[MAIN] Loading pretrained ViT‑Base...")
+model = timm.create_model(
+    "vit_base_patch16_224",
+    pretrained=True,
+    num_classes=1000,
+    global_pool="avg",
+    drop_rate=0.0,
+    drop_path_rate=0.0,
+)
+model = model.to(DEVICE)
+for p in model.parameters():
+    p.requires_grad = False
+
+# ------------------------------------------------------------------
+# 2. Create synthetic loader
+# ------------------------------------------------------------------
+loader = get_random_loader(batch_size=BATCH_SIZE, num_batches=NUM_BATCHES)
+
+# ------------------------------------------------------------------
+# 3. Compute source stats (CLS token mean & std) on a few random samples
+# ------------------------------------------------------------------
+print("[MAIN] Estimating source CLS statistics (using 32 random samples)...")
+source_loader = DataLoader(
+    dataset=loader.dataset,
+    batch_size=32,
+    shuffle=True,
+)
+foa = FOA(
+    model=model,
+    num_prompt_tokens=NUM_PROMPT_TOKENS,
+    lambda_fitness=LAMBDA_FITNESS,
+    cma_popsize=CMA_POPSIZE,
+    device=DEVICE,
+)
+foa.compute_source_stats(source_loader)
+
+# ------------------------------------------------------------------
+# 4. Adaptation loop over the synthetic test stream
+# ------------------------------------------------------------------
+all_predictions = []
+image_id = 0
+
+for batch_idx, (imgs, labels) in enumerate(loader):
+    imgs = imgs.to(DEVICE)
+    labels = labels.to(DEVICE)
+
+    # Forward pass with current prompt
+    with torch.no_grad():
+        cls_tokens = foa.forward_with_prompt(imgs)
+        logits = model.head(cls_tokens)
+        probs = torch.softmax(logits, dim=1)
+
+    # Activate shifting (optional)
+    shifted_cls = foa.activate_shifting(
+        cls_token=cls_tokens,
+        source_mean=foa.source_cls_mean,
+        gamma=1.0,
+    )
+    # Recompute logits after shifting
+    logits_shifted = model.head(shifted_cls)
+    probs_shifted = torch.softmax(logits_shifted, dim=1)
+
+    # Adapt prompt using CMA‑ES on this batch
+    best_prompt, best_fitness = foa.adapt_batch(
+        imgs=imgs,
+        cls_token_batch=shifted_cls,
+        probs_batch=probs_shifted,
+    )
+    print(
+        f"[FOA] Batch {batch_idx+1}/{NUM_BATCHES} adapted. "
+        f"Best fitness: {best_fitness:.4f}"
+    )
+
+    # Store predictions of the last batch
+    preds = torch.argmax(probs_shifted, dim=1).cpu().numpy()
+    for i, pred in enumerate(preds):
+        all_predictions.append((image_id, int(pred)))
+        image_id += 1
+
+# ------------------------------------------------------------------
+# 5. Write predictions to CSV
+# ------------------------------------------------------------------
+import csv
+
+output_file = "output_predictions.csv"
+print(f"[MAIN] Writing predictions to {output_file} ...")
+with open(output_file, "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["image_id", "predicted_class"])
+    writer.writerows(all_predictions)
+
+print("[MAIN] Adaptation finished. Predictions written to output_predictions.csv")

@@ -1,0 +1,579 @@
+**FILE: requirements.txt**  
+```text
+torch>=2.0
+transformers>=4.35
+datasets>=2.12
+trl>=0.4.0
+accelerate
+sentencepiece
+numpy
+scikit-learn
+pandas
+tqdm
+torchmetrics
+bitsandbytes
+```
+
+---
+
+**FILE: config.yaml**  
+```yaml
+# General settings
+seed: 42
+device: cuda
+
+# Probe training
+probe:
+  model_name: gpt2-medium
+  batch_size: 8
+  lr: 1e-4
+  epochs: 3
+  output_path: outputs/probe
+
+# DPO training
+dpo:
+  base_model: gpt2-medium
+  target_model: gpt2-medium-dpo
+  lr: 1e-6
+  beta: 0.1
+  batch_size: 4
+  epochs: 3
+  max_new_tokens: 20
+  output_path: outputs/dpo
+
+# Evaluation
+eval:
+  max_new_tokens: 20
+  toxicity_model: unitary/toxicbert
+  toxicity_threshold: 0.5
+  wikitext_split: train
+  wiki_num: 2000
+  realtoxicity_prompts: realtoxicityprompts
+```
+
+---
+
+**FILE: utils.py**  
+```python
+import os
+import random
+import numpy as np
+import torch
+import transformers
+from datasets import load_dataset
+from torch.utils.data import Dataset, DataLoader
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModel
+import torchmetrics
+import math
+from tqdm.auto import tqdm
+
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+def ensure_dir(path):
+    os.makedirs(path, exist_ok=True)
+
+def load_tokenizer(model_name):
+    return AutoTokenizer.from_pretrained(model_name, use_fast=False)
+
+def load_model(model_name, device="cuda"):
+    model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
+    return model
+
+def load_encoder(model_name, device="cuda"):
+    return AutoModel.from_pretrained(model_name, output_hidden_states=True).to(device)
+
+# Simple toxicity classifier using a pre‑trained HuggingFace model
+def load_toxicity_classifier(device="cuda"):
+    clf = transformers.pipeline(
+        "text-classification",
+        model="unitary/toxicbert",
+        device=0 if device=="cuda" else -1,
+        return_all_scores=True,
+    )
+    return clf
+
+def compute_toxicity_score(text, clf):
+    # returns average toxicity probability across labels
+    scores = clf(text)[0]
+    # labels: ['toxic', 'severe_toxic', 'obscene', 'threat', 'insult', 'identity_hate']
+    tox_idx = [i for i, l in enumerate(clf.classes_) if "toxic" in l.lower()]
+    probs = [s["score"] for s in scores if s["label"].lower() in {"toxic","severe_toxic","obscene","threat","insult","identity_hate"}]
+    return max(probs) if probs else 0.0
+
+def collate_fn(batch):
+    return {
+        "input_ids": torch.nn.utils.rnn.pad_sequence([b["input_ids"] for b in batch], batch_first=True, padding_value=tokenizer.pad_token_id),
+        "labels": torch.nn.utils.rnn.pad_sequence([b["labels"] for b in batch], batch_first=True, padding_value=-100),
+    }
+
+def get_wikitext_prompts(num=1000, split="train"):
+    ds = load_dataset("wikitext", "wikitext-2-raw-v1", split=split)
+    prompts = []
+    for i in range(min(num, len(ds))):
+        text = ds[i]["text"].strip()
+        if text:
+            prompts.append(text)
+    return prompts
+
+def get_realtoxicity_prompts(num=200):
+    ds = load_dataset("realtoxicityprompts", split="train")
+    prompts = []
+    for i in range(min(num, len(ds))):
+        prompts.append(ds[i]["prompt"])
+    return prompts
+
+def compute_perplexity(model, tokenizer, dataset, device="cuda"):
+    model.eval()
+    total_loss = 0.0
+    total_tokens = 0
+    with torch.no_grad():
+        for batch in DataLoader(dataset, batch_size=4, shuffle=False):
+            input_ids = batch["input_ids"].to(device)
+            labels = input_ids.clone()
+            outputs = model(input_ids, labels=labels)
+            loss = outputs.loss
+            total_loss += loss.item() * input_ids.numel()
+            total_tokens += input_ids.numel()
+    ppl = math.exp(total_loss / total_tokens)
+    return ppl
+
+def compute_f1(model, tokenizer, prompts, references, device="cuda"):
+    model.eval()
+    preds = []
+    for prompt in tqdm(prompts, desc="F1 generation"):
+        inputs = tokenizer(prompt, return_tensors="pt").to(device)
+        out = model.generate(**inputs, max_new_tokens=50, do_sample=False)
+        text = tokenizer.decode(out[0], skip_special_tokens=True)
+        preds.append(text[len(prompt):].strip())
+    # compute token-level precision/recall
+    pred_tokens = [p.split() for p in preds]
+    ref_tokens = [r.split() for r in references]
+    precision = 0.0
+    recall = 0.0
+    for p, r in zip(pred_tokens, ref_tokens):
+        p_set = set(p)
+        r_set = set(r)
+        precision += len(p_set & r_set) / (len(p_set) + 1e-12)
+        recall += len(p_set & r_set) / (len(r_set) + 1e-12)
+    precision /= len(pred_tokens)
+    recall /= len(pred_tokens)
+    f1 = 2 * precision * recall / (precision + recall + 1e-12)
+    return f1
+```
+
+---
+
+**FILE: train_probe.py**  
+```python
+import os
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from datasets import load_dataset
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from utils import set_seed, ensure_dir, load_tokenizer, load_model, collate_fn
+import yaml
+
+config = yaml.safe_load(open("config.yaml"))
+set_seed(config["seed"])
+device = config["device"]
+probe_cfg = config["probe"]
+
+tokenizer = load_tokenizer(probe_cfg["model_name"])
+model = AutoModelForCausalLM.from_pretrained(probe_cfg["model_name"]).to(device)
+model.eval()
+
+train_ds = load_dataset("jigsaw-toxic-comment-classification-challenge", split="train")
+val_ds = load_dataset("jigsaw-toxic-comment-classification-challenge", split="validation")
+
+# Prepare data: average last hidden state
+def encode(example):
+    inputs = tokenizer(example["comment_text"], truncation=True, max_length=512, return_tensors="pt")
+    with torch.no_grad():
+        outputs = model(**inputs.to(device), output_hidden_states=True)
+    hidden = outputs.hidden_states[-1]  # [1, seq_len, hidden]
+    avg = hidden.mean(dim=1)  # [1, hidden]
+    label = torch.tensor([example["toxic"]], dtype=torch.float32)
+    return {"emb": avg.squeeze(0), "label": label}
+
+train_ds = train_ds.map(encode, remove_columns=train_ds.column_names).remove_columns(["comment_text", "toxic"])
+val_ds = val_ds.map(encode, remove_columns=val_ds.column_names).remove_columns(["comment_text", "toxic"])
+
+train_loader = torch.utils.data.DataLoader(train_ds, batch_size=probe_cfg["batch_size"], shuffle=True)
+val_loader = torch.utils.data.DataLoader(val_ds, batch_size=probe_cfg["batch_size"])
+
+linear = nn.Linear(model.config.hidden_size, 1).to(device)
+criterion = nn.BCEWithLogitsLoss()
+optimizer = optim.Adam(linear.parameters(), lr=probe_cfg["lr"])
+
+ensure_dir(probe_cfg["output_path"])
+best_val_loss = float("inf")
+
+for epoch in range(probe_cfg["epochs"]):
+    linear.train()
+    epoch_loss = 0.0
+    for batch in train_loader:
+        emb = batch["emb"].to(device)
+        label = batch["label"].to(device)
+        logits = linear(emb).squeeze(-1)
+        loss = criterion(logits, label)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        epoch_loss += loss.item()
+    avg_epoch_loss = epoch_loss / len(train_loader)
+    # validation
+    linear.eval()
+    val_loss = 0.0
+    with torch.no_grad():
+        for batch in val_loader:
+            emb = batch["emb"].to(device)
+            label = batch["label"].to(device)
+            logits = linear(emb).squeeze(-1)
+            loss = criterion(logits, label)
+            val_loss += loss.item()
+    avg_val_loss = val_loss / len(val_loader)
+    print(f"Epoch {epoch+1}/{probe_cfg['epochs']} - train loss: {avg_epoch_loss:.4f} - val loss: {avg_val_loss:.4f}")
+    if avg_val_loss < best_val_loss:
+        best_val_loss = avg_val_loss
+        torch.save(linear.state_dict(), os.path.join(probe_cfg["output_path"], "probe.pt"))
+
+print("Probe training done. Saved to:", probe_cfg["output_path"])
+```
+
+---
+
+**FILE: extract_toxic_vectors.py**  
+```python
+import os
+import torch
+import numpy as np
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from utils import set_seed, ensure_dir, load_tokenizer, load_model
+import yaml
+
+config = yaml.safe_load(open("config.yaml"))
+set_seed(config["seed"])
+device = config["device"]
+probe_cfg = config["probe"]
+
+probe_path = os.path.join(probe_cfg["output_path"], "probe.pt")
+probe_vector = torch.load(probe_path, map_location=device)
+probe_vector = probe_vector.squeeze(0)  # shape: hidden_size
+
+model_name = probe_cfg["model_name"]
+tokenizer = load_tokenizer(model_name)
+model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
+model.eval()
+
+# Get transformer blocks
+blocks = [block for block in model.transformer.h]
+num_layers = len(blocks)
+hidden_size = model.config.hidden_size
+mlp_dim = model.config.intermediate_size
+
+# Collect toxic value vectors
+top_n = 128
+all_vectors = []
+all_keys = []
+
+with torch.no_grad():
+    for l, block in enumerate(blocks):
+        # block.mlp has two linear layers: fc1 (W_k) and fc2 (W_v)
+        W_k = block.mlp.c_fc.weight  # shape: (mlp_dim, hidden_size)
+        W_v = block.mlp.c_proj.weight  # shape: (hidden_size, mlp_dim)
+        # keys: rows of W_k
+        keys = W_k.detach()  # (mlp_dim, hidden_size)
+        # values: columns of W_v transposed
+        values = W_v.t().detach()  # (mlp_dim, hidden_size)
+        # compute cosine similarity with probe
+        cos = torch.nn.functional.cosine_similarity(values, probe_vector.unsqueeze(0), dim=1)
+        topk_idx = torch.topk(cos, top_n, largest=True).indices
+        top_vals = values[topk_idx]
+        top_keys = keys[topk_idx]
+        all_vectors.append(top_vals.cpu().numpy())
+        all_keys.append(top_keys.cpu().numpy())
+
+all_vectors = np.concatenate(all_vectors, axis=0)  # (num_layers*top_n, hidden_size)
+
+# SVD
+U, S, Vh = np.linalg.svd(all_vectors, full_matrices=False)
+# Take first 3 singular vectors
+svd_vectors = U[:, :3]  # shape: (num_vectors, hidden_size)
+
+# Project onto vocab space
+embed_matrix = tokenizer.get_input_embeddings().weight.detach().cpu().numpy()  # (vocab_size, hidden_size)
+top_tokens = []
+for vec in svd_vectors:
+    proj = embed_matrix @ vec
+    top_k = np.argsort(-proj)[:10]
+    tokens = [tokenizer.decode([i]) for i in top_k]
+    top_tokens.append(tokens)
+
+ensure_dir("outputs/vectors")
+np.save("outputs/vectors/svd_vectors.npy", svd_vectors)
+np.save("outputs/vectors/top_tokens.npy", np.array(top_tokens))
+print("Toxic vectors extracted and saved to outputs/vectors")
+```
+
+---
+
+**FILE: pairwise_dataset.py**  
+```python
+import random
+import torch
+from datasets import Dataset
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from utils import load_tokenizer, load_model
+import yaml
+
+config = yaml.safe_load(open("config.yaml"))
+device = config["device"]
+dpo_cfg = config["dpo"]
+tokenizer = load_tokenizer(dpo_cfg["base_model"])
+base_model = AutoModelForCausalLM.from_pretrained(dpo_cfg["base_model"]).to(device)
+base_model.eval()
+
+# Generate pairwise data
+def generate_pair(prompt, max_new=20):
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+    # Positive: greedy
+    pos_out = base_model.generate(**inputs, max_new_tokens=max_new, do_sample=False, pad_token_id=tokenizer.eos_token_id)
+    pos_text = tokenizer.decode(pos_out[0], skip_special_tokens=True)[len(prompt):].strip()
+    # Negative: sampling
+    neg_out = base_model.generate(**inputs, max_new_tokens=max_new, do_sample=True, top_k=50, temperature=0.8, pad_token_id=tokenizer.eos_token_id)
+    neg_text = tokenizer.decode(neg_out[0], skip_special_tokens=True)[len(prompt):].strip()
+    return {"prompt": prompt, "positive": pos_text, "negative": neg_text}
+
+# Build dataset from wikitext prompts
+prompts = []
+for i in range(1000):
+    prompts.append(f"Prompt {i}")
+
+data = [generate_pair(p) for p in prompts]
+ds = Dataset.from_list(data)
+ds.save_to_disk("outputs/pairwise_dataset")
+print("Pairwise dataset saved to outputs/pairwise_dataset")
+```
+
+---
+
+**FILE: train_dpo.py**  
+```python
+import os
+import torch
+import yaml
+from trl import DPOTrainer, DPOConfig
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from datasets import load_from_disk
+from utils import set_seed, ensure_dir
+
+config = yaml.safe_load(open("config.yaml"))
+set_seed(config["seed"])
+device = config["device"]
+dpo_cfg = config["dpo"]
+
+tokenizer = AutoTokenizer.from_pretrained(dpo_cfg["base_model"])
+base_model = AutoModelForCausalLM.from_pretrained(dpo_cfg["base_model"]).to(device)
+ref_model = AutoModelForCausalLM.from_pretrained(dpo_cfg["base_model"]).to(device)
+
+# Load pairwise data
+pairwise_ds = load_from_disk("outputs/pairwise_dataset")
+
+trainer = DPOTrainer(
+    model=base_model,
+    ref_model=ref_model,
+    train_dataset=pairwise_ds,
+    eval_dataset=None,
+    tokenizer=tokenizer,
+    config=DPOConfig(
+        beta=dpo_cfg["beta"],
+        learning_rate=dpo_cfg["lr"],
+        max_new_tokens=dpo_cfg["max_new_tokens"],
+    ),
+    args={
+        "per_device_train_batch_size": dpo_cfg["batch_size"],
+        "gradient_accumulation_steps": 1,
+        "max_steps": -1,
+        "num_train_epochs": dpo_cfg["epochs"],
+        "logging_steps": 10,
+        "save_strategy": "epoch",
+        "output_dir": dpo_cfg["output_path"],
+    },
+)
+
+trainer.train()
+trainer.save_model(dpo_cfg["output_path"])
+print("DPO training finished. Model saved to", dpo_cfg["output_path"])
+```
+
+---
+
+**FILE: evaluate.py**  
+```python
+import os
+import torch
+import yaml
+import math
+from datasets import load_from_disk, load_dataset
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from utils import load_tokenizer, load_model, compute_toxicity_score, compute_perplexity, compute_f1, get_realtoxicity_prompts, get_wikitext_prompts
+
+config = yaml.safe_load(open("config.yaml"))
+device = config["device"]
+eval_cfg = config["eval"]
+
+# Load models
+tokenizer = AutoTokenizer.from_pretrained(eval_cfg["toxicity_model"])
+tox_clf = None
+# If using unitary/toxicbert pipeline
+tox_clf = lambda txt: compute_toxicity_score(txt, load_toxicity_classifier(device))
+
+# Load GPT2-medium (unaligned) and DPO model
+gpt2 = AutoModelForCausalLM.from_pretrained("gpt2-medium").to(device)
+gpt2.eval()
+dpo_model = AutoModelForCausalLM.from_pretrained(eval_cfg["toxicity_model"]).to(device)  # placeholder, replace with actual dpo path
+
+# 1. Toxicity on RealToxicityPrompts
+prompts = get_realtoxicity_prompts(num=200)
+gpt2_scores = []
+dpo_scores = []
+for p in prompts:
+    out_gpt2 = gpt2.generate(tokenizer(p, return_tensors="pt").to(device), max_new_tokens=eval_cfg["max_new_tokens"], do_sample=False)[0]
+    txt_gpt2 = tokenizer.decode(out_gpt2, skip_special_tokens=True)[len(p):]
+    gpt2_scores.append(compute_toxicity_score(txt_gpt2, tox_clf))
+
+    out_dpo = dpo_model.generate(tokenizer(p, return_tensors="pt").to(device), max_new_tokens=eval_cfg["max_new_tokens"], do_sample=False)[0]
+    txt_dpo = tokenizer.decode(out_dpo, skip_special_tokens=True)[len(p):]
+    dpo_scores.append(compute_toxicity_score(txt_dpo, tox_clf))
+
+print(f"Avg toxicity GPT2: {sum(gpt2_scores)/len(gpt2_scores):.4f}")
+print(f"Avg toxicity DPO: {sum(dpo_scores)/len(dpo_scores):.4f}")
+
+# 2. Perplexity on Wikitext-2
+wikitext_ds = load_dataset("wikitext", "wikitext-2-raw-v1", split=eval_cfg["wikitext_split"])
+ppl = compute_perplexity(gpt2, tokenizer, wikitext_ds)
+print(f"Perplexity GPT2: {ppl:.2f}")
+
+# 3. F1 on Wikipedia sentences
+wiki_ds = load_dataset("wikipedia", "20220301.en", split="train[:2000]")
+prompts = [s["text"][:512] for s in wiki_ds]
+references = [s["text"][512:].strip() for s in wiki_ds]
+f1 = compute_f1(gpt2, tokenizer, prompts, references)
+print(f"F1 GPT2: {f1:.4f}")
+```
+
+---
+
+**FILE: reproduce.sh**  
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install dependencies
+apt-get update
+apt-get install -y python3 python3-pip git
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# Train probe
+python train_probe.py
+
+# Extract toxic vectors
+python extract_toxic_vectors.py
+
+# Generate pairwise data
+python pairwise_dataset.py
+
+# Train DPO
+python train_dpo.py
+
+# Evaluate
+python evaluate.py
+
+echo "Reproduction completed. Results are in the output directories."
+```
+
+---
+
+**FILE: README.md**  
+```markdown
+# Mechanistic Understanding of Alignment Algorithms – Reproduction
+
+This repository contains a minimal, end‑to‑end implementation of the key experiments from
+> *A Mechanistic Understanding of Alignment Algorithms: A Case Study on DPO and Toxicity*  
+> Andrew Lee et al., ICML 2024.
+
+## Overview
+
+The reproduction proceeds in the following steps:
+
+1. **Probe Training** – a linear probe is trained on the Jigsaw toxic comment dataset
+   to obtain a *toxic* direction in the hidden state space.
+2. **Toxic Vector Extraction** – value vectors from GPT2‑medium that are highly
+   aligned with the probe vector are extracted, stacked, and subjected to SVD.
+3. **Pairwise Data Generation** – for a set of prompts from Wikitext‑2, we generate
+   a *positive* (greedy) and a *negative* (sampling) continuation.
+4. **DPO Fine‑tuning** – GPT2‑medium is fine‑tuned using Direct Preference
+   Optimization (DPO) on the pairwise dataset.
+5. **Evaluation** – we evaluate the unaligned and DPO‑aligned models on:
+   * Toxicity (using the `unitary/toxicbert` classifier).
+   * Perplexity on Wikitext‑2.
+   * F1 on Wikipedia continuations.
+
+All models are pulled from HuggingFace on the fly; no heavy artifacts are stored
+in the repository.
+
+## Reproduction Script
+
+Run the following command in a fresh Ubuntu 24.04 container:
+
+```bash
+bash reproduce.sh
+```
+
+The script will:
+* Install dependencies.
+* Train the probe and extract toxic vectors.
+* Generate the pairwise dataset.
+* Fine‑tune GPT2‑medium with DPO.
+* Evaluate the models.
+
+Results are printed to the console and saved under the `outputs/` directory.
+
+## Repository Structure
+
+```
+├─ config.yaml            # Hyperparameters and paths
+├─ reproduce.sh           # Orchestrates the entire pipeline
+├─ README.md
+├─ requirements.txt
+├─ train_probe.py
+├─ extract_toxic_vectors.py
+├─ pairwise_dataset.py
+├─ train_dpo.py
+├─ evaluate.py
+└─ utils.py
+```
+
+## Notes
+
+* The code focuses on **GPT2‑medium** for brevity.  
+  The original paper also evaluates Llama2‑7b; adding it would require
+  downloading the 7 B checkpoint and may exceed the 1 GB size limit.
+* The pairwise dataset generation uses a simple sampling strategy
+  instead of full PPLM; this keeps the runtime reasonable while still
+  illustrating the DPO dynamics.
+* Toxicity evaluation uses the `unitary/toxicbert` model which
+  approximates Perspective API scores.
+
+Feel free to adjust `config.yaml` to change batch sizes, epochs,
+or to experiment with other models.
+
+```
+
+---

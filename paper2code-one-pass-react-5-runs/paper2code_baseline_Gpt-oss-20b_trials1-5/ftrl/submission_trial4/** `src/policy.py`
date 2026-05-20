@@ -1,0 +1,30 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class PolicyNet(nn.Module):
+    """
+    Very small policy network:
+        input: one‑hot encoded state (size 2)
+        output: logits for 2 actions
+    """
+    def __init__(self):
+        super().__init__()
+        self.linear = nn.Linear(2, 2)
+
+    def forward(self, states):
+        """
+        states: torch.LongTensor of shape (batch,)
+        """
+        x = F.one_hot(states, num_classes=2).float()
+        logits = self.linear(x)
+        return logits
+
+    def get_action(self, state, deterministic=False):
+        with torch.no_grad():
+            logits = self.forward(state)
+            probs = F.softmax(logits, dim=-1)
+            if deterministic:
+                return torch.argmax(probs, dim=-1)
+            else:
+                return torch.multinomial(probs, num_samples=1).squeeze(0)

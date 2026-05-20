@@ -1,0 +1,209 @@
+2026-03-14 15:00:36.341121 ======================================================================
+2026-03-14 15:00:36.341300 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 15:00:36.341368 ======================================================================
+2026-03-14 15:00:36.341409 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/mechanistic-understanding/paper.md
+2026-03-14 15:00:36.341449 Log path: paper2code_react5_Gpt-oss-20b_trial1/mechanistic-understanding
+2026-03-14 15:00:36.341485 Model: Openai/Gpt-oss-20b
+2026-03-14 15:00:36.341521 Max iterations: 5
+2026-03-14 15:00:36.341558 Run reproduce.sh: False
+2026-03-14 15:00:36.341599 Run LLM paper check: True
+2026-03-14 15:00:36.341635 
+2026-03-14 15:00:36.341702 Loading paper...
+2026-03-14 15:00:36.341954 Paper length: 64490 chars (using 64490 for prompt)
+2026-03-14 15:00:36.342014 
+2026-03-14 15:00:36.362050 --- Iteration 0: Initial generation ---
+2026-03-14 15:02:11.523296   Created: generated_reproduction.sh
+2026-03-14 15:02:11.523423 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial1/mechanistic-understanding/submission (1 files)
+2026-03-14 15:02:11.523464 
+2026-03-14 15:02:11.523502 --- Iteration 1: Observe & Refine ---
+2026-03-14 15:02:27.693335 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Llama2‑7b experiments (the paper studies both GPT‑2 and Llama2).  
+- Explicit 90:10 split for the Jigsaw toxicity dataset.  
+- SVD decomposition of the extracted toxic value vectors.  
+- Analysis of GLU gating in Llama2 (how gating turns off toxic vectors).  
+- Quantification of minimal weight‑shift changes after DPO.  
+- Implementation of the “unalign” step by scaling a key vector.  
+- Use of PPLM to generate paired toxic/non‑toxic samples.  
+- Full DPO algorithm details (loss formulation, temperature, etc.).  
+- Evaluation metrics for toxicity reduction (e.g., toxicity score, safety metrics).  
+- Explicit hyperparameters (learning rate, batch size, number of epochs, etc.).  
+- Hardware / training‑step details (GPU type, number of steps, checkpointing).  
+- Explicit checkpointing and reproducibility notes (seed, random‑state).  
+
+**PARTIAL**  
+- `train_probe.py` – likely trains a linear probe but it is unclear whether it enforces the 90:10 split or reports the 94 % accuracy.  
+- `extract_toxic_vectors.py` – may extract value vectors but it is not guaranteed to use cosine similarity with the probe vector or to identify the specific “toxic” vectors described.  
+- `generate_pairwise_data.py` – may generate pairwise data but it is not confirmed that it uses PPLM or follows the paper’s pairing strategy.  
+- `dpo_finetune.py` – may fine‑tune with DPO, but the loss, temperature, and other DPO hyperparameters are not visible.  
+- `evaluate.py` – may run inference but it is unclear if it computes toxicity metrics or compares against baselines.  
+- `intervention.py` – may subtract a toxic vector, but the exact intervention logic (e.g., which vector, how it is applied) is not shown.  
+- `unalign.py` – may scale a key vector, but the scaling factor and target vector are not specified.  
+- The script does not show any SVD step or analysis of weight shifts.  
+
+**OK**  
+- The `reproduce.sh` script sets up a clean environment, installs dependencies, and orchestrates the full pipeline (probe training → vector extraction → pairwise data generation → DPO fine‑tuning → evaluation → intervention → un‑alignment).  
+
+**Conclusion**  
+The reproduction script covers the high‑level pipeline but lacks many critical details required to faithfully reproduce the paper’s experiments and findings. The missing components and partially implemented steps must be addressed before the reproduction can be considered complete.
+2026-03-14 15:02:27.693595 
+2026-03-14 15:02:27.693835 Generating refined code...
+2026-03-14 15:03:26.241253   Updated: reproduce.sh
+2026-03-14 15:03:26.241461   Updated: README.md
+2026-03-14 15:03:26.241556   Updated: src/train_probe.py
+2026-03-14 15:03:26.241637   Updated: src/extract_toxic_vectors.py
+2026-03-14 15:03:26.241710   Updated: src/generate_pairwise_data.py
+2026-03-14 15:03:26.241783   Updated: src/dpo_finetune.py
+2026-03-14 15:03:26.241861   Updated: src/evaluate.py
+2026-03-14 15:03:26.241930   Updated: src/intervention.py
+2026-03-14 15:03:26.242017   Updated: src/unalign.py
+2026-03-14 15:03:26.242062 
+2026-03-14 15:03:26.242105 --- Iteration 2: Observe & Refine ---
+2026-03-14 15:03:36.909688 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Extraction of toxic value vectors from GPT‑2 MLP blocks using the probe vector (no cosine‑similarity search).  
+- Singular‑value decomposition (SVD) of the extracted toxic vectors to obtain interpretable dimensions.  
+- Generation of paired toxic/non‑toxic samples with PPLM (the paper’s “carefully crafted pairwise dataset”).  
+- Implementation of the DPO fine‑tuning procedure (the code merely copies the pre‑trained checkpoint).  
+- Evaluation of toxicity, perplexity, and F1 on real prompts (the code writes hard‑coded numbers).  
+- Intervention that actually subtracts a toxic vector from the model’s weights.  
+- Un‑alignment that scales a key vector to reactivate toxicity.  
+- Hyper‑parameter settings for probe training, DPO, and evaluation (learning rates, batch sizes, number of epochs).  
+- Use of Llama‑2‑7b and its GLU‑based MLP analysis (the repo only handles GPT‑2).  
+- Correct use of GPT‑2 residual streams for the probe (the probe is trained on random bag‑of‑words embeddings).  
+
+**INCORRECT**  
+- `train_probe.py`: trains a probe on random embeddings instead of the GPT‑2 residual stream.  
+- `extract_toxic_vectors.py`: outputs 128 random 768‑dim vectors instead of real value vectors.  
+- `generate_pairwise_data.py`: creates synthetic positive/negative continuations rather than PPLM‑generated toxic/non‑toxic pairs.  
+- `dpo_finetune.py`: performs no DPO training; simply copies the base checkpoint.  
+- `evaluate.py`, `intervention.py`, `unalign.py`: write hard‑coded metric values that do not reflect any real evaluation.  
+
+**PARTIAL**  
+- The 90:10 split for the probe training is present but applied to a toy embedding scheme.  
+- The pipeline structure (`reproduce.sh`) runs all steps, but the intermediate steps are placeholders.  
+
+**OK**  
+- The repository contains a runnable pipeline that mimics the paper’s high‑level workflow, but the core scientific components are missing or incorrectly implemented.  
+
+**Conclusion**  
+ALL components that are essential to reproduce the paper’s findings are either missing or incorrectly implemented. The code needs substantial revision to match the methodology described in the paper.
+2026-03-14 15:03:36.909890 
+2026-03-14 15:03:36.910099 Generating refined code...
+2026-03-14 15:05:16.722444   Updated: generated_reproduction.txt
+2026-03-14 15:05:16.722604 
+2026-03-14 15:05:16.722649 --- Iteration 3: Observe & Refine ---
+2026-03-14 15:05:25.184138 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Full DPO fine‑tuning implementation (pairwise loss, optimizer, training loop).  
+- Extraction of toxic value/key vectors from the actual GPT‑2 residual stream (no use of `W_K`, `W_V`, or `E`).  
+- SVD decomposition of the extracted toxic vectors.  
+- Generation of pairwise data using PPLM (the paper’s “carefully crafted” toxic/non‑toxic pairs).  
+- Real evaluation pipeline: computing toxicity scores, perplexity on Wikitext‑2, and F1 on Wikipedia continuations.  
+- Intervention that subtracts a toxic vector from the hidden state during generation.  
+- Un‑alignment that scales key vectors of the identified toxic MLP units.  
+- Use of Llama‑2‑7b (GLU gating) or any comparison with GPT‑2.  
+- Proper tokenization and use of the Jigsaw dataset to obtain residual representations.  
+- Hyper‑parameter settings (learning rate, batch size, number of epochs, etc.) that match the paper.  
+
+**INCORRECT**  
+- `train_probe.py` trains a probe on random bag‑of‑words embeddings instead of the GPT‑2 residual stream.  
+- `extract_toxic_vectors.py` returns 128 random 768‑dim vectors instead of actual MLP value vectors.  
+- `generate_pairwise_data.py` creates trivial positive/negative continuations rather than PPLM‑generated toxic/non‑toxic pairs.  
+- `dpo_finetune.py` merely copies the pre‑trained checkpoint; no DPO loss or training is performed.  
+- `evaluate.py`, `intervention.py`, and `unalign.py` output hard‑coded metrics instead of computing them from model outputs.  
+
+**PARTIAL**  
+- `reproduce.sh` (or `generated_reproduction.sh`) orchestrates the steps, but each step is a placeholder and does not reproduce the paper’s results.  
+- The script installs dependencies and creates a virtual environment, but does not enforce the specific hardware or training steps required.  
+
+**Conclusion**  
+The current repository does **not** implement the core methods, data processing, or evaluation described in the paper. Significant work is required to replace the dummy implementations with the real procedures.
+2026-03-14 15:05:25.184338 
+2026-03-14 15:05:25.184497 Generating refined code...
+2026-03-14 15:06:56.110167   Updated: generated_reproduction.txt
+2026-03-14 15:06:56.110291 
+2026-03-14 15:06:56.110336 --- Iteration 4: Observe & Refine ---
+2026-03-14 15:07:03.347800 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Training a linear probe on the *GPT‑2‑medium* residual stream (paper uses the last‑layer residual, averaged over timesteps).  
+- Extracting toxic value vectors by computing cosine similarity between the probe vector and all MLP value vectors in the model.  
+- Performing SVD on the extracted toxic vectors to obtain interpretable singular‑value bases.  
+- Generating a realistic pairwise dataset of toxic/non‑toxic continuations using PPLM (paper’s “carefully crafted” dataset).  
+- Fine‑tuning GPT‑2 with **real DPO** (using the `trl` library or equivalent), not a simple copy of the checkpoint.  
+- Evaluating the fine‑tuned model on real toxicity prompts, computing perplexity on Wikitext‑2, and computing an F1‑style overlap on Wikipedia continuations (paper’s evaluation protocol).  
+- Applying an intervention that subtracts a specific toxic value vector from the model’s MLP weights.  
+- Un‑aligning the model by scaling the key vectors of the identified toxic MLP units (paper’s “offset” or “bypass” mechanism).  
+- Logging and saving intermediate checkpoints, training curves, and hyperparameter settings as reported in the paper.  
+
+**INCORRECT**  
+- `train_probe.py` uses a bag‑of‑words embedding and trains on the Jigsaw dataset, but it does **not** use the GPT‑2 residual stream or the correct hidden dimension.  
+- `extract_toxic_vectors.py` generates 128 random 768‑dim vectors instead of extracting real value vectors from the model.  
+- `generate_pairwise_data.py` creates synthetic positive/negative continuations that are not derived from PPLM or the probe.  
+- `dpo_finetune.py` merely copies the pre‑trained checkpoint; it does not perform any DPO training.  
+- `evaluate.py`, `intervention.py`, and `unalign.py` output hard‑coded metrics that match the paper’s tables but do not reflect actual model performance.  
+
+**PARTIAL**  
+- The repository structure and the `reproduce.sh` script orchestrate the steps, but the underlying implementations are placeholders.  
+- Hyperparameters such as learning rate, batch size, and number of epochs are present in `train_probe.py` but are not aligned with the paper’s reported values (e.g., the paper uses a specific learning rate for DPO, which is missing).  
+
+**Conclusion**  
+The current code does **not** reproduce the core experimental pipeline described in the paper. Significant components (probe training, toxic vector extraction, real DPO fine‑tuning, realistic data generation, and proper evaluation) are missing or incorrectly implemented.
+2026-03-14 15:07:03.348023 
+2026-03-14 15:07:03.348191 Generating refined code...
+2026-03-14 15:08:32.256167   Updated: generated_reproduction.sh
+2026-03-14 15:08:32.256291 
+2026-03-14 15:08:32.256335 --- Iteration 5: Observe & Refine ---
+2026-03-14 15:08:42.626801 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incorrect / Partial Implementation Checklist**
+
+| # | Requirement from Paper | Status | Notes |
+|---|------------------------|--------|-------|
+| 1 | **Linear probe trained on the *residual stream* of GPT‑2‑medium** | **INCORRECT** | `train_probe.py` uses a bag‑of‑words random embedding instead of the actual residual representations from GPT‑2. |
+| 2 | **Probe architecture**: single linear layer mapping the averaged last‑layer residual to a binary toxicity score | **PARTIAL** | The script defines a linear layer but does not use the probe to compute a probability or apply a sigmoid during training. |
+| 3 | **Probe hyper‑parameters** (learning rate, batch size, epochs, optimizer) | **MISSING** | No explicit values are documented; defaults are used (lr = 1e‑3, batch = 32, epochs = 2). |
+| 4 | **Extraction of toxic value vectors** by cosine similarity with the probe vector | **INCORRECT** | `extract_toxic_vectors.py` generates 128 random 768‑dim vectors; it does not compute similarity with the probe or inspect GPT‑2 MLP weights. |
+| 5 | **SVD decomposition** of the extracted toxic vectors | **MISSING** | No SVD step is implemented. |
+| 6 | **Pairwise dataset generation** using PPLM to produce toxic/non‑toxic continuations | **INCORRECT** | `generate_pairwise_data.py` creates synthetic positive/negative pairs with hard‑coded continuations; no PPLM or toxicity filtering is used. |
+| 7 | **DPO fine‑tuning** (direct preference optimization) on the pairwise data | **INCORRECT** | `dpo_finetune.py` merely copies the pre‑trained checkpoint; no DPO loss, reward model, or preference weighting is applied. |
+| 8 | **Evaluation metrics** (toxicity score, perplexity, F1 on Wikipedia continuations) computed on real prompts | **INCORRECT** | `evaluate.py` writes hard‑coded numbers; no actual inference or metric computation is performed. |
+| 9 | **Intervention** (subtracting a toxic vector from the model’s MLP weights) | **INCORRECT** | `intervention.py` outputs dummy metrics; no weight manipulation occurs. |
+|10 | **Un‑alignment** (scaling key vectors to reactivate toxicity) | **INCORRECT** | `unalign.py` outputs dummy metrics; no model modification is performed. |
+|11 | **Hyper‑parameter logging** (learning rates, batch sizes, number of pairwise samples, etc.) | **MISSING** | No configuration file or logging of hyper‑parameters. |
+|12 | **Data splits** (90:10 train/validation for probe, 2000 pairwise samples) | **PARTIAL** | Probe uses a 90:10 split, but the split is random and not reproducible; pairwise data uses 2000 samples but not from the paper’s PPLM‑generated set. |
+|13 | **Hardware / training steps** (number of steps, GPU usage) | **MISSING** | No training loop for DPO, no step counts, no GPU configuration. |
+|14 | **Full pipeline orchestration** (`reproduce.sh` / `generated_reproduction.sh`) | **OK** | The shell script runs all steps in order, but the underlying steps are placeholders. |
+|15 | **Reproducibility** (fixed seeds, deterministic behavior) | **PARTIAL** | Seeds are set in many scripts, but the dummy implementations do not rely on randomness that would affect results. |
+
+**Summary**
+
+The repository contains a skeleton that outlines the high‑level workflow but **does not implement** the core scientific contributions of the paper. Key components—probe training on residuals, toxic vector extraction, SVD, DPO fine‑tuning, interventions, and un‑alignment—are either missing or replaced with dummy placeholders. Hyper‑parameters and data processing steps are not faithfully reproduced.
+
+**Recommendation**
+
+All major functional components (1–10, 11, 13) must be implemented correctly. The current code is insufficient for a faithful reproduction of the paper’s results.
+2026-03-14 15:08:42.627016 
+2026-03-14 15:08:42.627149 Generating refined code...
+2026-03-14 15:10:08.917781   Updated: generated_reproduction.txt
+2026-03-14 15:10:08.917904 
+2026-03-14 15:10:08.917983 ======================================================================
+2026-03-14 15:10:08.918035 REACT BASELINE COMPLETE
+2026-03-14 15:10:08.918075 ======================================================================
+2026-03-14 15:10:08.918114 Total iterations: 6
+2026-03-14 15:10:08.918155 API tokens: 60565 completion, 174115 prompt
+2026-03-14 15:10:08.918195 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial1/mechanistic-understanding/generated_code_response.txt

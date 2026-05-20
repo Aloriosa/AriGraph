@@ -1,0 +1,284 @@
+2026-03-14 15:12:59.678503 ======================================================================
+2026-03-14 15:12:59.678617 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 15:12:59.678657 ======================================================================
+2026-03-14 15:12:59.678707 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/mechanistic-understanding/paper.md
+2026-03-14 15:12:59.678757 Log path: paper2code_react5_Gpt-oss-20b_trial3/mechanistic-understanding
+2026-03-14 15:12:59.678806 Model: Openai/Gpt-oss-20b
+2026-03-14 15:12:59.678856 Max iterations: 5
+2026-03-14 15:12:59.678914 Run reproduce.sh: False
+2026-03-14 15:12:59.678970 Run LLM paper check: True
+2026-03-14 15:12:59.679023 
+2026-03-14 15:12:59.679072 Loading paper...
+2026-03-14 15:12:59.679263 Paper length: 64490 chars (using 64490 for prompt)
+2026-03-14 15:12:59.679308 
+2026-03-14 15:12:59.698387 --- Iteration 0: Initial generation ---
+2026-03-16 22:39:21.005820 Trial number: 3
+2026-03-16 22:39:21.006005 ======================================================================
+2026-03-16 22:39:21.006057 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-16 22:39:21.006133 ======================================================================
+2026-03-16 22:39:21.006170 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/mechanistic-understanding/paper.md
+2026-03-16 22:39:21.006207 Log path: paper2code_react5_Gpt-oss-20b_trial3/mechanistic-understanding
+2026-03-16 22:39:21.006241 Model: Openai/Gpt-oss-20b
+2026-03-16 22:39:21.006276 Max iterations: 5
+2026-03-16 22:39:21.006330 Run reproduce.sh: False
+2026-03-16 22:39:21.006366 Run LLM paper check: True
+2026-03-16 22:39:21.006414 
+2026-03-16 22:39:21.006462 Loading paper...
+2026-03-16 22:39:21.006656 Paper length: 64490 chars (using 64490 for prompt)
+2026-03-16 22:39:21.006702 
+2026-03-16 22:39:21.027485 --- Iteration 0: Initial generation ---
+2026-03-16 22:40:14.037006   Created: requirements.txt
+2026-03-16 22:40:14.037175   Created: reproduce.sh
+2026-03-16 22:40:14.037248   Created: train_probe.py
+2026-03-16 22:40:14.037326   Created: extract_toxic_vectors.py
+2026-03-16 22:40:14.037392   Created: prepare_pairs.py
+2026-03-16 22:40:14.037457   Created: dpo_train.py
+2026-03-16 22:40:14.037520   Created: evaluate.py
+2026-03-16 22:40:14.037593   Created: README.md
+2026-03-16 22:40:14.037638 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial3/mechanistic-understanding/submission_trial3 (8 files)
+2026-03-16 22:40:14.037676 
+2026-03-16 22:40:14.037730 --- Iteration 1: Observe & Refine ---
+2026-03-16 22:40:26.893146 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incorrect / Partial Checklist**
+
+| Status | Requirement from the paper | Why it’s missing / wrong / incomplete |
+|--------|----------------------------|---------------------------------------|
+| **MISSING** | **Llama‑2‑7b analysis** – extraction of toxic vectors, SVD, gating analysis, and weight‑shift study for Llama2. | The repo only handles GPT‑2‑medium; no Llama2 code or analysis. |
+| **MISSING** | **SVD decomposition of toxic vectors** – to isolate dimensions of toxicity. | `extract_toxic_vectors.py` only selects top‑N vectors; no SVD step. |
+| **MISSING** | **PPLM‑generated pairwise dataset** – the paper uses PPLM to create toxic/non‑toxic pairs. | `prepare_pairs.py` builds a toy dataset by appending a random profanity; no PPLM usage. |
+| **MISSING** | **Minimal weight‑shift analysis** – showing that DPO only slightly shifts weights and bypasses toxic vectors. | No code or logs that compute or visualize weight changes after DPO. |
+| **MISSING** | **Gating mechanism analysis for Llama2** – demonstrating how GLU gates “turn off” toxic vectors. | No Llama2 or GLU analysis present. |
+| **MISSING** | **Re‑alignment / jailbreak demonstration** – re‑activating toxic vectors to undo alignment. | No code or experiments for re‑alignment. |
+| **MISSING** | **Perspective API evaluation** – the paper uses Perspective API for toxicity scoring. | `evaluate.py` uses a simple profanity list; no Perspective API integration. |
+| **MISSING** | **Baseline comparison** – e.g., GPT‑2‑medium before DPO vs after DPO. | No baseline model evaluation or side‑by‑side comparison. |
+| **MISSING** | **Hardware / training‑step details** – number of steps, GPU type, checkpointing. | `reproduce.sh` runs a quick run; no explicit step counts or checkpoint saving. |
+| **INCORRECT** | **DPO reference model choice** – paper likely uses a separate reference model or KL penalty. | `DPOTrainer` uses the same model as reference and `use_kld=False`; may not match the paper’s setup. |
+| **INCORRECT** | **Pairwise dataset construction** – paper uses PPLM‑generated toxic/non‑toxic pairs, not random profanity. | The toy dataset does not reflect the paper’s methodology. |
+| **PARTIAL** | **Probe training** – uses Jigsaw dataset, 90/10 split, last‑layer average. | Correct in spirit, but the probe is a single linear layer; the paper may use a slightly different probe architecture or training regime. |
+| **PARTIAL** | **Extraction of toxic vectors** – selects top‑N by cosine similarity. | Good start, but the paper also performs SVD and further analysis; the current code stops at extraction. |
+| **PARTIAL** | **Evaluation metric** – uses profanity fraction. | Provides a crude proxy but not the same as the paper’s Perspective API or other toxicity metrics. |
+
+**Conclusion**
+
+The current repository implements a very simplified toy version of the pipeline but omits many core components described in the paper (Llama2 analysis, SVD, PPLM pairwise data, weight‑shift analysis, gating, re‑alignment, proper evaluation). Therefore, the reproduction is incomplete.
+
+**Recommendation**
+
+Add the missing modules (Llama2 extraction, SVD, PPLM generation, weight‑shift analysis, gating analysis, re‑alignment experiments, Perspective API evaluation, baseline comparison) and correct the DPO setup to match the paper’s hyperparameters and reference model usage. Once those are added, the reproduction will be complete.
+2026-03-16 22:40:26.893369 
+2026-03-16 22:40:26.893610 Generating refined code...
+2026-03-16 22:41:36.085768   Updated: README.md
+2026-03-16 22:41:36.085888   Updated: reproduce.sh
+2026-03-16 22:41:36.086018   Updated: requirements.txt
+2026-03-16 22:41:36.086090   Updated: train_probe.py
+2026-03-16 22:41:36.086154   Updated: extract_toxic_vectors.py
+2026-03-16 22:41:36.086220   Updated: svd_toxic_vectors.py
+2026-03-16 22:41:36.086316   Updated: prepare_pairs_pplm.py
+2026-03-16 22:41:36.086378   Updated: dpo_train.py
+2026-03-16 22:41:36.086439   Updated: evaluate.py
+2026-03-16 22:41:36.086500   Updated: analysis_shift.py
+2026-03-16 22:41:36.086559   Updated: realign_gpt2.py
+2026-03-16 22:41:36.086600 
+2026-03-16 22:41:36.086640 --- Iteration 2: Observe & Refine ---
+2026-03-16 22:41:48.317007 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- LLaMA‑2‑7b gating analysis (GLU behavior, key/value gating) – the paper reports a distinct mechanism for Llama2 that is not reproduced.  
+- Explicit use of the SVD basis vectors for downstream analysis or ablation (the paper discusses SVD‑U vectors but the code never uses them).  
+
+**PARTIAL**  
+- **Toxic vector extraction** – the paper extracts \(N^2\) (≈128²) toxic vectors; the code keeps only the top 100.  
+- **Pairwise dataset generation** – the paper uses PPLM to generate *paired* toxic/non‑toxic continuations; the code uses a very lightweight PPLM variant and then simply prepends a toxic phrase, which is a simplification.  
+- **Weight‑shift analysis** – the code reports cosine similarity and L2 difference but does not quantify the “minimal” shift magnitude or plot layer‑wise distributions as in the paper.  
+- **Re‑alignment attack** – the paper scales the *key* vectors of the most toxic units; the code scales the first 7 key vectors but does not verify that these are indeed the most toxic or that the scaling factor matches the paper’s experiments.  
+- **Evaluation protocol** – the paper evaluates on RealToxicityPrompts with Perspective API; the code falls back to a profanity list if the API is unavailable, which may affect reproducibility.  
+
+**INCORRECT**  
+- None detected; all implemented components use the same hyper‑parameters and logic as described in the paper (e.g., DPO beta = 0.1, use_kld=True, learning rate = 1e‑5, 3 epochs).  
+
+**OK**  
+- Linear probe training on Jigsaw toxic comment dataset.  
+- Extraction of toxic value vectors via cosine similarity with the probe.  
+- SVD computation of toxic vectors (though not used downstream).  
+- DPO fine‑tuning with a reference model and pairwise dataset.  
+- Baseline, aligned, and re‑aligned evaluation on RealToxicityPrompts.  
+- Weight‑shift statistics computation.  
+
+**Recommendation**  
+To fully match the paper’s experimental scope, add a LLaMA‑2‑7b branch that performs the GLU gating analysis, use the full set of toxic vectors and SVD basis for ablation, and ensure the pairwise dataset generation follows the paper’s PPLM procedure exactly. Also replace the profanity fallback with a guaranteed Perspective API key or a deterministic toxicity metric.
+2026-03-16 22:41:48.317245 
+2026-03-16 22:41:48.317465 Generating refined code...
+2026-03-16 22:42:54.182579   Updated: extract_toxic_vectors.py
+2026-03-16 22:42:54.182727   Updated: svd_toxic_vectors.py
+2026-03-16 22:42:54.182799   Updated: realign_gpt2.py
+2026-03-16 22:42:54.182902   Updated: llm_gating_analysis.py
+2026-03-16 22:42:54.182987   Updated: llm_realign.py
+2026-03-16 22:42:54.183049   Updated: evaluate.py
+2026-03-16 22:42:54.183126   Updated: train_probe.py
+2026-03-16 22:42:54.183215   Updated: README.md
+2026-03-16 22:42:54.183276   Updated: reproduce.sh
+2026-03-16 22:42:54.183354   Updated: requirements.txt
+2026-03-16 22:42:54.183415 
+2026-03-16 22:42:54.183454 --- Iteration 3: Observe & Refine ---
+2026-03-16 22:43:29.641624 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing**
+
+- `train_probe.py` – the script that trains the linear toxicity probe on the Jigsaw dataset (90:10 split, residual‑stream averaging, 94 % accuracy).  
+- `svd_toxic_vectors.py` – the implementation that performs SVD on the extracted toxic vectors and stores the left singular vectors `U_Toxic`.  
+- Full LLaMA‑2‑7b gating analysis (`llm_gating_analysis.py`) – correct extraction of gate and linear weights, proper computation of activations, and comparison before/after DPO.  
+- Full LLaMA‑2‑7b re‑alignment (`llm_realign.py`) – correct manipulation of gate weights to re‑enable toxic units.  
+
+**Incorrect**
+
+- `extract_toxic_vectors.py` – loads the probe as `probe[1]` (assumes a tuple) and normalises it incorrectly; the probe should be the weight of the toxic class from the trained linear layer.  
+- `prepare_pairs_pplm.py` –  
+  - does not enable `output_hidden_states=True`, so `hidden_states` is `None`.  
+  - does not set `logits.requires_grad`, so the gradient of toxicity w.r.t. logits is zero.  
+  - incorrectly constructs the probe linear layer (`torch.nn.Linear(probe.shape[0], probe.shape[1])`).  
+  - therefore the PPLM‑style negative samples are not actually guided by the probe.  
+- `llm_gating_analysis.py` – uses `block.gate_proj.weight[unit_idx]` and `block.down_proj.weight[unit_idx]` as if they were single‑row vectors, but these are full weight matrices; the script does not compute actual gate activations or compare them before/after DPO.  
+- `llm_realign.py` – adds `1000.0` to a whole row of `gate_proj.weight` without using `torch.no_grad()` or `.data`, and does not verify that the gate activation becomes effectively 1.  
+
+**Partial**
+
+- `svd_toxic_vectors.py` – contains only a placeholder (`imp`).  
+- `prepare_pairs_pplm.py` – contains the overall structure but the core PPLM logic is broken.  
+- `llm_gating_analysis.py` and `llm_realign.py` – contain the right idea but lack correct implementation details.  
+
+**OK**
+
+- `dpo_train.py` – sets up DPO training with a reference model, batch size, epochs, learning rate, and DPO hyperparameters (`beta=0.1`, `use_kld=True`).  
+- `evaluate.py` – evaluates baseline, aligned, and re‑aligned models on the RealToxicityPrompts challenge subset (1199 prompts) using Perspective API or a profanity fallback.  
+- `analysis_shift.py` – computes cosine similarity and L2 norm difference for every parameter between the original and DPO‑fine‑tuned GPT‑2‑medium.  
+- `realign_gpt2.py` – scales the first 7 key vectors by a factor of 10 and saves the re‑aligned checkpoint.  
+- `reproduce.sh` – orchestrates the full pipeline (except the missing/incorrect parts).  
+
+**Conclusion**
+
+The reproduction code is incomplete and contains several critical bugs that prevent it from faithfully reproducing the experiments described in the paper. The missing scripts, incorrect implementations, and incomplete SVD logic must be fixed before the pipeline can be considered complete.
+2026-03-16 22:43:29.641841 
+2026-03-16 22:43:29.642021 Generating refined code...
+2026-03-16 22:45:05.204487   Updated: extract_toxic_vectors.py
+2026-03-16 22:45:05.204650   Updated: svd_toxic_vectors.py
+2026-03-16 22:45:05.204733   Updated: prepare_pairs_pplm.py
+2026-03-16 22:45:05.204855   Updated: llm_gating_analysis.py
+2026-03-16 22:45:05.204927   Updated: llm_realign.py
+2026-03-16 22:45:05.204997   Updated: train_probe.py
+2026-03-16 22:45:05.205080   Updated: README.md** (updated description)
+2026-03-16 22:45:05.205159   Updated: reproduce.sh** (unchanged but we keep)
+2026-03-16 22:45:05.205237   Updated: requirements.txt** (unchanged)
+2026-03-16 22:45:05.205335   Updated: analysis_shift.py** (unchanged)
+2026-03-16 22:45:05.205400   Updated: dpo_train.py** (unchanged)
+2026-03-16 22:45:05.205498   Updated: evaluate.py** (unchanged)
+2026-03-16 22:45:05.205580   Updated: realign_gpt2.py** (unchanged)
+2026-03-16 22:45:05.205642 
+2026-03-16 22:45:05.205683 --- Iteration 4: Observe & Refine ---
+2026-03-16 22:45:33.382750 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incorrect / Partial items**
+
+| Status | Requirement from the paper | Reason / Notes |
+|--------|----------------------------|----------------|
+| **MISSING** | `train_probe.py` – script that trains the linear probe on the Jigsaw Toxic Comment dataset (90/10 split, last‑layer residual average). | Not present in the provided code. |
+| **MISSING** | `svd_toxic_vectors.py` – performs SVD on the extracted toxic value vectors and saves the first few singular vectors. | Not present. |
+| **MISSING** | `reproduce.sh` – orchestrates the full pipeline (probe training, vector extraction, SVD, pairwise data generation, DPO training, evaluation, shift analysis, re‑alignment). | No script provided. |
+| **MISSING** | Complete re‑alignment attack for GPT‑2 (`realign_gpt2.py`). | The file is truncated after `k` – key‑vector scaling logic is incomplete. |
+| **MISSING** | Key‑vector extraction for GPT‑2 (the `c_fc` weight rows) – needed for the re‑alignment attack. | Not implemented. |
+| **MISSING** | LLaMA‑2‑7b specific toxic vector extraction (using its GLU structure). | The current `llm_gating_analysis.py` re‑uses GPT‑2 toxic vectors, which is incorrect. |
+| **MISSING** | LLaMA‑2‑7b re‑alignment attack (scaling gates). | Not implemented. |
+| **MISSING** | Evaluation of LLaMA‑2‑7b (baseline, DPO, re‑aligned) on RealToxicityPrompts. | No script. |
+| **MISSING** | Offset / bypass analysis for GPT‑2 (showing minimal weight shifts that avoid toxic sub‑updates). | Not implemented. |
+| **MISSING** | Gating analysis for LLaMA‑2‑7b (showing how gates are turned off after DPO). | Not implemented. |
+| **INCORRECT** | `prepare_pairs_pplm.py` – uses a very light‑weight PPLM (alpha=0.5, steps=3). | The paper does not specify these exact hyper‑parameters; the implementation may not match the intended “carefully crafted pairwise dataset”. |
+| **INCORRECT** | `dpo_train.py` – uses `beta=0.1` and `use_kld=True`. | The paper does not provide these values; they may differ from the original experiment. |
+| **PARTIAL** | `evaluate.py` – uses the RealToxicityPrompts challenge subset (1199 prompts) and Perspective API. | Good, but the fallback profanity list is a simplification; the paper likely used Perspective only. |
+| **PARTIAL** | `analysis_shift.py` – computes cosine similarity and L2 diff for all parameters. | Good, but the paper also discusses “offset” vectors and layer‑wise analysis, which is not shown. |
+| **PARTIAL** | `llm_gating_analysis.py` – computes mean gate activations for top GPT‑2 toxic units on LLaMA‑2‑7b. | Uses GPT‑2 toxic units, not LLaMA‑2‑7b’s own toxic units; also does not compare baseline vs DPO gating. |
+| **PARTIAL** | `llm_realign.py` – scales gate weights by +1e3 to turn on gates. | The scaling magnitude is arbitrary; the paper’s re‑alignment method may differ. |
+| **PARTIAL** | `prepare_pairs.py` – toy dataset generation (not used). | Not needed if `prepare_pairs_pplm.py` is used, but its correctness is unclear. |
+
+**Conclusion**
+
+The repository contains many of the core components (probe training, toxic vector extraction, DPO training, evaluation, shift analysis), but several critical pieces are missing or incomplete, especially the re‑alignment attacks, LLaMA‑2‑7b specific analyses, and the orchestration script. Therefore, the reproduction is **not complete**.
+
+**Recommendation**
+
+Implement the missing scripts (`train_probe.py`, `svd_toxic_vectors.py`, `reproduce.sh`), finish the re‑alignment attack for GPT‑2, add LLaMA‑2‑7b toxic vector extraction and re‑alignment, and verify that the hyper‑parameters match those reported in the paper. Once these are added, re‑run the full pipeline to confirm that the results match the paper.
+2026-03-16 22:45:33.382991 
+2026-03-16 22:45:33.383169 Generating refined code...
+2026-03-16 22:48:12.894498   Updated: README.md
+2026-03-16 22:48:12.894632   Updated: reproduce.sh
+2026-03-16 22:48:12.894738   Updated: train_probe.py
+2026-03-16 22:48:12.894818   Updated: extract_toxic_vectors.py
+2026-03-16 22:48:12.894899   Updated: svd_toxic_vectors.py
+2026-03-16 22:48:12.895010   Updated: prepare_pairs.py
+2026-03-16 22:48:12.895090   Updated: dpo_train.py
+2026-03-16 22:48:12.895175   Updated: evaluate.py
+2026-03-16 22:48:12.895269   Updated: analysis_shift.py
+2026-03-16 22:48:12.895363   Updated: realign_gpt2.py
+2026-03-16 22:48:12.895437   Updated: requirements.txt
+2026-03-16 22:48:12.895511   Updated: llm_gating_analysis.py
+2026-03-16 22:48:12.895586   Updated: llm_realign.py
+2026-03-16 22:48:12.895659   Updated: llm_gating_analysis.py**  *(unchanged, but included for completeness)
+2026-03-16 22:48:12.895736   Updated: prepare_pairs_pplm.py** *(kept for completeness but not used by reproduction script)
+2026-03-16 22:48:12.895792 
+2026-03-16 22:48:12.895859 --- Iteration 5: Observe & Refine ---
+2026-03-16 22:48:27.117389 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- `train_probe.py` – script that trains the linear probe on the Jigsaw toxicity dataset.  
+- `svd_toxic_vectors.py` – script that performs SVD on the extracted toxic vectors and saves the basis.  
+- `reproduce.sh` – the orchestrating shell script that installs dependencies and runs the full pipeline.  
+- `realign_gpt2.py` – the script is truncated (the final `print` statement is incomplete) and therefore does not finish saving the re‑aligned checkpoint.  
+- `evaluate.py` does not explicitly report the same metrics (e.g., mean toxicity score, standard deviation) that the paper reports.  
+- No script or command to evaluate the LLaMA‑2‑7b model (baseline, DPO‑fine‑tuned, re‑aligned) on RealToxicityPrompts.  
+- No script to compute or report the L2‑norm and cosine‑similarity statistics for the LLaMA‑2‑7b weights (only GPT‑2 is analyzed).  
+
+**INCORRECT**  
+- `prepare_pairs.py` generates the negative continuation by simply appending a random profanity token to the positive continuation. The paper explicitly uses a PPLM‑style procedure to generate toxic continuations; this mismatch may affect the quality of the pairwise dataset.  
+- `dpo_train.py` uses `beta=0.1` and `use_kld=True`. The paper does not specify these values; if the original experiments used a different `beta` (e.g., 0.5) or disabled KL‑divergence, the results will differ.  
+- `extract_toxic_vectors.py` extracts the top 16 384 vectors by cosine similarity with the probe, but the paper mentions “N² ≈ 128² ≈ 16 384” without clarifying whether the top‑k selection is performed per layer or globally. The current implementation selects globally, which may not match the paper’s procedure.  
+
+**PARTIAL**  
+- The LLaMA‑2‑7b gating analysis (`llm_gating_analysis.py`) and re‑alignment (`llm_realign.py`) are optional and not integrated into the main pipeline.  
+- The `analysis_shift.py` script only reports per‑parameter cosine similarity and L2 difference; the paper also discusses the *distribution* of shifts across layers and the concept of an “offset” that bypasses toxic vectors, which is not quantified here.  
+- The evaluation script uses a fallback profanity list when the Perspective API is unavailable; the paper’s evaluation relies solely on the Perspective API.  
+
+**OK**  
+- The overall pipeline structure (probe training → toxic vector extraction → SVD → pairwise dataset → DPO fine‑tuning → evaluation → weight‑shift analysis → re‑alignment attack) is present.  
+- The scripts correctly load GPT‑2‑medium and LLaMA‑2‑7b checkpoints from HuggingFace.  
+- The evaluation uses the RealToxicityPrompts challenge subset (1,199 prompts) as described.  
+- The re‑alignment attack for GPT‑2 scales the key vectors of the most toxic units by a factor of 10, matching the paper’s description.  
+
+**Conclusion**  
+The repository contains the core components but several essential scripts and details are missing or diverge from the paper’s methodology. To achieve full reproducibility, the missing scripts must be added, the pairwise dataset generation must follow the PPLM procedure, and the hyperparameters should be aligned with the paper’s settings.
+2026-03-16 22:48:27.117625 
+2026-03-16 22:48:27.117803 Generating refined code...
+2026-03-16 22:49:30.758477   Updated: train_probe.py
+2026-03-16 22:49:30.758603   Updated: svd_toxic_vectors.py
+2026-03-16 22:49:30.758677   Updated: prepare_pairs.py
+2026-03-16 22:49:30.758743   Updated: dpo_train.py
+2026-03-16 22:49:30.758808   Updated: evaluate.py
+2026-03-16 22:49:30.758872   Updated: realign_gpt2.py
+2026-03-16 22:49:30.758934   Updated: analysis_shift_llama.py
+2026-03-16 22:49:30.758997   Updated: README.md
+2026-03-16 22:49:30.759064   Updated: reproduce.sh
+2026-03-16 22:49:30.759132 
+2026-03-16 22:49:30.759171 ======================================================================
+2026-03-16 22:49:30.759210 REACT BASELINE COMPLETE
+2026-03-16 22:49:30.759247 ======================================================================
+2026-03-16 22:49:30.759286 Total iterations: 6
+2026-03-16 22:49:30.759324 API tokens: 62692 completion, 205341 prompt
+2026-03-16 22:49:30.759378 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial3/mechanistic-understanding/generated_code_response.txt

@@ -1,0 +1,164 @@
+2026-03-14 12:38:49.774730 ======================================================================
+2026-03-14 12:38:49.774856 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 12:38:49.774898 ======================================================================
+2026-03-14 12:38:49.774961 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/bbox/paper.md
+2026-03-14 12:38:49.774997 Log path: paper2code_react5_Gpt-oss-20b_trial1/bbox
+2026-03-14 12:38:49.775031 Model: Openai/Gpt-oss-20b
+2026-03-14 12:38:49.775066 Max iterations: 5
+2026-03-14 12:38:49.775101 Run reproduce.sh: False
+2026-03-14 12:38:49.775138 Run LLM paper check: True
+2026-03-14 12:38:49.775187 
+2026-03-14 12:38:49.775220 Loading paper...
+2026-03-14 12:38:49.775541 Paper length: 93732 chars (using 93732 for prompt)
+2026-03-14 12:38:49.775613 
+2026-03-14 12:38:49.794806 --- Iteration 0: Initial generation ---
+2026-03-14 12:39:38.110111   Created: generated_reproduction.txt
+2026-03-14 12:39:38.110230 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial1/bbox/submission (1 files)
+2026-03-14 12:39:38.110286 
+2026-03-14 12:39:38.110339 --- Iteration 1: Observe & Refine ---
+2026-03-14 12:39:50.406581 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incorrect / Partial Elements**
+
+| Status | Requirement from Paper | Comment |
+|--------|------------------------|---------|
+| **MISSING** | Black‑box LLM with no access to token probabilities (e.g., GPT‑3.5 / Gemini) | The demo uses GPT‑2, which is fully open‑source and exposes token probabilities. The black‑box assumption is not satisfied. |
+| **MISSING** | Ranking‑based Noise Contrastive Estimation (NCE) loss | The code description does not mention an NCE loss; it likely uses a standard cross‑entropy or similar. |
+| **MISSING** | Online adaptation framework (iterative sampling from previous inferences and re‑training) | No loop that generates new candidates from the adapter’s own predictions and updates the adapter. |
+| **MISSING** | Negative samples from previous adaptations | The demo only uses ground‑truth positives; no negative samples are collected from prior inferences. |
+| **MISSING** | Positive samples from AI feedback or human feedback | The code does not incorporate AI‑generated or human‑verified positives beyond the toy dataset. |
+| **MISSING** | Combination of black‑box LLM and adapter outputs for inference | The inference step appears to use only the adapter’s predictions, not a weighted combination with the black‑box LLM. |
+| **MISSING** | Evaluation on multiple diverse datasets (as in the paper) | The demo uses a single toy set of 10 math‑word‑problem examples; no comparison to baselines or other tasks. |
+| **MISSING** | Reported metrics (e.g., performance gains, cost savings) | The script only prints a simple accuracy; no cost analysis or comparison to SFT/other baselines. |
+| **MISSING** | Explicit hyper‑parameter settings (learning rate, batch size, epochs, optimizer) | The script does not expose or document key hyper‑parameters; defaults are likely used. |
+| **MISSING** | Adapter size specification (0.1B–0.3B parameters) | While DeBERTa‑base is ~110M, the code does not explicitly state the parameter count or enforce the size range. |
+| **MISSING** | Energy‑based model (EBM) perspective | No explicit EBM formulation or energy function is present. |
+| **PARTIAL** | Small adapter model | The demo uses DeBERTa‑base (~110M), which falls within the 0.1B–0.3B range, but the code does not document this choice or its justification. |
+| **PARTIAL** | Reproducibility script (`reproduce.sh`) | The script installs dependencies and runs training/inference, but it does not reproduce the paper’s experimental results or provide checkpoints. |
+| **OK** | Use of a lightweight adapter (small LM) | The adapter is a separate, small language model rather than fine‑tuning the black‑box LLM. |
+
+**Conclusion**
+
+The provided code does **not** implement the core contributions of the paper (ranking‑based NCE, online adaptation, negative sampling, output combination, EBM framing, multi‑dataset evaluation, cost analysis). It only offers a toy demonstration that partially mirrors the idea of a small adapter. Therefore, the reproduction is incomplete.
+
+**Recommendation**
+
+To achieve a faithful reproduction, the following must be added/modified:
+
+1. Replace GPT‑2 with a true black‑box LLM (e.g., GPT‑3.5 via API) and ensure no token probabilities are used.
+2. Implement the ranking‑based NCE loss as described in the paper.
+3. Add an online adaptation loop that samples from the adapter’s predictions, collects negatives, and updates the adapter.
+4. Combine black‑box LLM outputs and adapter scores during inference.
+5. Use AI/human feedback as positive samples where possible.
+6. Run experiments on the datasets used in the paper, report the same metrics, and include cost analysis.
+7. Document hyper‑parameters and adapter size explicitly.
+
+Once these changes are made, the reproduction would be considered complete.
+2026-03-14 12:39:50.406803 
+2026-03-14 12:39:50.407016 Generating refined code...
+2026-03-14 12:40:39.741232   Updated: generated_reproduction.txt
+2026-03-14 12:40:39.741349 
+2026-03-14 12:40:39.741391 --- Iteration 2: Observe & Refine ---
+2026-03-14 12:40:51.207828 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Full experimental coverage: the paper reports results on *three* diverse datasets, but the code only runs on a tiny GSM8K subset.  
+- Baseline comparisons: no implementation of SFT, LoRA, kNN‑Adapter, etc., so the paper’s relative gains cannot be reproduced.  
+- Evaluation metrics beyond simple accuracy: the paper reports cost‑efficiency (31.30× training, 1.84× inference) and absolute performance gains (up to 6.77 %). These are absent.  
+- Hyper‑parameter specification: learning rate, batch size, number of epochs, optimizer choice, and weight‑decay are not exposed or documented.  
+- Online adaptation details: the paper’s online loop samples *positive* data from ground‑truth, human, or AI feedback and *negative* data from previous inferences. The code does not show any mechanism for collecting or re‑using past inferences as negatives.  
+- Positive‑sample diversity: only ground‑truth is used; no human or AI‑generated feedback is incorporated.  
+- Adapter‑black‑box output fusion: the paper describes a weighted combination of the adapter’s score and the black‑box LLM’s output. The code does not clearly implement this fusion step.  
+- Explicit EBM framing: the paper frames adaptation as sampling from an energy‑based model; the code does not expose this perspective or the corresponding energy function.  
+
+**PARTIAL**  
+- Adapter architecture: uses DeBERTa‑v3‑base (~110 M parameters), which falls within the 0.1–0.3 B range claimed.  
+- Black‑box usage: GPT‑3.5‑turbo is called via the OpenAI API with no token probabilities accessed, matching the paper’s constraints.  
+- Ranking‑based NCE loss: the code contains a loss function that resembles NCE, but it is unclear whether it truly implements the *ranking* variant described in the paper (i.e., using a pairwise ranking loss rather than a simple cross‑entropy).  
+
+**INCORRECT**  
+- If the implemented NCE loss is a standard cross‑entropy or a simple contrastive loss without the ranking component, it does not match the paper’s ranking‑based NCE formulation.  
+- If the online adaptation loop does not actually re‑train the adapter on newly sampled inferences (i.e., it only re‑generates outputs without updating the adapter), it fails to realize the paper’s online adaptation mechanism.  
+
+**OK**  
+- The code correctly treats the black‑box LLM as an oracle that only returns text completions.  
+- The adapter is trained only on the small DeBERTa model, keeping the overall parameter count low.  
+
+**Recommendation**  
+To achieve a faithful reproduction, the code must be extended to:  
+1. Load all three datasets used in the paper and split them as described.  
+2. Implement the exact ranking‑based NCE loss (pairwise ranking over positive/negative pairs).  
+3. Add an online adaptation loop that:  
+   - collects negative samples from previous inferences,  
+   - optionally incorporates human/AI feedback as positives,  
+   - updates the adapter after each round.  
+4. Fuse adapter scores with black‑box outputs during inference.  
+5. Log and report the same metrics (accuracy, cost ratios, absolute gains).  
+6. Expose all hyper‑parameters and training steps so the experiment can be reproduced exactly.  
+
+Once these items are addressed, the reproduction will be complete.
+2026-03-14 12:40:51.208046 
+2026-03-14 12:40:51.208159 Generating refined code...
+2026-03-14 12:41:30.526777   Updated: generated_reproduction.txt
+2026-03-14 12:41:30.526897 
+2026-03-14 12:41:30.526939 --- Iteration 3: Observe & Refine ---
+2026-03-14 12:41:32.409295 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core method/algorithm (BBox-Adapter architecture, EBM formulation, ranking‑based NCE loss, online adaptation loop)  
+MISSING: Training procedure (optimizer, learning rate, batch size, number of epochs, checkpointing)  
+MISSING: Data setup (datasets, preprocessing, train/validation splits, tokenization)  
+MISSING: Evaluation protocol (metrics, baselines, inference procedure)  
+MISSING: Experimental setup (hardware specs, training steps, inference cost calculations)  
+MISSING: `reproduce.sh` or any script that runs the full training/evaluation pipeline  
+
+**Result:** ALL components required to reproduce the paper’s experiments are absent from the provided code.
+2026-03-14 12:41:32.409474 
+2026-03-14 12:41:32.409711 Generating refined code...
+2026-03-14 12:42:18.328678   Updated: generated_reproduction.txt
+2026-03-14 12:42:18.328779 
+2026-03-14 12:42:18.328862 --- Iteration 4: Observe & Refine ---
+2026-03-14 12:42:20.261821 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core method/algorithm (BBox‑Adapter architecture, EBM formulation, ranking‑based NCE loss, online adaptation loop)  
+MISSING: Hyperparameters (learning rate, batch size, optimizer settings, number of epochs, temperature, etc.)  
+MISSING: Data setup (datasets, preprocessing steps, train/validation/test splits, tokenization)  
+MISSING: Evaluation (metrics, inference protocol, baseline comparisons)  
+MISSING: Experimental setup (hardware specs, training steps, checkpointing, logging)  
+MISSING: `reproduce.sh` (script to run the full training and evaluation pipeline)  
+
+**ALL_OK:** No. The reproduction code only contains a `requirements.txt` and does not implement any of the paper’s key components.
+2026-03-14 12:42:20.262106 
+2026-03-14 12:42:20.262238 Generating refined code...
+2026-03-14 12:43:07.972588   Updated: generated_reproduction.txt
+2026-03-14 12:43:07.972747 
+2026-03-14 12:43:07.972788 --- Iteration 5: Observe & Refine ---
+2026-03-14 12:43:10.148475 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core method/algorithm (BBox‑Adapter architecture, EBM formulation, ranking‑based NCE loss, online adaptation loop)  
+MISSING: Hyperparameters (learning rate, batch size, optimizer settings, number of epochs, adapter size)  
+MISSING: Data setup (datasets, preprocessing, train/validation splits, tokenization)  
+MISSING: Evaluation (metrics, inference protocol, baseline comparisons)  
+MISSING: Experimental setup (hardware specs, training steps, checkpointing, logging)  
+MISSING: `reproduce.sh` (or equivalent script to run the full training and evaluation pipeline)  
+
+No INCORRECT or PARTIAL items are present because the provided code only contains a `requirements.txt` file. All essential components for reproducing the paper’s results are missing.
+2026-03-14 12:43:10.148661 
+2026-03-14 12:43:10.148790 Generating refined code...
+2026-03-14 12:43:51.472138   Updated: generated_reproduction.txt
+2026-03-14 12:43:51.472227 
+2026-03-14 12:43:51.472268 ======================================================================
+2026-03-14 12:43:51.472356 REACT BASELINE COMPLETE
+2026-03-14 12:43:51.472408 ======================================================================
+2026-03-14 12:43:51.472462 Total iterations: 6
+2026-03-14 12:43:51.472496 API tokens: 30806 completion, 184356 prompt
+2026-03-14 12:43:51.472528 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial1/bbox/generated_code_response.txt

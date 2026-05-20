@@ -1,0 +1,48 @@
+import torch
+import torch.nn as nn
+
+class EWC:
+    """
+    Elastic Weight Consolidation (EWC) implementation.
+    Computes Fisher diagonal on a given dataset and adds a penalty
+    during fine‑tuning.
+    """
+    def __init__(self, model, fisher_samples=100, lr=1e-3, device="cpu"):
+        self.model = model
+        self.fisher_samples = fisher_samples
+        self.lr = lr
+        self.device = device
+        self.params = {n: p.clone().detach() for n, p in self.model.named_parameters()}
+        self.fisher = self._compute_fisher()
+
+    def _compute_fisher(self):
+        """
+        Approximate the Fisher diagonal by averaging squared gradients
+        of the log‑likelihood over a small batch of data.
+        """
+        self.model.eval()
+        fisher = {n: torch.zeros_like(p) for n, p in self.model.named_parameters()}
+        for _ in range(self.fisher_samples):
+            # Sample random state and action from the environment
+            state = torch.randint(0, 2, (1,), device=self.device)
+            logits = self.model(state)
+            log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+            action = torch.multinomial(torch.exp(log_probs), num_samples=1)
+            loss = -log_probs[0, action]
+            self.model.zero_grad()
+            loss.backward()
+            for n, p in self.model.named_parameters():
+                if p.grad is not None:
+                    fisher[n] += p.grad.data.pow(2)
+        for n in fisher:
+            fisher[n] = fisher[n] / self.fisher_samples
+        return fisher
+
+    def penalty(self, new_params):
+        """
+        Compute the EWC penalty for the current parameters.
+        """
+        loss = 0.0
+        for n, p in new_params.items():
+            loss += self.fisher[n] * (p - self.params[n]).pow(2).sum()
+        return loss

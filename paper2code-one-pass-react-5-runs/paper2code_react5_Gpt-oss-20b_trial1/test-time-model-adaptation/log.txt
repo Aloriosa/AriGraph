@@ -1,0 +1,207 @@
+2026-03-15 15:35:35.392166 ======================================================================
+2026-03-15 15:35:35.392316 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-15 15:35:35.392365 ======================================================================
+2026-03-15 15:35:35.392421 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/test-time-model-adaptation/paper.md
+2026-03-15 15:35:35.392474 Log path: paper2code_react5_Gpt-oss-20b_trial1/test-time-model-adaptation
+2026-03-15 15:35:35.392508 Model: Openai/Gpt-oss-20b
+2026-03-15 15:35:35.392541 Max iterations: 5
+2026-03-15 15:35:35.392576 Run reproduce.sh: False
+2026-03-15 15:35:35.392613 Run LLM paper check: True
+2026-03-15 15:35:35.392645 
+2026-03-15 15:35:35.392678 Loading paper...
+2026-03-15 15:35:35.393059 Paper length: 95489 chars (using 95489 for prompt)
+2026-03-15 15:35:35.393115 
+2026-03-15 15:35:35.412875 --- Iteration 0: Initial generation ---
+2026-03-15 15:36:40.156000   Created: generated_reproduction.txt
+2026-03-15 15:36:40.156111 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial1/test-time-model-adaptation/submission (1 files)
+2026-03-15 15:36:40.156153 
+2026-03-15 15:36:40.156210 --- Iteration 1: Observe & Refine ---
+2026-03-15 15:36:46.877408 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING / NOT IMPLEMENTED**
+
+| Requirement | Status | Notes |
+|-------------|--------|-------|
+| **Core FOA algorithm** (prompt insertion, CMA‑based prompt optimization, unsupervised fitness function combining entropy + CLS‑activation discrepancy) | MISSING | The file list shows only `foa.py` and `main.py`, but no evidence that the CMA loop, prompt update, or fitness calculation is coded. |
+| **Covariance Matrix Adaptation (CMA‑ES) optimizer** | MISSING | No reference to a CMA implementation or external library usage. |
+| **Unsupervised fitness function** (entropy + activation discrepancy) | MISSING | No code snippet or function name indicating this composite metric. |
+| **Activation shifting scheme** (forward‑only shifting of CLS activations toward source statistics) | MISSING | No implementation of shifting logic or dynamic direction update. |
+| **Quantization support** (8‑bit ViT inference) | MISSING | No code handling quantized models or reference to `torch.quantization` or similar. |
+| **Source domain statistics collection** (32 ID samples for CLS activation mean/std) | MISSING | No code that loads a small ID set or computes statistics. |
+| **Hyperparameters** (batch size 64, CMA population size, learning rates, number of CMA iterations per test batch, etc.) | MISSING | No `config.py` or hard‑coded values visible. |
+| **Dataset handling** (ImageNet‑C, other benchmarks) | MISSING | No dataset loader or preprocessing pipeline shown. |
+| **Evaluation protocol** (top‑1 accuracy on ImageNet‑C level‑5, comparison to TENT, memory usage reporting) | MISSING | No evaluation script or metric logging. |
+| **Baseline implementation** (TENT, SAR, MEMO) | MISSING | No baseline code or comparison logic. |
+| **Reproduce script** (`reproduce.sh`) | PARTIAL | The script exists but its contents are unknown; likely it does not orchestrate full training/evaluation pipeline. |
+| **Hardware / checkpoint handling** | MISSING | No code for saving/loading checkpoints, or specifying device (CPU/GPU/FPGA). |
+| **Documentation** (README, usage instructions) | PARTIAL | README exists but likely does not detail how to reproduce the paper’s results. |
+
+**Conclusion**
+
+The provided repository skeleton does **not** contain the essential components required to reproduce the FOA method and its experimental results as described in the paper. Significant implementation work is needed to add the CMA optimizer, fitness function, activation shifting, quantization support, dataset pipelines, evaluation metrics, and baseline comparisons. Once these are added, the repository could be considered complete.
+2026-03-15 15:36:46.877577 
+2026-03-15 15:36:46.877874 Generating refined code...
+2026-03-15 15:37:59.481924   Updated: requirements.txt
+2026-03-15 15:37:59.482110   Updated: README.md
+2026-03-15 15:37:59.482186   Updated: reproduce.sh
+2026-03-15 15:37:59.482255   Updated: src/foa.py
+2026-03-15 15:37:59.482338   Updated: src/main.py
+2026-03-15 15:37:59.482392 
+2026-03-15 15:37:59.482451 --- Iteration 2: Observe & Refine ---
+2026-03-15 15:39:02.409283 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incorrect / Partial Reproduction**
+
+| Category | Item | Status | Notes |
+|----------|------|--------|-------|
+| **Dataset & Evaluation** | Use of ImageNet‑C (level 5) for evaluation | **MISSING** | The code evaluates on CIFAR‑10, not the ImageNet‑C benchmark used in the paper. |
+| | Test‑time adaptation protocol (online, per‑sample or per‑batch) | **OK** | The code runs CMA‑ES per batch, which is an online setting. |
+| | Accuracy metric (Top‑1 accuracy on ImageNet‑C) | **MISSING** | The code reports accuracy on CIFAR‑10; no comparison to ImageNet‑C results. |
+| **Baseline Implementation** | TENT baseline (entropy minimization on test data) | **INCORRECT** | The baseline in the code trains on the training set and does not perform test‑time adaptation; it also updates only LayerNorm parameters, not the full TENT procedure. |
+| | Comparison to prior TTA methods (e.g., TENT, SAR, MEMO) | **MISSING** | No side‑by‑side comparison on the same dataset. |
+| **Model & Prompt** | Prompt insertion as model input | **OK** | FOAModel correctly injects learnable prompt tokens. |
+| | Prompt dimensionality & number | **OK** | Default 3 prompts, dimension matches ViT patch embedding. |
+| | Freezing base model weights | **OK** | Base model parameters are set to `requires_grad=False`. |
+| **Optimization** | Use of CMA‑ES (derivative‑free) | **OK** | `pycma` is used. |
+| | Fitness function (entropy + activation discrepancy) | **OK** | Entropy + λ*(μ‑diff + σ‑diff) implemented. |
+| | Hyper‑parameters (λ, population size, σ) | **PARTIAL** | Values (λ=0.4, popsize=28, σ=0.5) are chosen arbitrarily; paper does not specify them. |
+| **Activation Shifting** | Forward‑only shifting of CLS token | **OK** | `shift_activation` adds γ*(μ_src‑μ_batch). |
+| | Shifting applied to final layer only | **OK** | CLS token is shifted before the head. |
+| **Quantization** | 8‑bit quantized ViT | **PARTIAL** | Code uses dynamic quantization (`quantize_dynamic`), whereas the paper uses static 8‑bit quantization. |
+| | Compatibility with edge devices | **OK** | No back‑prop and only forward passes. |
+| **Reproduce.sh** | Full pipeline to reproduce paper results | **MISSING** | The script only installs dependencies and runs `main.py`, which does not reproduce the paper’s ImageNet‑C results. |
+| | Hardware specification (GPU vs. CPU) | **PARTIAL** | Script uses GPU if available but does not enforce the same hardware as the paper. |
+| **Miscellaneous** | Source statistics estimation (32 samples) | **OK** | `compute_source_stats` uses 32 samples. |
+| | Batch size (64) | **OK** | Default batch size matches paper. |
+| | Logging / progress bars | **OK** | `tqdm` used for progress. |
+
+**Summary**
+
+The core idea of FOA (prompt learning with CMA‑ES, unsupervised fitness, activation shifting) is correctly implemented, but the reproduction code does **not** match the experimental setup of the paper:
+
+* It evaluates on the wrong dataset (CIFAR‑10 instead of ImageNet‑C).
+* The baseline TENT implementation is incorrect.
+* Quantization is implemented differently.
+* No comparison to prior TTA methods on the same benchmark.
+* The `reproduce.sh` script does not produce the paper’s reported results.
+
+**Recommendation**
+
+Fix the dataset and evaluation pipeline to use ImageNet‑C, implement a proper test‑time TENT baseline, align the quantization method with the paper, and update the reproducibility script to run the full experimental protocol. Once these changes are made, the reproduction will be complete.
+2026-03-15 15:39:02.409472 
+2026-03-15 15:39:02.409615 Generating refined code...
+2026-03-15 15:40:06.531063   Updated: README.md
+2026-03-15 15:40:06.531176   Updated: requirements.txt
+2026-03-15 15:40:06.531258   Updated: reproduce.sh
+2026-03-15 15:40:06.531319   Updated: src/foa.py
+2026-03-15 15:40:06.531376   Updated: src/main.py
+2026-03-15 15:40:06.531413 
+2026-03-15 15:40:06.531448 --- Iteration 3: Observe & Refine ---
+2026-03-15 15:40:39.036990 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Use of the ImageNet‑C dataset (severity 5) as in the paper.  
+- Evaluation protocol on ImageNet‑C (top‑1 accuracy, memory usage, run‑time).  
+- Exact hyper‑parameter values reported in the paper (CMA‑ES sigma, population size, λ_discrep, γ_shift, prompt dimension).  
+- Static 8‑bit quantization (PTQ) as used in the paper; the code only offers dynamic quantization.  
+- Measurement of run‑time memory consumption and comparison to TENT.  
+- Baseline TENT run on the same dataset (ImageNet‑C) for a fair comparison.  
+- Reported accuracy numbers (59.6 % TENT vs 66.3 % FOA full‑precision, 63.5 % FOA 8‑bit).  
+
+**INCORRECT**  
+- The code evaluates on CIFAR‑10 instead of ImageNet‑C, so the results are not comparable to the paper.  
+- The activation‑shifting scheme is a fixed shift (γ · (source – batch)) rather than the dynamic shifting direction described in the paper.  
+- The fitness function may not match the exact formulation in the paper (e.g., weighting of entropy vs. discrepancy).  
+- The CMA‑ES initialization (σ = 0.5) and population size (28) are arbitrary and not tied to the paper’s settings.  
+- Quantization is performed with `torch.quantization.quantize_dynamic`, whereas the paper uses static 8‑bit PTQ.  
+
+**PARTIAL**  
+- The core FOA algorithm (prompt insertion, CMA‑ES optimization, unsupervised fitness, activation shifting) is implemented.  
+- The TENT baseline is included but only on CIFAR‑10.  
+- Source CLS statistics are computed from a small subset (32 samples) as in the paper.  
+- The code runs end‑to‑end and produces a top‑1 accuracy, but it does not reproduce the paper’s reported numbers or memory savings.  
+
+**Conclusion**  
+The reproduction code captures the high‑level idea of FOA but does not fully implement the experimental setup, dataset, hyper‑parameters, quantization, or evaluation metrics described in the paper. Therefore, the reproduction is incomplete.
+2026-03-15 15:40:39.037173 
+2026-03-15 15:40:39.037298 Generating refined code...
+2026-03-15 15:41:52.780857   Updated: README.md
+2026-03-15 15:41:52.780992   Updated: reproduce.sh
+2026-03-15 15:41:52.781074   Updated: requirements.txt
+2026-03-15 15:41:52.781135   Updated: src/foa.py
+2026-03-15 15:41:52.781194   Updated: src/main.py
+2026-03-15 15:41:52.781246 
+2026-03-15 15:41:52.781281 --- Iteration 4: Observe & Refine ---
+2026-03-15 15:53:14.609403 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Correct prompt‑injection logic: the current `FOAModel.forward` adds the original positional embedding (`pos_embed`) to the concatenated input that now contains the prompt, but the positional embedding is only defined for the original number of tokens (`N+1`). The code does not extend or adjust `pos_embed` to accommodate the additional prompt tokens, leading to a shape mismatch and incorrect token embeddings.  
+- Dynamic activation‑shifting direction: the paper describes a *back‑to‑source* shifting scheme that adapts the shift direction online (e.g., using an EMA of CLS statistics). The implementation uses a fixed shift `γ * (μ_source – μ_batch)` and never updates the shifting direction based on the evolving test distribution.  
+- Explicit hyper‑parameter values from the paper: the paper reports specific settings for the CMA‑ES population size, initial step size (σ), λ for the discrepancy term, and the activation‑shifting step size γ. These values are not provided in the code; defaults are chosen arbitrarily (σ=0.5, popsize=28, λ=0.4, γ=1.0).  
+- Quantization details: the paper evaluates on *static* 8‑bit PTQ ViT models, whereas the code applies *dynamic* quantization (`torch.quantization.quantize_dynamic`). This difference may affect the reported accuracy and memory savings.  
+- Memory‑usage reporting: the paper highlights a 24‑fold memory reduction; the reproduction script does not measure or report runtime memory consumption.  
+- Evaluation protocol completeness: the paper reports per‑corruption and per‑severity results (e.g., accuracy on each corruption type at severity 5). The script only reports a single overall top‑1 accuracy on all corruption types combined.  
+- Top‑5 accuracy: the paper reports both top‑1 and top‑5 accuracies; the script only computes top‑1.  
+
+**INCORRECT**  
+- `FOAModel.forward` incorrectly adds the positional embedding to the concatenated input without adjusting for the added prompt tokens, causing a broadcasting error or wrong token positions.  
+- The `FOA._fitness` function uses the mean entropy over the batch but does not normalize by batch size or account for class imbalance; while not strictly wrong, it deviates from the paper’s description of the fitness function (which may include a weighting scheme).  
+
+**PARTIAL**  
+- Activation shifting is implemented only for the CLS token and only before the final head. The paper’s description suggests shifting the *final layer activations* (CLS token) but also mentions a dynamic shifting direction; the implementation provides a static shift.  
+- The CMA‑ES optimizer is used correctly in principle, but the code does not expose or tune the initial covariance matrix or step size as described in the paper.  
+- The source CLS statistics are computed from the validation set (32 samples), which matches the paper’s “32 samples are sufficient” claim, but the paper does not explicitly state that the validation set is used; the code assumes this without verification.  
+
+**OK**  
+- The overall FOA framework (prompt insertion, CMA‑ES optimization, unsupervised fitness combining entropy and CLS discrepancy, and activation shifting) is present.  
+- The script downloads and prepares ImageNet‑C (severity 5) and ImageNet‑1K validation data, applies the same preprocessing (resize, normalize), and evaluates top‑1 accuracy.  
+- The TENT baseline is implemented and can be run for comparison.  
+- The reproduction script (`reproduce.sh`) installs dependencies and runs the main evaluation pipeline.  
+
+**Recommendation**  
+Fix the prompt‑injection logic in `FOAModel.forward`, implement dynamic activation shifting, align hyper‑parameters with the paper, use static 8‑bit PTQ, add memory‑usage measurement, and report per‑corruption and top‑5 accuracies to fully match the paper’s experimental protocol.
+2026-03-15 15:53:14.609678 
+2026-03-15 15:53:14.609815 Generating refined code...
+2026-03-15 15:55:05.746405   Updated: src/foa.py
+2026-03-15 15:55:05.746545   Updated: src/main.py
+2026-03-15 15:55:05.746628   Updated: README.md
+2026-03-15 15:55:05.746706   Updated: reproduce.sh
+2026-03-15 15:55:05.746766   Updated: requirements.txt
+2026-03-15 15:55:05.746816 
+2026-03-15 15:55:05.746853 --- Iteration 5: Observe & Refine ---
+2026-03-15 15:59:24.837358 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Quantization strategy – the paper reports static 8‑bit PTQ, while the code uses dynamic quantization.  
+INCORRECT: Activation shifting – the paper shifts all relevant activations toward the source distribution, but the implementation only shifts the CLS token.  
+PARTIAL: Hyper‑parameters (population size, λ_discrep, γ_shift, number of prompts) are not tied to the values reported in the paper; defaults are used.  
+OK: Core FOA pipeline (prompt insertion, CMA‑ES, unsupervised fitness, no back‑prop, no weight updates).  
+OK: Source statistics estimation from 32 samples.  
+OK: Evaluation on ImageNet‑C severity 5 with top‑1/top‑5 metrics.  
+OK: TENT baseline implementation for comparison.  
+OK: Data preprocessing and dataset download logic.  
+
+All other essential aspects of the paper are reproduced.
+2026-03-15 15:59:24.837610 
+2026-03-15 15:59:24.837762 Generating refined code...
+2026-03-15 16:01:05.301209   Updated: src/foa.py
+2026-03-15 16:01:05.301332   Updated: src/main.py
+2026-03-15 16:01:05.301412   Updated: README.md
+2026-03-15 16:01:05.301489   Updated: reproduce.sh
+2026-03-15 16:01:05.301547   Updated: requirements.txt
+2026-03-15 16:01:05.301586 
+2026-03-15 16:01:05.301622 ======================================================================
+2026-03-15 16:01:05.301655 REACT BASELINE COMPLETE
+2026-03-15 16:01:05.301689 ======================================================================
+2026-03-15 16:01:05.301722 Total iterations: 6
+2026-03-15 16:01:05.301755 API tokens: 86272 completion, 229687 prompt
+2026-03-15 16:01:05.301788 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial1/test-time-model-adaptation/generated_code_response.txt

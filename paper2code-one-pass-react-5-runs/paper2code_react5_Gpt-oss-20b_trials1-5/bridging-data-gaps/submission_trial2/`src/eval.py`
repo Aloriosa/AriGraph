@@ -1,0 +1,61 @@
+#!/usr/bin/env python
+"""Generate images from the fine‑tuned LoRA adapter."""
+
+import argparse
+import os
+from pathlib import Path
+
+import torch
+from diffusers import DiffusionPipeline
+from PIL import Image
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_path", type=str, required=True,
+                        help="Path to LoRA adapter weights")
+    parser.add_argument("--output_dir", type=str, default="outputs/generations",
+                        help="Where to write generated PNGs")
+    parser.add_argument("--num_samples", type=int, default=200,
+                        help="How many images to generate")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed")
+    args = parser.parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # Load base model
+    pipe = DiffusionPipeline.from_pretrained(
+        "CompVis/stable-diffusion-v1-5",
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        safety_checker=None,
+        requires_safety_checker=False
+    )
+    pipe = pipe.to("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Load LoRA weights
+    state_dict = torch.load(args.model_path, map_location="cpu")
+    pipe.unet.load_state_dict(state_dict, strict=False)
+
+    pipe.eval()
+    pipe.unet.to("cuda" if torch.cuda.is_available() else "cpu")
+
+    generator = torch.Generator(device=pipe.device).manual_seed(args.seed)
+
+    for i in range(args.num_samples):
+        # Use a generic prompt; the LoRA adapts the visual style
+        prompt = "a portrait of a person"
+        image = pipe(
+            prompt,
+            num_inference_steps=50,
+            guidance_scale=7.5,
+            generator=generator,
+            output_type="pil"
+        ).images[0]
+        image.save(os.path.join(args.output_dir, f"{i:04d}.png"))
+        if (i + 1) % 50 == 0:
+            print(f"{i+1}/{args.num_samples} generated")
+
+    print("Generation finished.")
+
+if __name__ == "__main__":
+    main()

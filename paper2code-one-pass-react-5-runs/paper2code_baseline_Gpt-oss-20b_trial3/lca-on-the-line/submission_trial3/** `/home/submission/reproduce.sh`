@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 1. Install Python dependencies
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# 2. Download NLTK WordNet data
+python - <<'PY'
+import nltk
+nltk.download('wordnet')
+nltk.download('omw-1.4')
+PY
+
+# 3. Run the evaluation
+python src/evaluate.py \
+  --id_path data/imagenet_val \
+  --ood_path "" \          # leave empty if no OOD dataset is provided
+  --batch_size 64 \
+  --output results/results.csv

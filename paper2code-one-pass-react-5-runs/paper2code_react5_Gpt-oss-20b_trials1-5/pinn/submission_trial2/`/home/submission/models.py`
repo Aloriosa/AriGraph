@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+"""
+Simple 3‑layer MLP with tanh activations.
+"""
+
+import torch
+import torch.nn as nn
+
+
+class MLP(nn.Module):
+    def __init__(self, hidden_width: int, device: torch.device):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(2, hidden_width),
+            nn.Tanh(),
+            nn.Linear(hidden_width, hidden_width),
+            nn.Tanh(),
+            nn.Linear(hidden_width, hidden_width),
+            nn.Tanh(),
+            nn.Linear(hidden_width, 1),
+        )
+        self.to(device)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: shape (..., 2) -> columns are [x, t]
+        """
+        return self.net(x).squeeze(-1)

@@ -1,0 +1,37 @@
+import torch
+import numpy as np
+
+def make_residual_boundary_points(pde, device):
+    """
+    Generates residual and boundary sample points as described in the paper.
+    Returns:
+        res_points: Tensor of shape (n_res, 2) – (x, t)
+        bc_points:  Tensor of shape (n_bc, 2)
+    """
+    # Domain: x in [0, 2π] or [0,1] for wave, t in [0,1]
+    if isinstance(pde, type):
+        raise ValueError("pde must be an instance, not a class")
+
+    # For simplicity, we generate a full grid 255×100 interior points
+    nx, nt = 255, 100
+    x_vals = torch.linspace(0, 2 * np.pi, nx, device=device)
+    t_vals = torch.linspace(0, 1, nt, device=device)
+    xx, tt = torch.meshgrid(x_vals, t_vals, indexing="ij")
+    res_points = torch.stack([xx.reshape(-1), tt.reshape(-1)], dim=1)
+
+    # Boundary / initial points
+    # 257 initial points (t=0) uniformly in x
+    x_init = torch.linspace(0, 2 * np.pi, 257, device=device)
+    t_init = torch.zeros_like(x_init)
+    init_points = torch.stack([x_init, t_init], dim=1)
+
+    # 101 points on each boundary x=0 and x=2π
+    t_bc = torch.linspace(0, 1, 101, device=device)
+    x_left = torch.zeros_like(t_bc)
+    x_right = torch.full_like(t_bc, 2 * np.pi)
+    left_points = torch.stack([x_left, t_bc], dim=1)
+    right_points = torch.stack([x_right, t_bc], dim=1)
+
+    bc_points = torch.cat([init_points, left_points, right_points], dim=0)
+
+    return res_points, bc_points

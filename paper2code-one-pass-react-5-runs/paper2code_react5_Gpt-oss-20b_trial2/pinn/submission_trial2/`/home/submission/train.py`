@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""
+Training loop and evaluation logic.
+"""
+
+import torch
+from typing import Dict, Optional
+from models import MLP
+from pde import PDE
+
+
+def train_and_evaluate(
+    model: MLP,
+    data: Dict[str, torch.Tensor],
+    pde: PDE,
+    optimizer: str,
+    lr: float,
+    total_iters: int,
+    history_size: int = 100,
+    switch_iters: Optional[int] = None,
+    device: torch.device = torch.device("cpu"),
+    seed: int = 0,
+) -> Dict:
+    """
+    Trains the model following the specified optimizer pipeline and returns
+    a dictionary with the key metrics:
+        pde, width, seed, optimizer, lr, switch_iters, loss, l2re
+    """
+    # Move data to device
+    for k, v in data.items():
+        data[k] = v.to(device)
+
+    # Optimizer selection
+    if optimizer == "adam":
+        opt = torch.optim.Adam(model.parameters(), lr=lr)
+    elif optimizer == "lbfgs":
+        opt = torch.optim.LBFGS(
+            model.parameters(),
+            lr=lr,
+            history_size=history_size,
+            line_search_fn="strong_wolfe",
+        )
+    elif optimizer == "adam+lbfgs":
+        opt = torch.optim.Adam(model.parameters(), lr=lr)
+    else:
+        raise ValueError(f"Unknown optimizer {optimizer}")
+
+    # Helper closure for LBFGS
+    def closure() -> torch.Tensor:
+        opt.zero_grad()
+        loss = compute_loss(model, data, pde)
+        loss.backward()
+        return loss
+
+    # Training loop
+    for step in range(total_iters):
+        if optimizer == "adam+lbfgs" and switch_iters is not None and step == switch_iters:
+            # Switch to LBFGS
+            opt = torch.optim.LBFGS(
+                model.parameters(),
+                lr=lr,  # lr is ignored by LBFGS but kept for consistency
+                history_size=history_size,
+                line_search_fn="strong_wolfe",
+            )
+            continue  # skip this step to avoid double counting
+
+        if optimizer == "lbfgs" or (optimizer == "adam+lbfgs" and step >= (switch_iters or 0)):
+            # LBFGS step
+            loss = closure()
+            opt.step(closure)
+        else:
+            # Adam step
+            opt.zero_grad()
+            loss = compute_loss(model, data, pde)
+            loss.backward()
+            opt.step()
+
+    # Final loss and L2RE
+    final_loss = compute_loss(model, data, pde).item()
+    l2re = compute_l2re(model, data, pde, device)
+
+    res = {
+        "pde": pde.name,
+        "width": model.net[0].in_features,  # hidden width
+        "seed": seed,
+        "optimizer": optimizer,
+        "lr": lr,
+        "switch_iters": switch_iters,
+        "loss": final_loss,
+        "l2re": l2re,
+    }
+    return res
+
+
+def compute_loss(model: MLP, data: Dict[str, torch.Tensor], pde: PDE) -> torch.Tensor:
+    """
+    Computes the full PINN loss:
+        0.5 * (residual^2) / n_res
+        + 0.5 * (initial^2) / n_init
+        + 0.5 * (boundary^2) / n_bnd
+    """
+    # Residual points
+    in_res = torch.stack([data["res_x"], data["res_t"]], dim=1)
+    u_res = model(in_res)
+    res = pde.residual(u_res, data["res_x"], data["res_t"])
+    loss_res = 0.5 * (res ** 2).sum() / data["res_x"].numel()
+
+    # Initial condition
+    in_init = torch.stack([data["init_x"], data["init_t"]], dim=1)
+    u_init = model(in_init)
+    init_res = pde.initial(u_init, data["init_x"], data["init_t"])
+    loss_init = 0.5 * (init_res ** 2).sum() / data["init_x"].numel()
+
+    # Boundary condition
+    # For periodic boundaries we pair left/right points
+    in_bnd = torch.stack([data["bnd_x"], data["bnd_t"]], dim=1)
+    u_bnd = model(in_bnd)
+    if pde.name in ["convection", "reaction"]:
+        # u(0,t) - u(2π,t)
+        left = u_bnd[data["bnd_type"] == 0]
+        right = u_bnd[data["bnd_type"] == 1]
+        bnd_res = left - right
+        loss_bnd = 0.5 * (bnd_res ** 2).sum() / left.numel()
+    elif pde.name == "wave":
+        # Dirichlet zero
+        bnd_res = u_bnd
+        loss_bnd = 0.5 * (bnd_res ** 2).sum() / data["bnd_x"].numel()
+    else:
+        raise RuntimeError("Unreachable")
+
+    return loss_res + loss_init + loss_bnd
+
+
+def compute_l2re(
+    model: MLP, data: Dict[str, torch.Tensor], pde: PDE, device: torch.device
+) -> float:
+    """
+    Computes L2 relative error on the full evaluation grid.
+    """
+    in_full = torch.stack([data["full_x"], data["full_t"]], dim=1)
+    u_pred = model(in_full)
+    u_true = pde.exact_solution(data["full_x"], data["full_t"])
+    diff = u_pred - u_true
+    l2re = torch.sqrt((diff ** 2).sum() / (u_true ** 2).sum())
+    return l2re.item()

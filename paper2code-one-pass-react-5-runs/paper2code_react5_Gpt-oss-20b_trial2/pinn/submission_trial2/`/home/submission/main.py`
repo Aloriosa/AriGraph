@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""
+Entry point for reproducing the experiments in
+“Challenges in Training PINNs: A Loss Landscape Perspective”.
+"""
+
+import os
+import json
+import argparse
+import torch
+import numpy as np
+import pandas as pd
+from pathlib import Path
+
+from models import MLP
+from pde import PDE
+from train import train_and_evaluate
+from utils import set_global_determinism, get_device
+
+# --------------------------------------------------------------------------- #
+# Configuration
+# --------------------------------------------------------------------------- #
+
+CONFIG = {
+    "pde_names": ["convection", "reaction", "wave"],
+    "widths": [50, 100, 200, 400],
+    "total_iters": 41000,
+    "adam_lrs": [1e-5, 1e-4, 1e-3, 1e-2, 1e-1],
+    "lbfgs_lr": 1.0,
+    "lbfgs_history_size": 100,
+    "adam_plus_lbfgs_switches": [1000, 11000, 31000],
+    "seeds": [0, 1, 2, 3, 4],
+    "residual_points": 10000,
+    "grid_x": 255,
+    "grid_t": 100,
+    "init_points": 257,
+    "boundary_points": 101,
+}
+
+RESULTS_CSV = Path("results.csv")
+RESULTS_DIR = Path("results")
+RESULTS_DIR.mkdir(exist_ok=True, parents=True)
+
+
+# --------------------------------------------------------------------------- #
+# Main routine
+# --------------------------------------------------------------------------- #
+def main() -> None:
+    set_global_determinism()
+    device = get_device()
+    all_results = []
+
+    for pde_name in CONFIG["pde_names"]:
+        pde = PDE(pde_name)
+        for width in CONFIG["widths"]:
+            for seed in CONFIG["seeds"]:
+                torch.manual_seed(seed)
+                np.random.seed(seed)
+
+                # Build dataset
+                data = pde.build_dataset(
+                    residual_pts=CONFIG["residual_points"],
+                    grid_x=CONFIG["grid_x"],
+                    grid_t=CONFIG["grid_t"],
+                    init_pts=CONFIG["init_points"],
+                    boundary_pts=CONFIG["boundary_points"],
+                )
+
+                # Adam
+                for lr in CONFIG["adam_lrs"]:
+                    model = MLP(width, device).to(device)
+                    res = train_and_evaluate(
+                        model,
+                        data,
+                        pde,
+                        optimizer="adam",
+                        lr=lr,
+                        total_iters=CONFIG["total_iters"],
+                        device=device,
+                        seed=seed,
+                        switch_iters=None,
+                    )
+                    all_results.append(res)
+
+                # L-BFGS
+                model = MLP(width, device).to(device)
+                res = train_and_evaluate(
+                    model,
+                    data,
+                    pde,
+                    optimizer="lbfgs",
+                    lr=CONFIG["lbfgs_lr"],
+                    total_iters=CONFIG["total_iters"],
+                    history_size=CONFIG["lbfgs_history_size"],
+                    device=device,
+                    seed=seed,
+                    switch_iters=None,
+                )
+                all_results.append(res)
+
+                # Adam + L-BFGS
+                for switch in CONFIG["adam_plus_lbfgs_switches"]:
+                    model = MLP(width, device).to(device)
+                    res = train_and_evaluate(
+                        model,
+                        data,
+                        pde,
+                        optimizer="adam+lbfgs",
+                        lr=CONFIG["adam_lrs"][2],  # use lr=1e-3 as in the paper
+                        total_iters=CONFIG["total_iters"],
+                        history_size=CONFIG["lbfgs_history_size"],
+                        switch_iters=switch,
+                        device=device,
+                        seed=seed,
+                    )
+                    all_results.append(res)
+
+    # Save results
+    pd.DataFrame(all_results).to_csv(RESULTS_CSV, index=False)
+    print(f"Reproduction finished. Results saved to {RESULTS_CSV}")
+
+
+if __name__ == "__main__":
+    main()

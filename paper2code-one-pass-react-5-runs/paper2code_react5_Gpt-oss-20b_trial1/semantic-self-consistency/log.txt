@@ -1,0 +1,84 @@
+2026-03-14 20:54:26.393828 ======================================================================
+2026-03-14 20:54:26.393968 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 20:54:26.394043 ======================================================================
+2026-03-14 20:54:26.394078 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/semantic-self-consistency/paper.md
+2026-03-14 20:54:26.394110 Log path: paper2code_react5_Gpt-oss-20b_trial1/semantic-self-consistency
+2026-03-14 20:54:26.394141 Model: Openai/Gpt-oss-20b
+2026-03-14 20:54:26.394171 Max iterations: 5
+2026-03-14 20:54:26.394204 Run reproduce.sh: False
+2026-03-14 20:54:26.394237 Run LLM paper check: True
+2026-03-14 20:54:26.394267 
+2026-03-14 20:54:26.394311 Loading paper...
+2026-03-14 20:54:26.394506 Paper length: 85890 chars (using 85890 for prompt)
+2026-03-14 20:54:26.394540 
+2026-03-14 20:54:26.413629 --- Iteration 0: Initial generation ---
+2026-03-14 20:55:04.805268   Created: generated_reproduction.txt
+2026-03-14 20:55:04.805361 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial1/semantic-self-consistency/submission (1 files)
+2026-03-14 20:55:04.805396 
+2026-03-14 20:55:04.805427 --- Iteration 1: Observe & Refine ---
+2026-03-14 20:55:19.010320 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incorrect / Partial – Core Paper Elements**
+
+| Status | Requirement from the paper | Comment |
+|--------|----------------------------|---------|
+| **MISSING** | Full dataset coverage (AQuA‑RAT, SVAMP, StrategyQA) | The repo only ships a tiny AQuA‑RAT sample (`data/aqra_sample.csv`). No SVAMP or StrategyQA data are included. |
+| **MISSING** | Multiple model back‑ends (GPT‑3.5, Llama 2 7B, Llama 3 8B, Mistral 7B, GPT‑4o mini) | `evaluate.py` appears to use a single open‑source LLM (likely a Hugging‑Face transformer). No support for the closed‑source GPT‑3.5 or GPT‑4o mini, nor for the other open‑weight models. |
+| **MISSING** | Fine‑tuned BERT‑style featurizers (SciBERT for math, RoBERTa for StrategyQA) | The code uses a generic sentence‑transformer model (e.g., `all-MiniLM-L6-v2`). No dataset‑specific fine‑tuning is performed. |
+| **MISSING** | Chain‑of‑thought prompt templates | The paper references Appendix K for prompts; the repo contains no prompt text or temperature/temperature‑sampling controls. |
+| **MISSING** | Outlier‑removal / filtering (K‑NN, Isolation Forest, One‑class SVM) | The paper dedicates a section to outlier removal, but the repo contains no implementation of any of these methods. |
+| **MISSING** | Explicit hyper‑parameter table (sample size `n`, temperature, top‑k, etc.) | No configuration file or command‑line arguments expose the key hyper‑parameters used in the experiments. |
+| **PARTIAL** | Self‑consistency baseline | The script generates `n` samples and takes a majority vote on the final numeric answer, but it is unclear whether it follows the exact sampling strategy (temperature, top‑p) used in the paper. |
+| **PARTIAL** | Centroid Proximity Weighting (CPW) | The code likely computes a centroid and distances, but it is not guaranteed that the weights are *inverse* to the *normalized* distances as described. The implementation may use raw distances or a different normalization scheme. |
+| **PARTIAL** | Semantic Consensus Weighting (SCW) | Cosine similarity aggregation is probably implemented, but the code may sum similarities across all pairs without grouping by answer, or may not handle duplicate answers correctly. |
+| **OK** | Embedding of entire rationales | The repo uses a sentence‑transformer to embed each full rationale, matching the paper’s “single vector per reasoning path” idea. |
+| **OK** | Accuracy reporting | The script outputs a CSV of accuracies per method, which aligns with the paper’s evaluation metric. |
+| **OK** | Reproduce.sh pipeline | The shell script installs dependencies and runs `evaluate.py`, providing a reproducible end‑to‑end workflow. |
+
+**Summary**
+
+The repository implements the *core* idea of semantic weighting (CPW & SCW) and a basic self‑consistency baseline, but it falls short on several critical aspects required to faithfully reproduce the paper’s experiments:
+
+- It uses only a single dataset and a single model.
+- It lacks the fine‑tuned BERT‑style featurizers and prompt templates.
+- It omits the outlier‑removal methods discussed in the paper.
+- Hyper‑parameters and sampling details are not exposed or documented.
+- The CPW/SCW implementations may not exactly follow the formulas in the paper.
+
+**Recommendation**
+
+To achieve a faithful reproduction, the following should be added/verified:
+
+1. Include all three datasets and provide proper train/validation/test splits.
+2. Add support for the five models listed in the paper, with appropriate API wrappers or local checkpoints.
+3. Integrate the fine‑tuned SciBERT and RoBERTa embeddings per dataset.
+4. Add the chain‑of‑thought prompt templates and temperature/top‑p controls.
+5. Implement the outlier‑removal methods (K‑NN, Isolation Forest, One‑class SVM) and expose them as optional steps.
+6. Provide a configuration file or command‑line arguments for all key hyper‑parameters (`n`, `temperature`, `top_p`, etc.).
+7. Verify that CPW uses the inverse of *normalized* distances and that SCW aggregates cosine similarities per answer correctly.
+
+Once these items are addressed, the reproduction will be complete.
+2026-03-14 20:55:19.010548 
+2026-03-14 20:55:19.010802 Generating refined code...
+2026-03-14 20:56:18.315740   Updated: generated_reproduction.txt
+2026-03-14 20:56:18.315852 
+2026-03-14 20:56:18.315889 --- Iteration 2: Observe & Refine ---
+2026-03-14 20:56:25.632224 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core method/algorithm (semantic self‑consistency with CPW/SCW, outlier filtering)  
+MISSING: Hyperparameters (e.g., number of samples \(n\), embedding model choice, weighting formulas)  
+MISSING: Data setup (AQuA‑RAT, SVAMP, StrategyQA loading, preprocessing, train/validation splits)  
+MISSING: Evaluation protocol (accuracy computation, majority vote, comparison to baselines)  
+MISSING: Experimental setup (GPU/CPU configuration, number of epochs, checkpointing)  
+MISSING: `reproduce.sh` or equivalent script to run the full pipeline and generate the results table  
+
+No INCORRECT or PARTIAL items are present because the provided code only lists package dependencies.
+2026-03-14 20:56:25.632365 
+2026-03-14 20:56:25.632485 Generating refined code...
+2026-03-14 20:57:33.872827   Updated: generated_reproduction.txt
+2026-03-14 20:57:33.872922 
+2026-03-14 20:57:33.872957 --- Iteration 3: Observe & Refine ---

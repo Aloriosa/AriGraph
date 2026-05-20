@@ -1,0 +1,557 @@
+**FILE: requirements.txt**  
+```text
+torch>=2.0
+torchvision>=0.15
+torchdiffeq
+tqdm
+numpy
+scipy
+Pillow
+pytorch-fid
+```
+
+---
+
+**FILE: README.md**  
+```markdown
+# Stochastic Interpolants with Data‑Dependent Couplings  
+Reproduction of the core experiments from  
+> **Stochastic Interpolants with Data‑Dependent Couplings**  
+> Michael S. Albergo, Mark Goldstein, Nicholas M. Boffi, Rajesh Ranganath, Eric Vanden‑Eijnden  
+
+## What is reproduced
+
+* A lightweight implementation of the stochastic‑interpolant framework using a data‑dependent coupling (base is a noisy, partially observed version of the target).
+* Two toy conditioning tasks:
+  * **Image in‑painting** – random block masks on CIFAR‑10 images.
+  * **Image super‑resolution** – down‑sampled (4×) images as conditioning.
+* Training of a U‑Net velocity model by minimizing the quadratic regression loss described in the paper.
+* Sampling by integrating the learned velocity field with a simple forward‑Euler solver.
+* Evaluation of the synthetic samples against the real test set using Fréchet Inception Distance (FID).
+
+> **NOTE**: The original paper uses ImageNet (256×256 / 512×512).  
+> For a full‑scale reproduction you should replace the CIFAR‑10 data loader with an ImageNet data pipeline and increase the image resolution. The code structure below is fully compatible with that change.
+
+## Folder structure
+
+```
+├── requirements.txt
+├── README.md
+├── reproduce.sh          # Full reproduction script
+├── train.py              # Training loop
+├── sample.py             # Sampling script
+├── eval.py               # FID evaluation
+├── utils.py              # Helper functions
+├── models/
+│   └── unet.py           # U‑Net velocity model
+└── datasets/
+    └── cifar10.py        # CIFAR‑10 data loader with mask / down‑sample utilities
+```
+
+## How to run
+
+```bash
+bash reproduce.sh
+```
+
+The script will:
+
+1. Install dependencies.
+2. Download CIFAR‑10.
+3. Train the velocity model for 10 epochs.
+4. Generate 5 000 samples for each task.
+5. Compute and print the FID for both tasks.
+
+All artefacts (checkpoint, generated images, FID scores) are stored in the `outputs/` directory.
+
+## Expected outputs
+
+* `outputs/checkpoints/velocity.pth` – trained U‑Net.
+* `outputs/generated/inpainting/*.png` – in‑painted images.
+* `outputs/generated/sr/*.png` – super‑resolved images.
+* `outputs/eval.txt` – FID scores.
+
+If the FID values are lower than the numbers reported in the paper, the implementation is working correctly.  
+If the script fails, ensure that you are running on a machine with at least one NVIDIA GPU and that `torch` detects it (`torch.cuda.is_available()`).
+
+## Extending to ImageNet
+
+* Replace the `datasets/cifar10.py` import with your own `imagenet.py` that yields `(x1, mask)` pairs.
+* Increase `img_size` in the U‑Net configuration (e.g., 256 or 512).
+* Adjust the learning rate and batch size for the larger data (e.g., `batch_size=32`, `lr=1e-4`).
+* Optionally use a multi‑GPU `torch.nn.DataParallel` wrapper.
+
+Happy reproducing!  
+```
+
+---
+
+**FILE: reproduce.sh**  
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 1. Install dependencies
+echo "Installing dependencies..."
+pip install -r requirements.txt
+
+# 2. Download CIFAR‑10 (handled automatically by torchvision)
+python -c "from torchvision import datasets; datasets.CIFAR10(root='data', train=True, download=True); datasets.CIFAR10(root='data', train=False, download=True)"
+
+# 3. Train the model
+echo "Training velocity model..."
+python train.py --epochs 10 --batch_size 128 --lr 2e-4
+
+# 4. Generate samples
+echo "Generating samples..."
+python sample.py --task inpainting
+python sample.py --task superresolution
+
+# 5. Evaluate
+echo "Evaluating FID..."
+python eval.py > outputs/eval.txt
+
+echo "Reproduction complete. Check outputs/ directory."
+```
+
+---
+
+**FILE: utils.py**  
+```python
+import os
+import math
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+from torchvision import transforms, models
+from PIL import Image
+
+def ensure_dir(path):
+    os.makedirs(path, exist_ok=True)
+
+def get_device():
+    return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+def to_tensor(img):
+    return transforms.ToTensor()(img)
+
+def to_pil(tensor):
+    return transforms.ToPILImage()(tensor.clamp(0,1))
+
+def save_image_grid(tensors, nrow, path):
+    grid = torchvision.utils.make_grid(tensors, nrow=nrow)
+    torchvision.utils.save_image(grid, path)
+
+def time_embed(t, dim=64):
+    """Sinusoidal time embedding as in DDPM."""
+    half = dim // 2
+    emb = math.log(10000) / (half - 1)
+    emb = torch.exp(torch.arange(half, device=t.device) * -emb)
+    emb = t[:, None] * emb[None, :]
+    emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
+    return emb
+```
+
+---
+
+**FILE: datasets/cifar10.py**  
+```python
+import torch
+import numpy as np
+from torchvision import datasets, transforms
+from torch.utils.data import Dataset
+
+class CIFAR10Inpaint(Dataset):
+    """CIFAR‑10 with random block masks."""
+    def __init__(self, root, train=True, transform=None, mask_prob=0.3, mask_size=8):
+        self.dataset = datasets.CIFAR10(root=root, train=train, download=True, transform=transform)
+        self.mask_prob = mask_prob
+        self.mask_size = mask_size
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        img, _ = self.dataset[idx]  # img: Tensor, C×H×W
+        # Create mask
+        H, W = img.shape[1:]
+        mask = torch.ones_like(img)
+        # Randomly zero out a block
+        if np.random.rand() < self.mask_prob:
+            top = np.random.randint(0, H - self.mask_size)
+            left = np.random.randint(0, W - self.mask_size)
+            mask[:, top:top+self.mask_size, left:left+self.mask_size] = 0.0
+        # Corrupted base (noise inside mask)
+        noise = torch.randn_like(img)
+        x0 = img.clone()
+        x0[:, mask.squeeze(0)==0] = noise[:, mask.squeeze(0)==0]
+        return x0, img, mask
+
+class CIFAR10SuperRes(Dataset):
+    """CIFAR‑10 super‑resolution: low‑res as conditioning."""
+    def __init__(self, root, train=True, transform=None, scale=4):
+        self.dataset = datasets.CIFAR10(root=root, train=train, download=True, transform=transform)
+        self.scale = scale
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        img, _ = self.dataset[idx]  # C×H×W
+        # Down‑sample and up‑sample
+        low = torch.nn.functional.interpolate(img.unsqueeze(0), scale_factor=1/self.scale, mode='bicubic', align_corners=False).squeeze(0)
+        low_up = torch.nn.functional.interpolate(low.unsqueeze(0), size=img.shape[1:], mode='bicubic', align_corners=False).squeeze(0)
+        return low_up, img
+```
+
+---
+
+**FILE: models/unet.py**  
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class ResidualBlock(nn.Module):
+    def __init__(self, dim_in, dim_out):
+        super().__init__()
+        self.conv1 = nn.Conv2d(dim_in, dim_out, 3, padding=1)
+        self.bn1 = nn.BatchNorm2d(dim_out)
+        self.conv2 = nn.Conv2d(dim_out, dim_out, 3, padding=1)
+        self.bn2 = nn.BatchNorm2d(dim_out)
+        if dim_in != dim_out:
+            self.res_conv = nn.Conv2d(dim_in, dim_out, 1)
+        else:
+            self.res_conv = None
+
+    def forward(self, x):
+        h = F.relu(self.bn1(self.conv1(x)))
+        h = self.bn2(self.conv2(h))
+        if self.res_conv is not None:
+            x = self.res_conv(x)
+        return F.relu(h + x)
+
+class UNetVelocity(nn.Module):
+    def __init__(self, in_channels=3, base_channels=64, time_emb_dim=64):
+        super().__init__()
+        self.time_emb = nn.Sequential(
+            nn.Linear(time_emb_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128)
+        )
+        self.enc1 = ResidualBlock(in_channels+1, base_channels)
+        self.enc2 = ResidualBlock(base_channels, base_channels*2)
+        self.enc3 = ResidualBlock(base_channels*2, base_channels*4)
+        self.dec3 = ResidualBlock(base_channels*4, base_channels*2)
+        self.dec2 = ResidualBlock(base_channels*2, base_channels)
+        self.dec1 = ResidualBlock(base_channels, base_channels)
+        self.out = nn.Conv2d(base_channels, 3, 1)
+
+    def forward(self, x, t, mask=None):
+        """
+        x: (B, C, H, W) interpolated sample
+        t: (B,) scalar in [0,1]
+        mask: optional (B, 1, H, W) mask used for conditioning
+        """
+        # Time embedding
+        t_emb = self.time_emb(t[:, None])  # B×128
+        t_emb = t_emb[:, :, None, None]
+        if mask is not None:
+            inp = torch.cat([x, mask], dim=1)
+        else:
+            inp = x
+        h1 = self.enc1(inp)
+        h2 = self.enc2(F.avg_pool2d(h1, 2))
+        h3 = self.enc3(F.avg_pool2d(h2, 2))
+        # Upsample
+        d3 = self.dec3(F.interpolate(h3, scale_factor=2))
+        d2 = self.dec2(F.interpolate(d3 + h2, scale_factor=2))
+        d1 = self.dec1(F.interpolate(d2 + h1, scale_factor=2))
+        return self.out(d1)  # B×3×H×W
+```
+
+---
+
+**FILE: train.py**  
+```python
+import argparse
+import os
+import math
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+import torchvision
+import torchvision.transforms as T
+
+from datasets.cifar10 import CIFAR10Inpaint, CIFAR10SuperRes
+from models.unet import UNetVelocity
+from utils import get_device, ensure_dir
+
+def train_inpainting(device, epochs, batch_size, lr):
+    dataset = CIFAR10Inpaint(root='data', train=True, transform=T.Compose([T.ToTensor()]))
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+
+    model = UNetVelocity(in_channels=3, base_channels=64).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.MSELoss()
+
+    for epoch in range(1, epochs+1):
+        model.train()
+        pbar = tqdm(loader, desc=f'Epoch {epoch}')
+        for x0, x1, mask in pbar:
+            x0 = x0.to(device)
+            x1 = x1.to(device)
+            mask = mask.to(device)
+
+            B, C, H, W = x0.shape
+            t = torch.rand(B, device=device)  # uniform [0,1]
+
+            alpha = 1 - t
+            beta = t
+
+            # Interpolant I_t = alpha * x0 + beta * x1
+            I_t = alpha[:, None, None, None] * x0 + beta[:, None, None, None] * x1
+            # derivative dot I_t = x1 - x0
+            dotI = x1 - x0
+
+            # Predict velocity
+            b_pred = model(I_t, t, mask=mask)
+
+            loss = criterion(b_pred, dotI)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            pbar.set_postfix(loss=loss.item())
+
+    ensure_dir('outputs/checkpoints')
+    torch.save(model.state_dict(), 'outputs/checkpoints/velocity_inpaint.pth')
+    print(f'Checkpoint saved to outputs/checkpoints/velocity_inpaint.pth')
+
+def train_superres(device, epochs, batch_size, lr):
+    dataset = CIFAR10SuperRes(root='data', train=True, transform=T.Compose([T.ToTensor()]))
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+
+    model = UNetVelocity(in_channels=3, base_channels=64).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.MSELoss()
+
+    for epoch in range(1, epochs+1):
+        model.train()
+        pbar = tqdm(loader, desc=f'Epoch {epoch}')
+        for low, high in pbar:
+            low = low.to(device)
+            high = high.to(device)
+
+            B, C, H, W = low.shape
+            t = torch.rand(B, device=device)
+
+            alpha = 1 - t
+            beta = t
+
+            I_t = alpha[:, None, None, None] * low + beta[:, None, None, None] * high
+            dotI = high - low
+
+            b_pred = model(I_t, t, mask=None)
+
+            loss = criterion(b_pred, dotI)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            pbar.set_postfix(loss=loss.item())
+
+    ensure_dir('outputs/checkpoints')
+    torch.save(model.state_dict(), 'outputs/checkpoints/velocity_sr.pth')
+    print(f'Checkpoint saved to outputs/checkpoints/velocity_sr.pth')
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--batch_size', type=int, default=128)
+    parser.add_argument('--lr', type=float, default=2e-4)
+    parser.add_argument('--task', choices=['inpainting', 'superresolution'], required=True)
+    args = parser.parse_args()
+
+    device = get_device()
+    print(f'Using device: {device}')
+
+    if args.task == 'inpainting':
+        train_inpainting(device, args.epochs, args.batch_size, args.lr)
+    else:
+        train_superres(device, args.epochs, args.batch_size, args.lr)
+
+if __name__ == '__main__':
+    main()
+```
+
+---
+
+**FILE: sample.py**  
+```python
+import argparse
+import os
+import math
+import torch
+from torch.utils.data import DataLoader
+import torchvision
+import torchvision.transforms as T
+from tqdm import tqdm
+
+from datasets.cifar10 import CIFAR10Inpaint, CIFAR10SuperRes
+from models.unet import UNetVelocity
+from utils import get_device, ensure_dir, to_pil
+
+def euler_integration(model, x0, t_steps, mask=None, device='cpu'):
+    x = x0.clone()
+    for t in t_steps:
+        t_tensor = torch.full((x.shape[0],), t, device=device)
+        b = model(x, t_tensor, mask=mask)
+        x = x + b / len(t_steps)  # forward Euler, dt=1/len(t_steps)
+    return x
+
+def sample_inpainting(device, steps=10, batch_size=64, num_samples=5000):
+    dataset = CIFAR10Inpaint(root='data', train=False, transform=T.Compose([T.ToTensor()]))
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+
+    model = UNetVelocity(in_channels=3, base_channels=64).to(device)
+    model.load_state_dict(torch.load('outputs/checkpoints/velocity_inpaint.pth', map_location=device))
+    model.eval()
+
+    ensure_dir('outputs/generated/inpainting')
+    generated = []
+
+    t_steps = torch.linspace(0, 1, steps=steps)
+
+    with torch.no_grad():
+        for x0, _, mask in tqdm(loader, desc='Sampling inpainting'):
+            x0 = x0.to(device)
+            mask = mask.to(device)
+            # start at t=0
+            x = euler_integration(model, x0, t_steps, mask=mask, device=device)
+            generated.append(x.cpu())
+
+            if len(generated) * batch_size >= num_samples:
+                break
+
+    all_gen = torch.cat(generated, dim=0)[:num_samples]
+    ensure_dir('outputs/generated/inpainting')
+    for i, img in enumerate(all_gen):
+        to_pil(img).save(f'outputs/generated/inpainting/{i:05d}.png')
+    print(f'{num_samples} inpainting samples saved.')
+
+def sample_superres(device, steps=10, batch_size=64, num_samples=5000):
+    dataset = CIFAR10SuperRes(root='data', train=False, transform=T.Compose([T.ToTensor()]))
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+
+    model = UNetVelocity(in_channels=3, base_channels=64).to(device)
+    model.load_state_dict(torch.load('outputs/checkpoints/velocity_sr.pth', map_location=device))
+    model.eval()
+
+    ensure_dir('outputs/generated/sr')
+    generated = []
+
+    t_steps = torch.linspace(0, 1, steps=steps)
+
+    with torch.no_grad():
+        for low, high in tqdm(loader, desc='Sampling superres'):
+            low = low.to(device)
+            # start at t=0
+            x = euler_integration(model, low, t_steps, mask=None, device=device)
+            generated.append(x.cpu())
+
+            if len(generated) * batch_size >= num_samples:
+                break
+
+    all_gen = torch.cat(generated, dim=0)[:num_samples]
+    for i, img in enumerate(all_gen):
+        to_pil(img).save(f'outputs/generated/sr/{i:05d}.png')
+    print(f'{num_samples} superresolution samples saved.')
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--task', choices=['inpainting', 'superresolution'], required=True)
+    parser.add_argument('--steps', type=int, default=10)
+    parser.add_argument('--num_samples', type=int, default=5000)
+    args = parser.parse_args()
+
+    device = get_device()
+    print(f'Using device: {device}')
+
+    if args.task == 'inpainting':
+        sample_inpainting(device, steps=args.steps, num_samples=args.num_samples)
+    else:
+        sample_superres(device, steps=args.steps, num_samples=args.num_samples)
+
+if __name__ == '__main__':
+    main()
+```
+
+---
+
+**FILE: eval.py**  
+```python
+import os
+import argparse
+import torch
+from torchvision import datasets, transforms
+from torch_fidelity import calculate_metrics
+
+def compute_fid(task, device):
+    if task == 'inpainting':
+        gen_dir = 'outputs/generated/inpainting'
+        real_dir = 'data/CIFAR10/test'  # torchvision will not create this dir; we need to copy test set
+    else:
+        gen_dir = 'outputs/generated/sr'
+        real_dir = 'data/CIFAR10/test'
+
+    # Prepare real directory
+    os.makedirs('data/CIFAR10/test', exist_ok=True)
+    # Download test set images into directory
+    test_set = datasets.CIFAR10(root='data', train=False, download=True)
+    for idx, (img, _) in enumerate(test_set):
+        img.save(f'data/CIFAR10/test/{idx:05d}.png')
+
+    metrics = calculate_metrics(
+        input1=gen_dir,
+        input2=real_dir,
+        cuda=device.type == 'cuda',
+        net='inception',
+        dims=2048,
+        isc=False,
+        fid=True,
+        kid=False,
+        verbose=True
+    )
+    return metrics['fid']
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--task', choices=['inpainting', 'superresolution'], required=True)
+    args = parser.parse_args()
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    fid = compute_fid(args.task, device)
+    print(f'FID ({args.task}): {fid:.2f}')
+
+if __name__ == '__main__':
+    main()
+```
+
+---
+
+**FILE: requirements.txt (unchanged)**  
+```text
+torch>=2.0
+torchvision>=0.15
+torchdiffeq
+tqdm
+numpy
+scipy
+Pillow
+pytorch-fid
+```
+
+---

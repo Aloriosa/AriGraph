@@ -1,0 +1,172 @@
+2026-03-14 17:32:36.272391 ======================================================================
+2026-03-14 17:32:36.272504 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 17:32:36.272549 ======================================================================
+2026-03-14 17:32:36.272585 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/bam/paper.md
+2026-03-14 17:32:36.272618 Log path: paper2code_react5_Gpt-oss-20b_trial3/bam
+2026-03-14 17:32:36.272651 Model: Openai/Gpt-oss-20b
+2026-03-14 17:32:36.272681 Max iterations: 5
+2026-03-14 17:32:36.272725 Run reproduce.sh: False
+2026-03-14 17:32:36.272759 Run LLM paper check: True
+2026-03-14 17:32:36.272789 
+2026-03-14 17:32:36.272818 Loading paper...
+2026-03-14 17:32:36.273660 Paper length: 152347 chars (using 152347 for prompt)
+2026-03-14 17:32:36.273717 
+2026-03-14 17:32:36.292695 --- Iteration 0: Initial generation ---
+2026-03-14 17:33:13.450085   Created: generated_reproduction.sh
+2026-03-14 17:33:13.450172 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial3/bam/submission (1 files)
+2026-03-14 17:33:13.450212 
+2026-03-14 17:33:13.450266 --- Iteration 1: Observe & Refine ---
+2026-03-14 17:33:15.115491 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core BaM algorithm implementation (no code for batch & match steps)  
+MISSING: Hyperparameters (batch size, regularization, learning rate, etc.)  
+MISSING: Data setup (datasets, preprocessing, train/test splits)  
+MISSING: Evaluation metrics and baseline comparisons  
+MISSING: Experimental protocol (number of iterations, convergence criteria, checkpoints)  
+MISSING: Hardware/compute specifications (GPU usage, runtime)  
+MISSING: Full pipeline to reproduce paper results (main.py content, result logging)  
+
+ALL_OK: Reproduction appears incomplete.
+2026-03-14 17:33:15.115685 
+2026-03-14 17:33:15.116038 Generating refined code...
+2026-03-14 17:34:38.313681   Updated: generated_reproduction.sh
+2026-03-14 17:34:38.313785 
+2026-03-14 17:34:38.313827 --- Iteration 2: Observe & Refine ---
+2026-03-14 17:34:41.887221 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core BaM algorithm implementation (no code for the batch‑and‑match steps, proximal updates, or score‑based divergence)  
+MISSING: Key hyperparameters (batch size, regularization strength, learning‑rate schedule, number of iterations) – not specified anywhere in the script or visible code  
+MISSING: Data setup (datasets used, preprocessing, train/validation splits, random seeds) – no reference to any data loading or preprocessing steps  
+MISSING: Evaluation protocol (metrics such as KL, score‑based divergence, convergence plots, comparison to ELBO‑based BBVI or GSM‑VI) – no evaluation code or baseline comparisons shown  
+MISSING: Experimental details (hardware requirements, number of epochs, checkpointing, logging of results) – not present in the script or any accompanying files  
+MISSING: Full reproducibility script (the `reproduce.sh` only installs dependencies and calls `main.py`; the contents of `main.py` are not provided, so the pipeline cannot be verified)  
+
+**ALL_OK**: No. The reproduction is incomplete; the essential components from the paper are not present in the provided code.
+2026-03-14 17:34:41.887359 
+2026-03-14 17:34:41.887491 Generating refined code...
+2026-03-14 17:35:37.008409   Updated: generated_reproduction.py
+2026-03-14 17:35:37.008510 
+2026-03-14 17:35:37.008550 --- Iteration 3: Observe & Refine ---
+2026-03-14 17:35:55.558372 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**
+
+- Implementation of the *score‑based divergence* objective and its Monte‑Carlo estimator.  
+- The *match* step that uses both the target score and the variational score (the paper’s update matches the two).  
+- The closed‑form proximal update for Gaussian variational families as derived in the paper (the code uses a custom matrix equation that is not proven to be equivalent).  
+- Affine‑invariance handling and the covariance‑weighted norm used in the divergence.  
+- The GSM‑VI baseline that the paper compares against.  
+- Experiments on the real hierarchical and deep‑generative models described in the paper.  
+- The correct JAX sampling routine (`jax.random.multivariate_normal` does not exist in standard JAX; a proper re‑parameterisation should be used).  
+- The shell script calls `python3 main.py` but the source file is named `generated_reproduction.py`.  
+
+**INCORRECT**
+
+- The `baM_step` update does not match the paper’s proximal update equations; the use of `lambda_reg` in `U` and `V` is not justified by the paper.  
+- Mixing NumPy and JAX arrays without explicit conversion can lead to type/shape mismatches and inefficiencies.  
+
+**PARTIAL**
+
+- The script implements a BaM‑style loop and records KL divergences, but it does not report the score‑based divergence that is the paper’s primary metric.  
+- The ADVI baseline is included, but the GSM‑VI baseline is omitted.  
+- The code uses a synthetic Gaussian target, which is only one of the toy experiments in the paper; the full suite of experiments is missing.  
+
+**Conclusion**
+
+The reproduction code does **not** fully implement the core algorithm, hyper‑parameters, evaluation metrics, or experimental protocol described in the paper. Significant corrections and additions are required.
+2026-03-14 17:35:55.558604 
+2026-03-14 17:35:55.558797 Generating refined code...
+2026-03-14 17:37:14.849981   Updated: README.md
+2026-03-14 17:37:14.850107   Updated: reproduce.sh
+2026-03-14 17:37:14.850185   Updated: main.py
+2026-03-14 17:37:14.850250   Updated: .gitignore
+2026-03-14 17:37:14.850319 
+2026-03-14 17:37:14.850353 --- Iteration 4: Observe & Refine ---
+2026-03-14 17:37:44.939450 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Full reproducibility script – the provided `reproduce.sh` is empty (`#!/usr/bin/env b`) and does not invoke the main experiment or install dependencies.  
+MISSING: Experiments on non‑Gaussian target distributions (hierarchical or deep generative models) that are described in the paper.  
+MISSING: Explicit evaluation of the score‑based divergence during BaM iterations (the paper reports this metric).  
+
+INCORRECT:  
+- **Score‑based divergence calculation** – in `main.py` the code computes  
+  ```python
+  grad_q = -diff @ inv_cov_bam.T
+  v = grad_q - s
+  score_div = jnp.mean(jnp.sum(v @ cov_bam * v, axis=1))
+  ```  
+  `grad_q` has shape `(B,D)` while `s` has shape `(D,B)`, so the subtraction is mismatched and the divergence is computed incorrectly.  
+- **`_gaussian_score` implementation** – returns `inv_cov @ (mean - x).T`, which yields shape `(D,B)`. In `baM_step` the code then transposes this again (`g = _gaussian_score(...).T`), producing a `(B,D)` array and subsequently uses `jnp.mean(g, axis=1)` where it should use `axis=0`.  
+- **`baM_step` matrix statistics** – `C` and `Gamma` are computed correctly, but the subsequent use of `bar_g` and `bar_z` in the update equations uses the wrong axes due to the shape bug above.  
+- **GSM implementation** – the loop over `B` samples updates `mu` and `cov` incorrectly (accumulators `mu_acc` and `cov_acc` are not used consistently, and `mu_new`/`cov_new` are discarded). The algorithm does not follow the update rules described in the paper.  
+- **ADVI baseline** – the ELBO is computed with an unnormalized log‑density but the log‑determinant of `L` is added incorrectly (missing the `-0.5 * logdet(L^T L)` term).  
+- **`_gaussian_logpdf`** – returns an unnormalized log‑density; while this is acceptable for the score‑based divergence, the ELBO baseline expects a normalized log‑density, so the ELBO values are biased.  
+
+PARTIAL:  
+- **BaM algorithm** – the closed‑form proximal update is implemented, but due to the shape bugs in the score computation the algorithm does not converge to the correct target mean/covariance.  
+- **GSM baseline** – the code attempts to implement the algorithm from Modi et al. (2023) but the update equations are incomplete and not vectorised, leading to incorrect results.  
+- **Evaluation metrics** – KL forward/reverse are computed correctly, but the score‑based divergence is not evaluated properly.  
+- **Hardware/parallelism** – the code uses JAX but does not explicitly set device placement or batch‑size scaling for GPU; the reproducibility script does not specify hardware.  
+
+**Recommendation:**  
+1. Fix the shape handling in `_gaussian_score`, `baM_step`, and the score‑divergence calculation.  
+2. Re‑implement the GSM update equations following the paper’s algorithm and vectorise them.  
+3. Correct the ADVI ELBO computation to use the proper log‑determinant term.  
+4. Add a complete `reproduce.sh` that installs dependencies, runs `main.py` with the same defaults as the paper, and outputs the CSV.  
+5. Extend the experiments to include at least one non‑Gaussian target (e.g., a hierarchical Bayesian model) to match the paper’s evaluation.  
+
+ALL_OK: Reproduction appears complete.
+2026-03-14 17:37:44.939635 
+2026-03-14 17:37:44.939775 Generating refined code...
+2026-03-14 17:39:32.975607   Updated: generated_reproduction.txt
+2026-03-14 17:39:32.975707 
+2026-03-14 17:39:32.975748 --- Iteration 5: Observe & Refine ---
+2026-03-14 17:39:52.900929 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Experiments on non‑Gaussian targets (hierarchical / deep generative models) as described in the paper.  
+- Logging of the evidence lower bound (ELBO) – the paper reports ELBO alongside KL and score‑based divergence.  
+- Full implementation of the GSM baseline (Modi et al., 2023) – the `gsm_step` function is incomplete and will crash.  
+- A complete `main.py` script – the provided file is truncated and will not run.  
+- Explicit hyper‑parameter values from the paper (e.g., λ, batch size, number of iterations) are not documented or matched.  
+
+**INCORRECT**  
+- `gsm_step` calls `jnp.sqrtm`, which does not exist in JAX; this will raise an error.  
+- ADVI’s ELBO computation is wrong: `logq` is computed as the mean of the log‑density instead of the log‑density itself.  
+- The score‑based divergence evaluation in BaM uses a custom formula that may not match the paper’s definition exactly (the weighting by `cov` and the use of `v @ cov * v` is not verified).  
+
+**PARTIAL**  
+- The BaM algorithm is implemented, but the closed‑form update and the use of λ are not fully verified against the paper’s equations.  
+- The GSM baseline is partially implemented; the core update logic is present but the matrix square‑root and other details are missing.  
+- The ADVI baseline is partially implemented; it uses a simple Adam optimizer but the reparameterisation and ELBO calculation are not fully correct.  
+- The reproducibility script (`generated_reproduction.sh`) installs dependencies and calls `main.py`, but because `main.py` is incomplete the script will fail.  
+
+**OK**  
+- Basic structure of BaM (batch + match) is present.  
+- Gaussian target generation and evaluation of KL divergences are implemented.  
+- JAX is used for GPU/CPU compatibility.  
+
+**Conclusion**  
+The current repository does **not** fully reproduce the paper’s experiments. Several key components are missing or incorrect, and the main script is incomplete. The code needs substantial fixes before it can be considered a faithful reproduction.
+2026-03-14 17:39:52.901114 
+2026-03-14 17:39:52.901302 Generating refined code...
+2026-03-14 17:41:51.527268   Updated: main.py
+2026-03-14 17:41:51.527374   Updated: reproduce.sh
+2026-03-14 17:41:51.527439   Updated: README.md
+2026-03-14 17:41:51.527478 
+2026-03-14 17:41:51.527511 ======================================================================
+2026-03-14 17:41:51.527544 REACT BASELINE COMPLETE
+2026-03-14 17:41:51.527575 ======================================================================
+2026-03-14 17:41:51.527606 Total iterations: 6
+2026-03-14 17:41:51.527651 API tokens: 50487 completion, 345177 prompt
+2026-03-14 17:41:51.527690 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial3/bam/generated_code_response.txt

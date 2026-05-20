@@ -1,0 +1,233 @@
+"""
+Neural network definitions for the minimal CompoNet implementation.
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# ---------- Discrete policy module (used for Atari) ----------
+class PolicyModule(nn.Module):
+    """
+    Single self‑composing policy module for discrete actions.
+    """
+    def __init__(self, state_dim: int, action_dim: int, hidden_dim: int = 64):
+        super().__init__()
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.hidden_dim = hidden_dim
+
+        # Output attention head (query from state, keys/values from prev outputs)
+        self.out_q = nn.Linear(state_dim, hidden_dim)
+        self.out_k = nn.Linear(action_dim, hidden_dim)
+        self.out_v = nn.Linear(action_dim, action_dim)
+
+        # Input attention head
+        self.in_q = nn.Linear(state_dim, hidden_dim)
+        self.in_k = nn.Linear(action_dim, hidden_dim)
+        self.in_v = nn.Linear(action_dim, action_dim)
+
+        # Internal policy (MLP)
+        self.internal = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, action_dim)
+        )
+
+    def forward(self, state: torch.Tensor,
+                prev_outputs: torch.Tensor | None = None):
+        """
+        Parameters
+        ----------
+        state : torch.Tensor of shape (B, state_dim)
+        prev_outputs : torch.Tensor of shape (B, n_prev, action_dim)
+                       or None if no previous modules.
+
+        Returns
+        -------
+        logits : torch.Tensor of shape (B, action_dim)
+        """
+        B = state.shape[0]
+        if prev_outputs is None or prev_outputs.shape[1] == 0:
+            out_att = torch.zeros(B, self.action_dim, device=state.device)
+            in_att = torch.zeros(B, self.action_dim, device=state.device)
+        else:
+            # Output attention
+            q = self.out_q(state)                      # (B, H)
+            k = self.out_k(prev_outputs)               # (B, n_prev, H)
+            att = torch.softmax(
+                torch.matmul(q.unsqueeze(1), k.transpose(1, 2)) /
+                (k.shape[-1] ** 0.5), dim=-1)          # (B, 1, n_prev)
+            v = self.out_v(prev_outputs)               # (B, n_prev, A)
+            out_att = torch.sum(att * v, dim=2)        # (B, A)
+
+            # Input attention
+            q_in = self.in_q(state)
+            k_in = self.in_k(prev_outputs)
+            att_in = torch.softmax(
+                torch.matmul(q_in.unsqueeze(1), k_in.transpose(1, 2)) /
+                (k_in.shape[-1] ** 0.5), dim=-1)
+            v_in = self.in_v(prev_outputs)
+            in_att = torch.sum(att_in * v_in, dim=2)
+
+        internal = self.internal(state)                # (B, A)
+        return out_att + in_att + internal
+
+
+class CompoNet(nn.Module):
+    """
+    Growable stack of PolicyModule objects for discrete actions.
+    """
+    def __init__(self, state_dim: int, action_dim: int, hidden_dim: int = 64):
+        super().__init__()
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.hidden_dim = hidden_dim
+        self.modules = nn.ModuleList()
+
+    def add_module(self):
+        """Instantiate a new trainable module and append it to the stack."""
+        m = PolicyModule(self.state_dim, self.action_dim, self.hidden_dim)
+        self.modules.append(m)
+
+    def freeze_all_except_last(self):
+        """
+        Freeze all modules except the most recent one.
+        """
+        if len(self.modules) <= 1:
+            return
+        for m in self.modules[:-1]:
+            for param in m.parameters():
+                param.requires_grad = False
+
+    def forward(self, state: torch.Tensor):
+        """
+        Forward pass through the entire stack.
+
+        Returns
+        -------
+        final_logits : torch.Tensor of shape (B, action_dim)
+        """
+        prev_outputs = []
+        for mod in self.modules:
+            stack = torch.stack(prev_outputs, dim=1) if prev_outputs else None
+            out = mod(state, stack)
+            prev_outputs.append(out)
+        return prev_outputs[-1]  # last module's output
+
+
+# ---------- Continuous policy module (used for Pendulum) ----------
+class ContinuousPolicyModule(nn.Module):
+    """
+    Single self‑composing policy module for continuous actions.
+    The module outputs (mean, log_std) for the Gaussian policy.
+    """
+    def __init__(self, state_dim: int, action_dim: int, hidden_dim: int = 64):
+        super().__init__()
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.hidden_dim = hidden_dim
+
+        # Output attention head
+        self.out_q = nn.Linear(state_dim, hidden_dim)
+        self.out_k = nn.Linear(action_dim, hidden_dim)
+        self.out_v = nn.Linear(action_dim, action_dim)   # mean contribution
+
+        # Input attention head
+        self.in_q = nn.Linear(state_dim, hidden_dim)
+        self.in_k = nn.Linear(action_dim, hidden_dim)
+        self.in_v = nn.Linear(action_dim, action_dim)   # mean contribution
+
+        # Internal policy (MLP) that outputs both mean and log_std
+        self.internal = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 2 * action_dim)  # first half: mean, second: log_std
+        )
+
+    def forward(self, state: torch.Tensor,
+                prev_outputs: torch.Tensor | None = None):
+        """
+        Parameters
+        ----------
+        state : torch.Tensor of shape (B, state_dim)
+        prev_outputs : torch.Tensor of shape (B, n_prev, action_dim)
+                       or None if no previous modules.
+
+        Returns
+        -------
+        mean : torch.Tensor of shape (B, action_dim)
+        log_std : torch.Tensor of shape (B, action_dim)
+        """
+        B = state.shape[0]
+        if prev_outputs is None or prev_outputs.shape[1] == 0:
+            out_att = torch.zeros(B, self.action_dim, device=state.device)
+            in_att = torch.zeros(B, self.action_dim, device=state.device)
+            log_std_att = torch.zeros(B, self.action_dim, device=state.device)
+        else:
+            # Output attention
+            q = self.out_q(state)                      # (B, H)
+            k = self.out_k(prev_outputs)               # (B, n_prev, H)
+            att = torch.softmax(
+                torch.matmul(q.unsqueeze(1), k.transpose(1, 2)) /
+                (k.shape[-1] ** 0.5), dim=-1)          # (B, 1, n_prev)
+            v = self.out_v(prev_outputs)               # (B, n_prev, A)
+            out_att = torch.sum(att * v, dim=2)        # (B, A)
+
+            # Input attention
+            q_in = self.in_q(state)
+            k_in = self.in_k(prev_outputs)
+            att_in = torch.softmax(
+                torch.matmul(q_in.unsqueeze(1), k_in.transpose(1, 2)) /
+                (k_in.shape[-1] ** 0.5), dim=-1)
+            v_in = self.in_v(prev_outputs)
+            in_att = torch.sum(att_in * v_in, dim=2)
+
+        # Internal policy outputs mean and log_std
+        internal_out = self.internal(state)            # (B, 2A)
+        mean_internal = internal_out[:, :self.action_dim]
+        log_std_internal = internal_out[:, self.action_dim:]
+
+        mean = out_att + in_att + mean_internal
+        log_std = log_std_internal  # we keep log_std as learned; no attention on it
+
+        return mean, log_std
+
+
+class ContinuousCompoNet(nn.Module):
+    """
+    Growable stack of ContinuousPolicyModule objects.
+    """
+    def __init__(self, state_dim: int, action_dim: int, hidden_dim: int = 64):
+        super().__init__()
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.hidden_dim = hidden_dim
+        self.modules = nn.ModuleList()
+
+    def add_module(self):
+        m = ContinuousPolicyModule(self.state_dim, self.action_dim, self.hidden_dim)
+        self.modules.append(m)
+
+    def freeze_all_except_last(self):
+        if len(self.modules) <= 1:
+            return
+        for m in self.modules[:-1]:
+            for param in m.parameters():
+                param.requires_grad = False
+
+    def forward(self, state: torch.Tensor):
+        """
+        Forward pass through the entire stack.
+
+        Returns
+        -------
+        mean : torch.Tensor of shape (B, action_dim)
+        log_std : torch.Tensor of shape (B, action_dim)
+        """
+        prev_means = []
+        for mod in self.modules:
+            stack = torch.stack(prev_means, dim=1) if prev_means else None
+            mean, log_std = mod(state, stack)
+            prev_means.append(mean)
+        return prev_means[-1], log_std  # last module's output

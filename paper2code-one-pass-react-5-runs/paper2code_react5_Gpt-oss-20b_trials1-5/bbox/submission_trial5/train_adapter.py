@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+# -------------------------------------------------------------
+# Simplified BBox‑Adapter training and evaluation
+# -------------------------------------------------------------
+import argparse
+import json
+import os
+import random
+import sys
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from datasets import load_metric
+from tqdm import tqdm
+from transformers import (AutoModel, AutoTokenizer,
+                          GPT2LMHeadModel, GPT2Tokenizer)
+
+# -------------------------------------------------------------
+# Utility functions
+# -------------------------------------------------------------
+def set_seed(seed: int = 42):
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+def load_jsonl(file_path):
+    data = []
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line in f:
+            data.append(json.loads(line.strip()))
+    return data
+
+def embed_text(text, tokenizer, model, device):
+    """
+    Returns the CLS token embedding for a single string.
+    """
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=128)
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    with torch.no_grad():
+        outputs = model(**inputs)
+        # CLS token is the first token
+        embedding = outputs.last_hidden_state[:, 0, :]  # (1, dim)
+    return embedding  # (1, dim)
+
+def generate_candidates(
+    question,
+    tokenizer,
+    model,
+    num_candidates=5,
+    device="cpu",
+    max_length=50,
+    temperature=1.0,
+):
+    """
+    Generate `num_candidates` continuations for a given question using GPT‑2.
+    """
+    inputs = tokenizer(question, return_tensors="pt")
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    generated = model.generate(
+        **inputs,
+        max_new_tokens=max_length,
+        do_sample=True,
+        top_k=50,
+        top_p=0.95,
+        temperature=temperature,
+        num_return_sequences=num_candidates,
+        pad_token_id=tokenizer.eos_token_id,
+    )
+    candidates = []
+    for g in generated:
+        text = tokenizer.decode(g, skip_special_tokens=True)
+        # Remove the prompt part
+        if text.lower().startswith(question.lower()):
+            text = text[len(question) :]
+        text = text.strip()
+        if text == "":
+            text = " "
+        candidates.append(text)
+    return candidates
+
+# -------------------------------------------------------------
+# Adapter model
+# -------------------------------------------------------------
+class Adapter(nn.Module):
+    def __init__(self, hidden_dim: int = 768):
+        super().__init__()
+        self.linear = nn.Linear(hidden_dim, 1, bias=False)
+
+    def forward(self, embeddings: torch.Tensor):
+        """
+        embeddings: (batch, hidden_dim)
+        returns scores: (batch,)
+        """
+        return self.linear(embeddings).squeeze(-1)  # (batch,)
+
+# -------------------------------------------------------------
+# Main training function
+# -------------------------------------------------------------
+def main(args):
+    set_seed(42)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Load datasets
+    train_data = load_jsonl(args.train_file)
+    test_data = load_jsonl(args.test_file)
+
+    # Load black‑box LLM (GPT‑2) for generation
+    gpt_tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+    gpt_tokenizer.pad_token = gpt_tokenizer.eos_token
+    gpt_model = GPT2LMHeadModel.from_pretrained("gpt2").to(device)
+
+    # Load embedding model (BERT‑base) for the adapter
+    bert_tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+    bert_model = AutoModel.from_pretrained("bert-base-uncased").to(device)
+    bert_model.eval()
+
+    # Initialize adapter
+    adapter = Adapter(hidden_dim=bert_model.config.hidden_size).to(device)
+    optimizer = torch.optim.AdamW(adapter.parameters(), lr=args.lr)
+
+    # Training loop
+    for epoch in range(args.epochs):
+        adapter.train()
+        epoch_loss = 0.0
+        for example in tqdm(train_data, desc=f"Epoch {epoch+1}"):
+            question = example["question"]
+            gold_answer = example["answer"]
+
+            # Generate negative candidates
+            neg_candidates = generate_candidates(
+                question,
+                gpt_tokenizer,
+                gpt_model,
+                num_candidates=args.num_candidates,
+                device=device,
+                max_length=30,
+                temperature=1.0,
+            )
+
+            # Embed all candidates
+            embeddings = []
+            # Positive
+            pos_emb = embed_text(gold_answer, bert_tokenizer, bert_model, device)
+            embeddings.append(pos_emb)
+            # Negatives
+            for cand in neg_candidates:
+                cand_emb = embed_text(cand, bert_tokenizer, bert_model, device)
+                embeddings.append(cand_emb)
+
+            embeddings = torch.cat(embeddings, dim=0)  # (K+1, dim)
+            scores = adapter(embeddings)  # (K+1,)
+
+            # Ranking‑based NCE loss: cross‑entropy with target 0
+            target = torch.tensor([0], device=device)
+            loss = F.cross_entropy(scores.unsqueeze(0), target)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item()
+        avg_loss = epoch_loss / len(train_data)
+        print(f"Epoch {epoch+1} | Avg Loss: {avg_loss:.4f}")
+
+    # Save adapter
+    os.makedirs(args.output_dir, exist_ok=True)
+    torch.save(adapter.state_dict(), os.path.join(args.output_dir, "model.pt"))
+
+    # Evaluation
+    adapter.eval()
+    correct = 0
+    predictions = []
+    for example in tqdm(test_data, desc="Evaluating"):
+        question = example["question"]
+        gold_answer = example["answer"]
+
+        neg_candidates = generate_candidates(
+            question,
+            gpt_tokenizer,
+            gpt_model,
+            num_candidates=args.num_candidates,
+            device=device,
+            max_length=30,
+            temperature=1.0,
+        )
+
+        # Embed candidates
+        embeddings = []
+        for cand in neg_candidates:
+            cand_emb = embed_text(cand, bert_tokenizer, bert_model, device)
+            embeddings.append(cand_emb)
+        embeddings = torch.cat(embeddings, dim=0)  # (K, dim)
+        scores = adapter(embeddings)  # (K,)
+        best_idx = torch.argmax(scores).item()
+        predicted = neg_candidates[best_idx]
+
+        is_correct = predicted.strip() == gold_answer.strip()
+        correct += int(is_correct)
+        predictions.append(
+            {
+                "question": question,
+                "predicted": predicted,
+                "ground_truth": gold_answer,
+                "correct": int(is_correct),
+            }
+        )
+
+    acc = correct / len(test_data)
+    print(f"\nTest Accuracy: {acc:.4f}")
+
+    # Save results
+    pred_file = os.path.join(args.output_dir, "predictions.csv")
+    with open(pred_file, "w", encoding="utf-8") as f:
+        f.write("question,predicted,ground_truth,correct\n")
+        for row in predictions:
+            f.write(
+                f'{row["question"]},{row["predicted"]},{row["ground_truth"]},{row["correct"]}\n'
+            )
+
+    metrics_file = os.path.join(args.output_dir, "metrics.json")
+    with open(metrics_file, "w", encoding="utf-8") as f:
+        json.dump({"accuracy": acc}, f, indent=2)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Simplified BBox‑Adapter training")
+    parser.add_argument("--train_file", type=str, required=True)
+    parser.add_argument("--test_file", type=str, required=True)
+    parser.add_argument("--output_dir", type=str, default="outputs")
+    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--num_candidates", type=int, default=5)
+    args = parser.parse_args()
+    main(args)

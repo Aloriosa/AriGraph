@@ -1,0 +1,705 @@
+**Repository Structure**
+
+```
+/home/submission/
+│
+├── main.py
+├── models.py
+├── pde.py
+├── train.py
+├── utils.py
+├── requirements.txt
+├── reproduce.sh
+└── README.md
+```
+
+---
+
+### FILE: `/home/submission/main.py`
+
+```python
+#!/usr/bin/env python3
+"""
+Entry point for reproducing the experiments in
+“Challenges in Training PINNs: A Loss Landscape Perspective”.
+"""
+
+import os
+import json
+import argparse
+import torch
+import numpy as np
+import pandas as pd
+from pathlib import Path
+
+from models import MLP
+from pde import PDE
+from train import train_and_evaluate
+from utils import set_global_determinism, get_device
+
+# --------------------------------------------------------------------------- #
+# Configuration
+# --------------------------------------------------------------------------- #
+
+CONFIG = {
+    "pde_names": ["convection", "reaction", "wave"],
+    "widths": [50, 100, 200, 400],
+    "total_iters": 41000,
+    "adam_lrs": [1e-5, 1e-4, 1e-3, 1e-2, 1e-1],
+    "lbfgs_lr": 1.0,
+    "lbfgs_history_size": 100,
+    "adam_plus_lbfgs_switches": [1000, 11000, 31000],
+    "seeds": [0, 1, 2, 3, 4],
+    "residual_points": 10000,
+    "grid_x": 255,
+    "grid_t": 100,
+    "init_points": 257,
+    "boundary_points": 101,
+}
+
+RESULTS_CSV = Path("results.csv")
+RESULTS_DIR = Path("results")
+RESULTS_DIR.mkdir(exist_ok=True, parents=True)
+
+
+# --------------------------------------------------------------------------- #
+# Main routine
+# --------------------------------------------------------------------------- #
+def main() -> None:
+    set_global_determinism()
+    device = get_device()
+    all_results = []
+
+    for pde_name in CONFIG["pde_names"]:
+        pde = PDE(pde_name)
+        for width in CONFIG["widths"]:
+            for seed in CONFIG["seeds"]:
+                torch.manual_seed(seed)
+                np.random.seed(seed)
+
+                # Build dataset
+                data = pde.build_dataset(
+                    residual_pts=CONFIG["residual_points"],
+                    grid_x=CONFIG["grid_x"],
+                    grid_t=CONFIG["grid_t"],
+                    init_pts=CONFIG["init_points"],
+                    boundary_pts=CONFIG["boundary_points"],
+                )
+
+                # Adam
+                for lr in CONFIG["adam_lrs"]:
+                    model = MLP(width, device).to(device)
+                    res = train_and_evaluate(
+                        model,
+                        data,
+                        pde,
+                        optimizer="adam",
+                        lr=lr,
+                        total_iters=CONFIG["total_iters"],
+                        device=device,
+                        seed=seed,
+                        switch_iters=None,
+                    )
+                    all_results.append(res)
+
+                # L-BFGS
+                model = MLP(width, device).to(device)
+                res = train_and_evaluate(
+                    model,
+                    data,
+                    pde,
+                    optimizer="lbfgs",
+                    lr=CONFIG["lbfgs_lr"],
+                    total_iters=CONFIG["total_iters"],
+                    history_size=CONFIG["lbfgs_history_size"],
+                    device=device,
+                    seed=seed,
+                    switch_iters=None,
+                )
+                all_results.append(res)
+
+                # Adam + L-BFGS
+                for switch in CONFIG["adam_plus_lbfgs_switches"]:
+                    model = MLP(width, device).to(device)
+                    res = train_and_evaluate(
+                        model,
+                        data,
+                        pde,
+                        optimizer="adam+lbfgs",
+                        lr=CONFIG["adam_lrs"][2],  # use lr=1e-3 as in the paper
+                        total_iters=CONFIG["total_iters"],
+                        history_size=CONFIG["lbfgs_history_size"],
+                        switch_iters=switch,
+                        device=device,
+                        seed=seed,
+                    )
+                    all_results.append(res)
+
+    # Save results
+    pd.DataFrame(all_results).to_csv(RESULTS_CSV, index=False)
+    print(f"Reproduction finished. Results saved to {RESULTS_CSV}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+### FILE: `/home/submission/models.py`
+
+```python
+#!/usr/bin/env python3
+"""
+Simple 3‑layer MLP with tanh activations.
+"""
+
+import torch
+import torch.nn as nn
+
+
+class MLP(nn.Module):
+    def __init__(self, hidden_width: int, device: torch.device):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(2, hidden_width),
+            nn.Tanh(),
+            nn.Linear(hidden_width, hidden_width),
+            nn.Tanh(),
+            nn.Linear(hidden_width, hidden_width),
+            nn.Tanh(),
+            nn.Linear(hidden_width, 1),
+        )
+        self.to(device)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: shape (..., 2) -> columns are [x, t]
+        """
+        return self.net(x).squeeze(-1)
+```
+
+---
+
+### FILE: `/home/submission/pde.py`
+
+```python
+#!/usr/bin/env python3
+"""
+Definitions of PDEs, boundary/initial operators, exact solutions and
+sampling utilities.
+"""
+
+import torch
+import numpy as np
+from typing import Tuple, Dict, List
+
+
+class PDE:
+    """
+    Wrapper that provides
+        * residual operator 𝒟(u, x, t)
+        * boundary operator ℬ(u, x, t)
+        * initial operator 𝔅₀(u, x, t)
+        * exact solution (for L2RE)
+        * source / coefficient parameters
+    """
+
+    def __init__(self, name: str):
+        self.name = name.lower()
+        if self.name == "convection":
+            self.beta = 40.0
+        elif self.name == "reaction":
+            self.rho = 5.0
+        elif self.name == "wave":
+            self.beta = 5.0
+        else:
+            raise ValueError(f"Unknown PDE {name}")
+
+    # --------------------------------------------------------------------- #
+    # Residual operator 𝒟
+    # --------------------------------------------------------------------- #
+    def residual(
+        self,
+        u: torch.Tensor,
+        x: torch.Tensor,
+        t: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Computes residual values for all points.
+        u: (N,) predictions
+        x, t: (N,) coordinates
+        """
+        # Enable gradient tracking for x and t
+        x = x.clone().requires_grad_(True)
+        t = t.clone().requires_grad_(True)
+
+        # First derivatives
+        u_t = torch.autograd.grad(u, t, grad_outputs=torch.ones_like(u), create_graph=True)[0]
+        u_x = torch.autograd.grad(u, x, grad_outputs=torch.ones_like(u), create_graph=True)[0]
+
+        if self.name == "convection":
+            return u_t + self.beta * u_x
+        elif self.name == "reaction":
+            return u_t - self.rho * u * (1 - u)
+        elif self.name == "wave":
+            # Second derivatives
+            u_tt = torch.autograd.grad(u_t, t, grad_outputs=torch.ones_like(u_t), create_graph=True)[0]
+            u_xx = torch.autograd.grad(u_x, x, grad_outputs=torch.ones_like(u_x), create_graph=True)[0]
+            return u_tt - 4.0 * u_xx
+        else:
+            raise RuntimeError("Unreachable")
+
+    # --------------------------------------------------------------------- #
+    # Boundary operator ℬ
+    # --------------------------------------------------------------------- #
+    def boundary(
+        self,
+        u: torch.Tensor,
+        x: torch.Tensor,
+        t: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Returns residuals at boundary points.
+        For periodic problems: u(0,t)-u(2π,t) or u(0,t)-u(2π,t)
+        For Dirichlet: u(0,t), u(1,t)
+        """
+        if self.name in ["convection", "reaction"]:
+            # periodic boundaries at x=0 and x=2π
+            return u  # will be used with appropriate pairing outside
+        elif self.name == "wave":
+            # Dirichlet zero
+            return u
+        else:
+            raise RuntimeError("Unreachable")
+
+    # --------------------------------------------------------------------- #
+    # Initial condition operator 𝔅₀
+    # --------------------------------------------------------------------- #
+    def initial(
+        self,
+        u: torch.Tensor,
+        x: torch.Tensor,
+        t: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Returns residuals at initial time t=0.
+        """
+        if self.name == "convection":
+            exact = torch.sin(x)
+        elif self.name == "reaction":
+            h = torch.exp(-((x - np.pi) ** 2) / (2 * (np.pi / 4) ** 2))
+            exact = h
+        elif self.name == "wave":
+            exact = torch.sin(np.pi * x) + 0.5 * torch.sin(self.beta * np.pi * x)
+        else:
+            raise RuntimeError("Unreachable")
+        return u - exact
+
+    # --------------------------------------------------------------------- #
+    # Exact solution (for L2RE)
+    # --------------------------------------------------------------------- #
+    def exact_solution(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        if self.name == "convection":
+            return torch.sin(x - self.beta * t)
+        elif self.name == "reaction":
+            h = torch.exp(-((x - np.pi) ** 2) / (2 * (np.pi / 4) ** 2))
+            return h * torch.exp(self.rho * t) / (
+                h * torch.exp(self.rho * t) + 1 - h
+            )
+        elif self.name == "wave":
+            return (
+                torch.sin(np.pi * x) * torch.cos(2 * np.pi * t)
+                + 0.5 * torch.sin(self.beta * np.pi * x) * torch.cos(2 * self.beta * np.pi * t)
+            )
+        else:
+            raise RuntimeError("Unreachable")
+
+    # --------------------------------------------------------------------- #
+    # Data generation utilities
+    # --------------------------------------------------------------------- #
+    def build_dataset(
+        self,
+        residual_pts: int,
+        grid_x: int,
+        grid_t: int,
+        init_pts: int,
+        boundary_pts: int,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Returns a dictionary with tensors:
+            - res_x, res_t: residual point coordinates
+            - init_x, init_t: initial condition points
+            - bnd_x, bnd_t, bnd_type: boundary points
+            - full_x, full_t: grid for evaluation (L2RE)
+        All tensors are on CPU (they will be moved to device in training).
+        """
+        # Residual points: random subset from grid
+        xs = torch.linspace(0, self._x_max(), steps=grid_x)
+        ts = torch.linspace(0, 1.0, steps=grid_t)
+        xv, tv = torch.meshgrid(xs, ts, indexing="ij")
+        grid = torch.stack([xv.reshape(-1), tv.reshape(-1)], dim=1)
+        idx = torch.randperm(grid.shape[0])[:residual_pts]
+        res_x, res_t = grid[idx, 0], grid[idx, 1]
+
+        # Initial condition points (t=0)
+        init_x = torch.linspace(0, self._x_max(), steps=init_pts)
+        init_t = torch.zeros_like(init_x)
+
+        # Boundary points
+        if self.name in ["convection", "reaction"]:
+            # Periodic boundaries at x=0 and x=2π
+            bnd_x_left = torch.zeros(boundary_pts)
+            bnd_t_left = torch.linspace(0, 1.0, steps=boundary_pts)
+            bnd_x_right = self._x_max() * torch.ones(boundary_pts)
+            bnd_t_right = bnd_t_left.clone()
+            bnd_x = torch.cat([bnd_x_left, bnd_x_right])
+            bnd_t = torch.cat([bnd_t_left, bnd_t_right])
+            # tag: 0 for left, 1 for right (used in loss)
+            bnd_type = torch.cat([torch.zeros(boundary_pts, dtype=torch.int64),
+                                  torch.ones(boundary_pts, dtype=torch.int64)])
+        elif self.name == "wave":
+            # Dirichlet zero at x=0 and x=1
+            bnd_x_left = torch.zeros(boundary_pts)
+            bnd_t_left = torch.linspace(0, 1.0, steps=boundary_pts)
+            bnd_x_right = torch.ones(boundary_pts)
+            bnd_t_right = bnd_t_left.clone()
+            bnd_x = torch.cat([bnd_x_left, bnd_x_right])
+            bnd_t = torch.cat([bnd_t_left, bnd_t_right])
+            bnd_type = torch.cat([torch.zeros(boundary_pts, dtype=torch.int64),
+                                  torch.ones(boundary_pts, dtype=torch.int64)])
+        else:
+            raise RuntimeError("Unreachable")
+
+        # Full grid for evaluation
+        full_x = torch.linspace(0, self._x_max(), steps=grid_x)
+        full_t = torch.linspace(0, 1.0, steps=grid_t)
+        full_xv, full_tv = torch.meshgrid(full_x, full_t, indexing="ij")
+        full_x_flat = full_xv.reshape(-1)
+        full_t_flat = full_tv.reshape(-1)
+
+        return {
+            "res_x": res_x,
+            "res_t": res_t,
+            "init_x": init_x,
+            "init_t": init_t,
+            "bnd_x": bnd_x,
+            "bnd_t": bnd_t,
+            "bnd_type": bnd_type,
+            "full_x": full_x_flat,
+            "full_t": full_t_flat,
+        }
+
+    def _x_max(self) -> float:
+        if self.name in ["convection", "reaction"]:
+            return 2 * np.pi
+        elif self.name == "wave":
+            return 1.0
+        else:
+            raise RuntimeError("Unreachable")
+```
+
+---
+
+### FILE: `/home/submission/train.py`
+
+```python
+#!/usr/bin/env python3
+"""
+Training loop and evaluation logic.
+"""
+
+import torch
+from typing import Dict, Optional
+from models import MLP
+from pde import PDE
+
+
+def train_and_evaluate(
+    model: MLP,
+    data: Dict[str, torch.Tensor],
+    pde: PDE,
+    optimizer: str,
+    lr: float,
+    total_iters: int,
+    history_size: int = 100,
+    switch_iters: Optional[int] = None,
+    device: torch.device = torch.device("cpu"),
+    seed: int = 0,
+) -> Dict:
+    """
+    Trains the model following the specified optimizer pipeline and returns
+    a dictionary with the key metrics:
+        pde, width, seed, optimizer, lr, switch_iters, loss, l2re
+    """
+    # Move data to device
+    for k, v in data.items():
+        data[k] = v.to(device)
+
+    # Optimizer selection
+    if optimizer == "adam":
+        opt = torch.optim.Adam(model.parameters(), lr=lr)
+    elif optimizer == "lbfgs":
+        opt = torch.optim.LBFGS(
+            model.parameters(),
+            lr=lr,
+            history_size=history_size,
+            line_search_fn="strong_wolfe",
+        )
+    elif optimizer == "adam+lbfgs":
+        opt = torch.optim.Adam(model.parameters(), lr=lr)
+    else:
+        raise ValueError(f"Unknown optimizer {optimizer}")
+
+    # Helper closure for LBFGS
+    def closure() -> torch.Tensor:
+        opt.zero_grad()
+        loss = compute_loss(model, data, pde)
+        loss.backward()
+        return loss
+
+    # Training loop
+    for step in range(total_iters):
+        if optimizer == "adam+lbfgs" and switch_iters is not None and step == switch_iters:
+            # Switch to LBFGS
+            opt = torch.optim.LBFGS(
+                model.parameters(),
+                lr=lr,  # lr is ignored by LBFGS but kept for consistency
+                history_size=history_size,
+                line_search_fn="strong_wolfe",
+            )
+            continue  # skip this step to avoid double counting
+
+        if optimizer == "lbfgs" or (optimizer == "adam+lbfgs" and step >= (switch_iters or 0)):
+            # LBFGS step
+            loss = closure()
+            opt.step(closure)
+        else:
+            # Adam step
+            opt.zero_grad()
+            loss = compute_loss(model, data, pde)
+            loss.backward()
+            opt.step()
+
+    # Final loss and L2RE
+    final_loss = compute_loss(model, data, pde).item()
+    l2re = compute_l2re(model, data, pde, device)
+
+    res = {
+        "pde": pde.name,
+        "width": model.net[0].in_features,  # hidden width
+        "seed": seed,
+        "optimizer": optimizer,
+        "lr": lr,
+        "switch_iters": switch_iters,
+        "loss": final_loss,
+        "l2re": l2re,
+    }
+    return res
+
+
+def compute_loss(model: MLP, data: Dict[str, torch.Tensor], pde: PDE) -> torch.Tensor:
+    """
+    Computes the full PINN loss:
+        0.5 * (residual^2) / n_res
+        + 0.5 * (initial^2) / n_init
+        + 0.5 * (boundary^2) / n_bnd
+    """
+    # Residual points
+    in_res = torch.stack([data["res_x"], data["res_t"]], dim=1)
+    u_res = model(in_res)
+    res = pde.residual(u_res, data["res_x"], data["res_t"])
+    loss_res = 0.5 * (res ** 2).sum() / data["res_x"].numel()
+
+    # Initial condition
+    in_init = torch.stack([data["init_x"], data["init_t"]], dim=1)
+    u_init = model(in_init)
+    init_res = pde.initial(u_init, data["init_x"], data["init_t"])
+    loss_init = 0.5 * (init_res ** 2).sum() / data["init_x"].numel()
+
+    # Boundary condition
+    # For periodic boundaries we pair left/right points
+    in_bnd = torch.stack([data["bnd_x"], data["bnd_t"]], dim=1)
+    u_bnd = model(in_bnd)
+    if pde.name in ["convection", "reaction"]:
+        # u(0,t) - u(2π,t)
+        left = u_bnd[data["bnd_type"] == 0]
+        right = u_bnd[data["bnd_type"] == 1]
+        bnd_res = left - right
+        loss_bnd = 0.5 * (bnd_res ** 2).sum() / left.numel()
+    elif pde.name == "wave":
+        # Dirichlet zero
+        bnd_res = u_bnd
+        loss_bnd = 0.5 * (bnd_res ** 2).sum() / data["bnd_x"].numel()
+    else:
+        raise RuntimeError("Unreachable")
+
+    return loss_res + loss_init + loss_bnd
+
+
+def compute_l2re(
+    model: MLP, data: Dict[str, torch.Tensor], pde: PDE, device: torch.device
+) -> float:
+    """
+    Computes L2 relative error on the full evaluation grid.
+    """
+    in_full = torch.stack([data["full_x"], data["full_t"]], dim=1)
+    u_pred = model(in_full)
+    u_true = pde.exact_solution(data["full_x"], data["full_t"])
+    diff = u_pred - u_true
+    l2re = torch.sqrt((diff ** 2).sum() / (u_true ** 2).sum())
+    return l2re.item()
+```
+
+---
+
+### FILE: `/home/submission/utils.py`
+
+```python
+#!/usr/bin/env python3
+"""
+Utility helpers for reproducibility and device handling.
+"""
+
+import torch
+import numpy as np
+
+
+def set_global_determinism(seed: int = 0) -> None:
+    """
+    Sets seeds and deterministic flags for reproducibility.
+    """
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
+
+
+def get_device() -> torch.device:
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+```
+
+---
+
+### FILE: `/home/submission/requirements.txt`
+
+```
+torch==2.0.0
+numpy
+pandas
+```
+
+---
+
+### FILE: `/home/submission/reproduce.sh`
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install dependencies
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# Run the full reproduction script
+python main.py
+```
+
+Make the script executable:
+
+```bash
+chmod +x reproduce.sh
+```
+
+---
+
+### FILE: `/home/submission/README.md`
+
+```markdown
+# Reproduction of “Challenges in Training PINNs: A Loss Landscape Perspective”
+
+This repository contains a lightweight implementation that reproduces the experimental
+results reported in
+
+> **Pratik Rathore, Weimu Lei, Zachary Frangella, Lu Lu, Madeleine Udell**  
+> *Challenges in Training PINNs: A Loss Landscape Perspective*, ICML 2024.
+
+## Highlights
+
+| PDE | Equation | Domain | Exact Solution |
+|-----|----------|--------|----------------|
+| Convection | `u_t + β u_x = 0` | `x ∈ [0, 2π]`, `t ∈ [0, 1]` | `sin(x - β t)` |
+| Reaction | `u_t - ρ u (1-u) = 0` | `x ∈ [0, 2π]`, `t ∈ [0, 1]` | `h(x) e^{ρ t} / (h(x) e^{ρ t} + 1 - h(x))` |
+| Wave | `u_tt - 4 u_xx = 0` | `x ∈ [0, 1]`, `t ∈ [0, 1]` | `sin(π x) cos(2π t) + ½ sin(β π x) cos(2β π t)` |
+
+For each PDE we train a Physics‑Informed Neural Network (PINN) with a 3‑layer
+MLP (tanh activations) of widths **[50, 100, 200, 400]**.
+Training is performed with three optimisation pipelines:
+
+1. **Adam** – first‑order optimiser, learning‑rate grid search  
+   `{1e‑5, 1e‑4, 1e‑3, 1e‑2, 1e‑1}`.
+2. **L‑BFGS** – quasi‑Newton optimiser, `lr=1.0`, history size `100`,
+   strong Wolfe line‑search.
+3. **Adam + L‑BFGS** – Adam for a fixed number of iterations
+   (`1 k`, `11 k`, `31 k`), then L‑BFGS for the remainder.
+
+All experiments use 5 random seeds, 10 000 residual points sampled from a
+`255 × 100` grid, 257 initial points and 101 boundary points per side.
+Total training iterations are **41 000**.
+
+The evaluation metric is the **L2 relative error (L2RE)** on the full
+`255 × 100` interior grid plus all boundary/initial points.
+
+The script `reproduce.sh` installs the required dependencies and runs
+`main.py`, producing `results.csv` containing the final loss and L2RE for
+every configuration.
+
+**Hardware** – a single NVIDIA Titan V GPU (CUDA 11.8) is used in the
+original experiments. The code automatically detects a GPU and falls back
+to CPU otherwise.
+
+---
+
+## How to Run
+
+```bash
+# Make reproducible
+chmod +x reproduce.sh
+./reproduce.sh
+```
+
+After the run finishes, a file `results.csv` will be created in the
+repository root. It contains the following columns:
+
+```
+pde, width, seed, optimizer, lr, switch_iters, loss, l2re
+```
+
+---
+
+## Reproducibility Details
+
+* All random seeds are fixed via `torch.manual_seed` and `numpy.random.seed`.
+* Deterministic CUDA behaviour is enforced (`torch.backends.cudnn.deterministic=True`).
+* The `torch` version used is 2.0.0, matching the paper’s environment.
+
+---
+
+## Notes
+
+* The implementation follows the paper’s methodology closely but
+  focuses on correctness and reproducibility rather than extreme speed.
+* The `LBFGS` optimisation is performed with PyTorch’s built‑in
+  implementation (`torch.optim.LBFGS`) using a strong Wolfe line search.
+* The Adam+L‑BFGS pipeline switches optimisers exactly at the specified
+  iteration counts.
+
+---
+
+## License
+This code is provided for research reproducibility and is released under the MIT license.
+```
+
+---

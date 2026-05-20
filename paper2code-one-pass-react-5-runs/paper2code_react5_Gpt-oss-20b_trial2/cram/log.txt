@@ -1,0 +1,215 @@
+2026-03-14 19:22:38.298265 ======================================================================
+2026-03-14 19:22:38.298437 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 19:22:38.298482 ======================================================================
+2026-03-14 19:22:38.298517 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/cram/paper.md
+2026-03-14 19:22:38.298550 Log path: paper2code_react5_Gpt-oss-20b_trial2/cram
+2026-03-14 19:22:38.298581 Model: Openai/Gpt-oss-20b
+2026-03-14 19:22:38.298612 Max iterations: 5
+2026-03-14 19:22:38.298646 Run reproduce.sh: False
+2026-03-14 19:22:38.298679 Run LLM paper check: True
+2026-03-14 19:22:38.298710 
+2026-03-14 19:22:38.298739 Loading paper...
+2026-03-14 19:22:38.298977 Paper length: 59824 chars (using 59824 for prompt)
+2026-03-14 19:22:38.299018 
+2026-03-14 19:22:38.318522 --- Iteration 0: Initial generation ---
+2026-03-14 19:23:38.950179   Created: generated_reproduction.py
+2026-03-14 19:23:38.950319 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial2/cram/submission (1 files)
+2026-03-14 19:23:38.950395 
+2026-03-14 19:23:38.950449 --- Iteration 1: Observe & Refine ---
+2026-03-14 19:24:28.151505 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Support for multiple trainable `[mem]` vectors (k > 1).  
+- Training only the `[mem]` vectors (the paper freezes the entire LLM except the memory embeddings).  
+- Implementation of the *decoding‑capacity* metric (longest sequence with accuracy > threshold).  
+- Implementation of the *token‑gain* metric (difference in correct tokens with/without `[mem]`).  
+- Baseline cross‑entropy loss of the frozen LLM without `[mem]`.  
+- Theoretical capacity bound calculation \(L \le d_{\text{model}}\times b / \log_2|V|\).  
+- Evaluation on both natural text and random word sequences as described.  
+- A `reproduce.sh` (or equivalent) script that runs the full pipeline and reproduces the paper’s results.  
+- Checkpoint saving/loading for the optimized `[mem]` vectors.  
+
+**INCORRECT**  
+- Freezing all parameters *except* the embedding layer and `lm_head`. The paper freezes the entire model and only optimizes the `[mem]` vectors.  
+- Training the `lm_head` (final linear layer) – this is not part of the per‑sample optimization in the paper.  
+- Using a single special token `[MEM]` as the memory representation; the paper uses trainable vectors of dimension `d_model`.  
+
+**PARTIAL**  
+- Per‑sample optimization loop: implemented but only for a single text file.  
+- Teacher‑forcing training: implemented.  
+- Cross‑entropy loss: implemented.  
+- Token‑level accuracy calculation: implemented.  
+- Generation loop: implemented (argmax decoding, no sampling).  
+
+**OK**  
+- Per‑sample optimization framework.  
+- Teacher‑forcing loss computation.  
+- Token‑level accuracy metric.  
+- Generation from the learned memory token.  
+
+**Conclusion**  
+The code implements a very simplified version of the paper’s method but misses key components (multiple memory vectors, correct freezing, metrics, theoretical analysis, and full evaluation pipeline). It is not sufficient to reproduce the results reported in the paper.
+2026-03-14 19:24:28.151709 
+2026-03-14 19:24:28.151845 Generating refined code...
+2026-03-14 19:25:17.592578   Updated: generated_reproduction.py
+2026-03-14 19:25:17.592700 
+2026-03-14 19:25:17.592741 --- Iteration 2: Observe & Refine ---
+2026-03-14 19:25:39.280273 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incorrect / Partial Requirements**
+
+| Category | Requirement | Status | Notes |
+|----------|-------------|--------|-------|
+| **Core Method** | Per‑sample optimization of trainable `[mem]` vectors with a frozen LLM | OK | Code freezes all weights except the embedding rows for the memory tokens and optimizes them. |
+| **Hyperparameters** | Learning rate, max steps, etc. | OK | Values are present but not tied to paper’s exact numbers (paper does not specify). |
+| **Data Setup** | Use of multiple datasets (natural text, random word sequences, etc.) | **MISSING** | Code only accepts a single text file. |
+| **Evaluation – Decoding Capacity** | Compute the longest sequence length `L` for which accuracy > threshold (Eq. 2). | **PARTIAL** | Code only checks if the current accuracy exceeds the threshold; it does not search for the maximal `L`. |
+| **Evaluation – Token Gain** | Difference in correctly predicted tokens with vs. without `[mem]`. | OK | Implemented, though baseline expectation is approximated. |
+| **Evaluation – Information Gain** | Reduction in cross‑entropy loss when using `[mem]`. | **INCORRECT** | `mem_loss` is computed on the generated sequence (teacher‑forcing not used), so the reduction is not accurate. |
+| **Evaluation – Theoretical Bound** | `L ≤ d_model * b / log2|V|` with `b = 16` bits (paper). | **INCORRECT** | Code uses `bit_precision=32`. |
+| **Baseline Cross‑Entropy** | Cross‑entropy of the sequence *without* any conditioning (uncertainty). | **INCORRECT** | Code computes conditional loss (teacher‑forcing) rather than unconditional. |
+| **Baseline / Mem Accuracy** | Accuracy should be measured with teacher‑forcing (i.e., using the true previous token). | **INCORRECT** | Mem accuracy is computed via greedy generation, not teacher‑forcing. |
+| **Multiple Memory Vectors Scaling** | Experiments showing linear scaling of capacity with number of `[mem]` vectors. | **MISSING** | Code only supports a single `num_mem` but does not run scaling experiments. |
+| **Random Word Sequences** | Evaluation on random word sequences to test domain‑independence. | **MISSING** | Not implemented. |
+| **Metrics Decoupling** | Separate metrics that decouple `[mem]` capacity from the model’s inherent prediction ability. | **MISSING** | Not implemented. |
+| **Training Procedure** | Teacher‑forcing with correct target alignment (no BOS added). | **INCORRECT** | Target sequence prepends a BOS token, shifting alignment. |
+| **Reproduce.sh / Full Pipeline** | Script that runs the full pipeline to reproduce paper results. | **MISSING** | No reproducibility script provided. |
+
+**Summary**
+
+The core idea of per‑sample memory vector optimization is present, but several key aspects of the paper’s methodology and evaluation are missing or incorrectly implemented. The main issues are:
+
+1. Incorrect theoretical bound (uses 32‑bit instead of 16‑bit).  
+2. Wrong computation of information gain and mem accuracy (generation vs. teacher‑forcing).  
+3. Incomplete decoding‑capacity metric.  
+4. Missing baseline unconditional cross‑entropy.  
+5. Lack of dataset variety, scaling experiments, and decoupling metrics.  
+6. No reproducibility script.
+
+**Recommendation**
+
+Fix the above issues to achieve a faithful reproduction of the paper’s results.
+2026-03-14 19:25:39.280505 
+2026-03-14 19:25:39.280609 Generating refined code...
+2026-03-14 19:26:40.313476   Updated: compress.py
+2026-03-14 19:26:40.313603   Updated: reproduce.sh
+2026-03-14 19:26:40.313669   Updated: README.md
+2026-03-14 19:26:40.313708 
+2026-03-14 19:26:40.313750 --- Iteration 3: Observe & Refine ---
+2026-03-14 19:27:23.129975 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incorrect / Partial Requirements**
+
+| # | Requirement | Status | Notes |
+|---|-------------|--------|-------|
+| 1 | **Per‑sample optimization of memory vectors** | OK | The code freezes the model and optimizes only the `[mem]` embeddings. |
+| 2 | **Training target ignores the `[mem]` positions** | INCORRECT | In `train_mem_vectors` the target is constructed by prepending a BOS token instead of masking the first `k` positions. This changes the objective. |
+| 3 | **Teacher‑forcing cross‑entropy loss with ignore_index for `[mem]`** | INCORRECT | The baseline loss uses default `CrossEntropyLoss` (no `ignore_index`). The training loss also does not mask `[mem]` positions. |
+| 4 | **Token‑level accuracy computed via teacher‑forcing** | PARTIAL | Accuracy for the memory case is computed on greedy generation, not on teacher‑forcing predictions. |
+| 5 | **Token gain defined as difference in correct tokens** | OK | The code computes `token_gain` as the difference in correct tokens, but only for the current sequence length, not the longest length. |
+| 6 | **Decoding capacity metric (longest L with accuracy > threshold)** | PARTIAL | The code only checks if the current accuracy exceeds the threshold; it does not search for the maximum length. |
+| 7 | **Theoretical capacity bound uses 16‑bit precision** | INCORRECT | `compute_theoretical_bound` uses `bit_precision=32` (second script) or 16 in the first script, but the paper explicitly uses 16‑bit precision. |
+| 8 | **Use of the same model family as the paper (e.g., Llama‑3.2‑1B)** | MISSING | The reproduction uses GPT‑2, whereas the paper reports results on Llama‑3.2‑1B and other large models. |
+| 9 | **Dataset / text length** | MISSING | The reproduction script compresses a single short sentence (`sample.txt`). The paper evaluates on longer, varied texts (hundreds to thousands of tokens). |
+| 10 | **Evaluation protocol (token‑accuracy, cross‑entropy, token‑gain, theoretical bound, decoding capacity)** | PARTIAL | Most metrics are present, but the implementation deviates from the paper’s definitions (see #2–#6). |
+| 11 | **Hyperparameters (learning rate, steps, batch size)** | PARTIAL | The script uses a fixed LR of 1e‑2 and 2000 steps, but the paper does not specify these values; no batch size is used (single‑sample training). |
+| 12 | **Reproduce.sh runs the full pipeline** | OK | The script installs dependencies, creates a sample text, and runs `compress.py`. |
+| 13 | **Saving results (original, generated, report.json)** | OK | The script writes the required files. |
+| 14 | **Documentation / README** | OK | Provides a brief description of the method. |
+
+**Summary**
+
+The core idea (per‑sample optimization of memory vectors) is implemented, but several key aspects of the paper’s methodology and evaluation are missing or incorrectly implemented:
+
+* The training objective does not mask the `[mem]` positions.
+* Accuracy for the memory case is not computed via teacher‑forcing.
+* Decoding capacity is not measured as the longest length with accuracy above a threshold.
+* The theoretical bound uses the wrong bit precision.
+* The model family and dataset used do not match the paper’s experiments.
+
+**Recommendation**
+
+Fix the training target construction, use teacher‑forcing for accuracy, implement the proper decoding‑capacity search, set the theoretical bound to 16‑bit precision, and use a model/dataset consistent with the paper. Once these changes are made, the reproduction will be complete.
+2026-03-14 19:27:23.130202 
+2026-03-14 19:27:23.130326 Generating refined code...
+2026-03-14 19:28:02.885412   Updated: generated_reproduction.txt
+2026-03-14 19:28:02.885517 
+2026-03-14 19:28:02.885558 --- Iteration 4: Observe & Refine ---
+2026-03-14 19:29:06.525797 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incorrect / Partial Requirements**
+
+| Status | Requirement | Why it’s an issue |
+|--------|-------------|-------------------|
+| **MISSING** | Teacher‑forcing evaluation for the memory‑conditioned model (token‑level accuracy & cross‑entropy loss). | The paper defines decoding capacity and token gain using teacher‑forcing metrics. The code only evaluates accuracy by greedy generation, which is not equivalent. |
+| **MISSING** | Exact computation of the decoding‑capacity metric (longest sequence length `L` with accuracy > `thr`). | The code merely checks if the current accuracy exceeds the threshold, not the longest `L`. |
+| **INCORRECT** | `mem_loss` and `info_gain` calculation. | `mem_loss` is recomputed on the generated sequence instead of the teacher‑forced loss on `seq_input → seq_target`. Consequently, `info_gain` is inaccurate. |
+| **INCORRECT** | Theoretical capacity bound uses `bit_precision=32`. | The paper’s bound (Eq. (1)) assumes 16‑bit precision for the embedding vector. |
+| **PARTIAL** | Token‑gain metric. | The code computes the difference in correct tokens, which matches the definition, but it uses `int(baseline_acc * seq_len)` which may truncate fractional tokens. |
+| **PARTIAL** | Baseline cross‑entropy loss. | The baseline loss is computed correctly, but the code does not store or report it in the same way as the paper (e.g., as a per‑token loss). |
+| **PARTIAL** | Handling of multiple memory vectors (`k > 1`). | The code supports multiple `[mem]` tokens, but does not evaluate scaling (e.g., how capacity grows linearly with `k`). |
+| **PARTIAL** | Use of the same LLM architecture as in the paper. | The reproduction uses GPT‑2, whereas the paper reports results on Llama‑2/3. This is acceptable for a proof‑of‑concept but not a faithful reproduction. |
+| **MISSING** | Dataset / text length used in the paper. | The code compresses a single short sentence (`sample.txt`). The paper evaluates on longer natural text and random word sequences. |
+| **MISSING** | Explicit reporting of token‑level accuracy for the baseline (teacher‑forcing). | The baseline accuracy is reported, but the paper’s metric is defined via teacher‑forcing; the code’s baseline uses the same, but the memory‑conditioned accuracy does not. |
+| **MISSING** | Hyperparameter tuning details (e.g., learning rate schedule, batch size). | The paper does not specify these, but the code uses fixed values that may not match the experimental protocol. |
+
+**Conclusion**
+
+The reproduction code implements the core idea of per‑sample optimization of trainable `[mem]` vectors, but several key evaluation metrics and theoretical calculations are either missing or incorrectly implemented. To fully match the paper’s methodology, the following changes are required:
+
+1. Compute teacher‑forced loss and accuracy for the memory‑conditioned model.
+2. Re‑compute `mem_loss` correctly and derive `info_gain` from it.
+3. Use 16‑bit precision in the theoretical bound.
+4. Implement the decoding‑capacity metric as the longest `L` satisfying the accuracy threshold.
+5. Align the token‑gain calculation with the paper’s definition (avoid truncation).
+6. Use a dataset and text lengths comparable to those reported in the paper (or at least document the differences).
+
+Once these adjustments are made, the reproduction will faithfully reflect the paper’s experimental protocol.
+2026-03-14 19:29:06.526075 
+2026-03-14 19:29:06.526215 Generating refined code...
+2026-03-14 19:29:59.664994   Updated: generated_reproduction.txt
+2026-03-14 19:29:59.665089 
+2026-03-14 19:29:59.665159 --- Iteration 5: Observe & Refine ---
+2026-03-14 19:30:21.667194 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**INCORRECT**  
+- `train_mem_vectors` uses `nn.CrossEntropyLoss()` without `ignore_index=-100`, so the loss is computed on the padded‑out memory positions.  
+- `compute_theoretical_bound` is called with `bit_precision=32` (the second script) instead of the 16‑bit precision used in Eq. (1) of the paper.  
+- `target_seq` is constructed by prepending `tokenizer.bos_token_id`. GPT‑2 has no BOS token, and the target sequence is therefore wrong.  
+- `mem_loss` is computed by re‑using `baseline_metrics` on the generated IDs, which does not reflect the loss on the teacher‑forced sequence.  
+- `decoding_capable` only checks whether the overall accuracy exceeds the threshold; the paper defines it as the longest prefix length `L` with accuracy > thr.  
+
+**MISSING**  
+- Teacher‑forced token‑level accuracy for the memory‑conditioned model (the code only evaluates accuracy via greedy generation).  
+- Token‑gain computed with teacher forcing (the paper defines it as the difference in correctly predicted tokens under teacher forcing).  
+- Cross‑entropy loss for the memory‑conditioned model under teacher forcing (the code uses an incorrect loss).  
+- The exact procedure for computing the decoding capacity metric (longest prefix length).  
+
+**PARTIAL**  
+- The overall pipeline (freeze all except memory, per‑sample optimization, generation) is present, but the loss and accuracy calculations are incomplete or incorrect.  
+- The theoretical capacity bound is computed, but with the wrong bit precision.  
+
+**MISSING**  
+- No explicit handling of the special `[mem]` tokens in the tokenizer’s vocabulary beyond adding them; the code does not mark them as special or adjust the tokenizer’s special token list.  
+
+**ALL_OK**: No. The reproduction script does not faithfully implement the core evaluation protocol and several key metrics from the paper.
+2026-03-14 19:30:21.667397 
+2026-03-14 19:30:21.667542 Generating refined code...
+2026-03-14 19:31:56.612956   Updated: generated_reproduction.txt
+2026-03-14 19:31:56.613051 
+2026-03-14 19:31:56.613093 ======================================================================
+2026-03-14 19:31:56.613129 REACT BASELINE COMPLETE
+2026-03-14 19:31:56.613162 ======================================================================
+2026-03-14 19:31:56.613227 Total iterations: 6
+2026-03-14 19:31:56.613275 API tokens: 57972 completion, 152139 prompt
+2026-03-14 19:31:56.613305 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial2/cram/generated_code_response.txt

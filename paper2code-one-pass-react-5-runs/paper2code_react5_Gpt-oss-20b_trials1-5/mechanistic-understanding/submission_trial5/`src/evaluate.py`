@@ -1,0 +1,96 @@
+#!/usr/bin/env python
+import argparse
+import torch
+import json
+import numpy as np
+from datasets import load_dataset
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from src.utils import load_json, compute_perplexity, get_token_embeddings, to_device, set_seed
+from tqdm.auto import tqdm
+
+set_seed(42)
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def load_probe_vector():
+    return torch.tensor(np.load("probe/probe_weight.pt")).to(DEVICE)
+
+def toxicity_score(text, tokenizer, probe_vec):
+    # Simple score: average dot product of token embeddings with probe vector
+    ids = tokenizer.encode(text, add_special_tokens=False)
+    if len(ids) == 0:
+        return 0.0
+    emb = tokenizer.get_input_embeddings().weight.data[ids].to(DEVICE)
+    scores = torch.matmul(emb, probe_vec)  # (len,)
+    return scores.mean().item()
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["aligned", "unaligned"], default="aligned")
+    args = parser.parse_args()
+
+    # Load tokenizer and model
+    if args.mode == "aligned":
+        tokenizer = AutoTokenizer.from_pretrained("models/gpt2_dpo")
+        model = AutoModelForCausalLM.from_pretrained("models/gpt2_dpo").to(DEVICE)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained("gpt2-medium")
+        model = AutoModelForCausalLM.from_pretrained("gpt2-medium").to(DEVICE)
+
+    model.eval()
+    probe_vec = load_probe_vector()
+
+    # 1. Toxicity on test prompts
+    wiki_test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test[:0.2%]")
+    toxicity_scores = []
+    for ex in tqdm(wiki_test, desc="Toxicity eval"):
+        prompt = ex["text"][:200]  # truncate
+        # generate continuation
+        inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
+        out = model.generate(**inputs, max_new_tokens=20, do_sample=False,
+                             pad_token_id=tokenizer.eos_token_id)
+        cont = tokenizer.decode(out[0][len(inputs["input_ids"][0]):], skip_special_tokens=True)
+        toxicity = toxicity_score(cont, tokenizer, probe_vec)
+        toxicity_scores.append(toxicity)
+    avg_tox = np.mean(toxicity_scores)
+
+    # 2. Perplexity on test set
+    test_texts = [ex["text"] for ex in wiki_test]
+    ppl = compute_perplexity(model, tokenizer, test_texts, DEVICE)
+
+    # 3. F1: token overlap with reference continuation
+    f1_scores = []
+    for ex in tqdm(wiki_test, desc="F1 eval"):
+        prompt = ex["text"][:200]
+        ref_cont = ex["text"][200:220]  # small slice as reference
+        inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
+        out = model.generate(**inputs, max_new_tokens=20, do_sample=False,
+                             pad_token_id=tokenizer.eos_token_id)
+        gen_cont = tokenizer.decode(out[0][len(inputs["input_ids"][0]):], skip_special_tokens=True)
+        # simple token overlap
+        ref_tokens = set(ref_cont.split())
+        gen_tokens = set(gen_cont.split())
+        if len(ref_tokens) == 0:
+            continue
+        overlap = len(ref_tokens & gen_tokens) / len(ref_tokens)
+        f1_scores.append(overlap)
+    avg_f1 = np.mean(f1_scores)
+
+    results = {"toxicity": avg_tox, "perplexity": ppl, "f1": avg_f1}
+    if args.mode == "aligned":
+        output_path = "results.json"
+        # load existing results if any
+        if os.path.exists(output_path):
+            data = load_json(output_path)
+        else:
+            data = {}
+        data["aligned"] = results
+        json.dump(data, open(output_path, "w"), indent=2)
+    else:
+        data = load_json("results.json")
+        data["unaligned"] = results
+        json.dump(data, open("results.json", "w"), indent=2)
+
+    print(f"Results ({args.mode}): {results}")
+
+if __name__ == "__main__":
+    main()

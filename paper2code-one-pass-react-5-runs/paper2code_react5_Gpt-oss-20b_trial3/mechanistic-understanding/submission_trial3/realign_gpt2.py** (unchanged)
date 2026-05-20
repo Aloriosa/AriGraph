@@ -1,0 +1,39 @@
+"""
+Demonstrate a simple re‑alignment attack:
+scale the 7 most toxic key vectors by a factor of 10 and evaluate
+the resulting model.  The scaled model is saved as realigned_gpt2.
+"""
+
+import torch
+import torch.nn.functional as F
+from transformers import GPT2LMHeadModel, GPT2TokenizerFast
+import os
+
+# Load the DPO fine‑tuned model
+model = GPT2LMHeadModel.from_pretrained("dpo_gpt2")
+model.eval()
+
+# Load toxic vectors (block, unit, vector)
+toxic_vectors = torch.load("toxic_vectors.pt", map_location="cpu")
+
+# Find key vectors for each toxic unit
+# In GPT‑2, the key vector is the weight of the first linear layer
+# (c_fc) for that unit.  Each unit corresponds to a row in c_fc.
+scale_factor = 10.0
+scaled = 0
+
+# Scale the first 7 key vectors (the most toxic ones)
+for block_idx, unit_idx, _ in toxic_vectors[:7]:
+    block = model.transformer.h[block_idx]
+    key_weight = block.mlp.c_fc.weight  # (intermediate, hidden)
+    # key_weight[unit_idx] is the weight vector for the unit
+    key_weight[unit_idx] *= scale_factor
+    scaled += 1
+
+print(f"Scaled {scaled} key vectors by {scale_factor}x.")
+
+# Save the re‑aligned model
+model.save_pretrained("realigned_gpt2")
+tokenizer = GPT2TokenizerFast.from_pretrained("gpt2-medium")
+tokenizer.save_pretrained("realigned_gpt2")
+print("Re‑aligned model saved to realigned_gpt2")

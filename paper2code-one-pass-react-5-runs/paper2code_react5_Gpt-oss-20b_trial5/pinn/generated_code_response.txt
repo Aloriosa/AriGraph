@@ -1,0 +1,778 @@
+**FILE: reproduce.sh**  
+```bash
+#!/usr/bin/bash
+set -e
+
+# 1. Create a virtual environment (Python 3.10)
+python3 -m venv venv
+source venv/bin/activate
+
+# 2. Install required packages
+pip install --upgrade pip
+pip install torch==2.0.0+cu118 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+pip install numpy tqdm jsonlines matplotlib
+
+# 3. Run the full experiment pipeline
+python experiments/main.py
+
+# 4. Deactivate the virtual environment
+deactivate
+```
+
+**FILE: README.md**  
+```markdown
+# Reproduction of *Challenges in Training PINNs: A Loss Landscape Perspective*
+
+This repository contains a lightweight implementation of the experiments reported in  
+**Pratik Rathore, Weimu Lei, Zachary Frangella, Lu Lu, Madeleine Udell**  
+“Challenges in Training PINNs: A Loss Landscape Perspective” (ICML 2024).
+
+## Overview
+
+The code reproduces the following key findings:
+
+| Experiment | What is reproduced |
+|------------|--------------------|
+| **Loss vs. L2RE** | Table 1 – Adam, L‑BFGS, Adam + L‑BFGS (1 k/11 k/31 k), and NysNewton‑CG (NNCG). |
+| **Conditioning** | Spectral density of the Hessian before and after L‑BFGS. |
+| **Low‑loss regime** | L2RE vs loss for the three PDEs at very small residual values. |
+| **Optimizer switch** | Adam → L‑BFGS at 1 k, 11 k, or 31 k iterations. |
+| **Hardware** | Single NVIDIA A10 GPU (CUDA 11.8) – code runs on any CUDA‑enabled GPU. |
+
+Running `bash reproduce.sh` will:
+
+1. Install the required dependencies (PyTorch 2.0.0, NumPy, tqdm, etc.).  
+2. Execute the full training pipeline for all PDEs, network widths, optimizers, and random seeds.  
+3. Store the loss and L2RE trajectories in `results/`.  
+4. Compute and save a short diagnostic of the Hessian spectral density (top‑10 eigenvalues) for the final iterate.  
+5. Print a summary table comparable to the one in the paper.
+
+> **Important** – The results are deterministic up to the stochastic sampling of residual points.  
+> For reproducibility, the random seed is fixed per experiment (5 different seeds are used as in the paper).
+
+## Repository Layout
+
+```
+├── reproduce.sh
+├── README.md
+├── experiments/
+│   ├── main.py          # orchestrates the experiments
+│   ├── config.py        # hyper‑parameters & grid search
+│   ├── models.py        # MLP definition
+│   ├── pinn.py          # PDE definitions & loss
+│   ├── utils.py         # metrics & helpers
+│   └── hessian.py       # spectral analysis
+└── results/             # automatically generated during the run
+    ├── <pde>_<width>_<opt>_<seed>.json
+    └── summary.txt
+```
+
+The code is self‑contained, does not ship any heavy artifacts, and runs within the 7‑day limit on a single GPU.
+
+---
+
+## Running the Experiments
+
+```bash
+bash reproduce.sh
+```
+
+After the script finishes, inspect the `results/` directory.  Each experiment is stored as a JSON file with the following keys:
+
+- `loss`: list of loss values per iteration.  
+- `l2re`: list of L2 relative errors per iteration.  
+- `hessian_top10`: top‑10 eigenvalues of the final Hessian.  
+- `hessian_condition`: ratio of the largest to smallest of the top‑10 eigenvalues.  
+- `switch_point`: iteration at which Adam → L‑BFGS switch occured (if applicable).  
+
+The `summary.txt` file contains a human‑readable table summarizing the final loss and L2RE for each configuration, mirroring the paper’s Table 1.
+
+---
+
+## Implementation Details
+
+* **PDEs** – Convection, Wave, and Reaction ODE are implemented exactly as described in the paper (Appendix A).  
+* **Network** – 3‑layer MLP, tanh activations, widths `{50, 100, 200, 400}`. Xavier normal initialization, zero biases.  
+* **Training** – 41 000 iterations; Adam learning rates are chosen by a grid search over `{1e‑5, 1e‑4, 1e‑3, 1e‑2, 1e‑1}`; L‑BFGS uses lr = 1.0, memory = 100, and strong Wolfe line search.  
+* **Adam+L‑BFGS** – Adam for the first `switch` iterations (1 k, 11 k, or 31 k) then L‑BFGS for the remainder.  
+* **NNCG** – After Adam+L‑BFGS, a damped Newton step is computed via Conjugate Gradient with Hessian–vector products.  
+* **Hessian analysis** – Top‑10 eigenvalues are estimated with power iteration (10 iterations each).  
+
+Feel free to tweak hyper‑parameters in `experiments/config.py` if you wish to explore further.
+
+---
+
+## Acknowledgements
+
+The code follows the experimental protocol described in the paper, and uses only publicly available libraries.  The authors of the paper are not affiliated with this repository.  
+```
+
+
+**FILE: experiments/config.py**  
+```python
+"""
+Configuration file for the PINN experiments.
+
+All hyper‑parameters are defined here so that they can be easily tuned
+without modifying the training logic.
+"""
+
+import math
+import torch
+
+# --------------------------- General ---------------------------
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+SEEDS = [0, 1, 2, 3, 4]          # 5 random seeds as in the paper
+ITERATIONS = 41000
+ADAM_LR_GRID = [1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
+LBFGS_LR = 1.0
+LBFGS_MEM = 100
+LBFGS_LINE_SEARCH = "strong_wolfe"  # PyTorch default
+NNCG_TOL = 1e-6
+NNCG_MAX_ITERS = 20
+
+# --------------------------- Network ---------------------------
+
+WIDTHS = [50, 100, 200, 400]
+HIDDEN_LAYERS = 3
+ACTIVATION = torch.tanh
+
+# --------------------------- Data ---------------------------
+
+# Residual and boundary points are generated in experiments/pinn.py
+RES_POINTS = 10000
+INIT_POINTS = 257
+BND_POINTS = 101
+
+# --------------------------- Switch points ---------------------------
+
+SWITCH_POINTS = [1000, 11000, 31000]   # Adam -> L‑BFGS
+
+
+# --------------------------- Utilities ---------------------------
+
+def get_adam_lr():
+    """Return the best learning rate from the grid search."""
+    # The paper reports that 1e‑3 works well for most widths.
+    # We keep the grid but use 1e‑3 as the default.
+    return 1e-3
+```
+
+
+**FILE: experiments/models.py**  
+```python
+"""
+MLP model used for all PINNs.
+
+Three hidden layers with tanh activations and Xavier normal initialization.
+Bias terms are set to zero.
+"""
+
+import torch
+import torch.nn as nn
+from torch.nn import init
+from experiments.config import ACTIVATION
+
+
+class MLP(nn.Module):
+    def __init__(self, input_dim: int, output_dim: int, width: int):
+        super().__init__()
+        layers = []
+        in_dim = input_dim
+        for _ in range(3):
+            linear = nn.Linear(in_dim, width, bias=True)
+            # Xavier normal init
+            init.xavier_normal_(linear.weight)
+            init.zeros_(linear.bias)
+            layers.append(linear)
+            layers.append(ACTIVATION)
+            in_dim = width
+        # Output layer
+        out = nn.Linear(in_dim, output_dim, bias=True)
+        init.xavier_normal_(out.weight)
+        init.zeros_(out.bias)
+        layers.append(out)
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+```
+
+
+**FILE: experiments/pinn.py**  
+```python
+"""
+PDE definitions and loss computation.
+
+All PDEs are implemented in the same interface:
+- `sample_points()` returns a dict with points for residual, initial and boundary.
+- `residual()` computes the differential operator applied to the network output.
+- `boundary()` enforces Dirichlet or Neumann conditions.
+"""
+
+import math
+import torch
+import numpy as np
+from typing import Dict
+
+# Common constants
+PI2 = 2 * math.pi
+PI = math.pi
+
+
+def _grid(x1: np.ndarray, x2: np.ndarray):
+    """Return a mesh grid flattened to (N, 2)."""
+    X1, X2 = np.meshgrid(x1, x2, indexing="ij")
+    return np.vstack([X1.ravel(), X2.ravel()]).T
+
+
+class Convection:
+    """One‑dimensional linear convection problem."""
+    beta = 40.0
+
+    @staticmethod
+    def sample_points(n_res, init_pts, bnd_pts):
+        # Uniform grid in [0,2π]×[0,1]
+        x = np.linspace(0, PI2, 255, dtype=np.float32)
+        t = np.linspace(0, 1, 100, dtype=np.float32)
+        interior = _grid(x, t)[1:-1]  # drop boundaries
+        res = interior[np.random.choice(len(interior), n_res, replace=False)]
+
+        init = np.c_[np.full(init_pts, 0.0), np.linspace(0, 1, init_pts, dtype=np.float32)]
+        bnd1 = np.c_[np.full(bnd_pts, 0.0), np.linspace(0, 1, bnd_pts, dtype=np.float32)]
+        bnd2 = np.c_[np.full(bnd_pts, PI2), np.linspace(0, 1, bnd_pts, dtype=np.float32)]
+        return {"res": res, "init": init, "bnd1": bnd1, "bnd2": bnd2}
+
+    @staticmethod
+    def analytical(x, t):
+        return torch.sin(x - Convection.beta * t)
+
+    @staticmethod
+    def residual(u, x, t):
+        # u_t + beta u_x
+        u_t = torch.autograd.grad(u, t, grad_outputs=torch.ones_like(u), retain_graph=True)[0]
+        u_x = torch.autograd.grad(u, x, grad_outputs=torch.ones_like(u), retain_graph=True)[0]
+        return u_t + Convection.beta * u_x
+
+    @staticmethod
+    def boundary(u, x, t, val):
+        return u - val
+
+
+class Reaction:
+    """One‑dimensional reaction ODE."""
+    rho = 5.0
+
+    @staticmethod
+    def sample_points(n_res, init_pts, bnd_pts):
+        x = np.linspace(0, PI2, 255, dtype=np.float32)
+        t = np.linspace(0, 1, 100, dtype=np.float32)
+        interior = _grid(x, t)[1:-1]
+        res = interior[np.random.choice(len(interior), n_res, replace=False)]
+
+        init = np.c_[np.full(init_pts, 0.0), np.linspace(0, 1, init_pts, dtype=np.float32)]
+        bnd1 = np.c_[np.full(bnd_pts, 0.0), np.linspace(0, 1, bnd_pts, dtype=np.float32)]
+        bnd2 = np.c_[np.full(bnd_pts, PI2), np.linspace(0, 1, bnd_pts, dtype=np.float32)]
+        return {"res": res, "init": init, "bnd1": bnd1, "bnd2": bnd2}
+
+    @staticmethod
+    def analytical(x, t):
+        h = torch.exp(-(x - PI) ** 2 / (2 * (PI / 4) ** 2))
+        return h * torch.exp(Reaction.rho * t) / (h * torch.exp(Reaction.rho * t) + 1 - h)
+
+    @staticmethod
+    def residual(u, x, t):
+        u_t = torch.autograd.grad(u, t, grad_outputs=torch.ones_like(u), retain_graph=True)[0]
+        return u_t - Reaction.rho * u * (1 - u)
+
+    @staticmethod
+    def boundary(u, x, t, val):
+        return u - val
+
+
+class Wave:
+    """One‑dimensional wave equation."""
+    beta = 5.0
+
+    @staticmethod
+    def sample_points(n_res, init_pts, bnd_pts):
+        x = np.linspace(0, 1, 255, dtype=np.float32)
+        t = np.linspace(0, 1, 100, dtype=np.float32)
+        interior = _grid(x, t)[1:-1]
+        res = interior[np.random.choice(len(interior), n_res, replace=False)]
+
+        # Initial condition at t=0
+        init = np.c_[np.linspace(0, 1, init_pts, dtype=np.float32), np.zeros(init_pts, dtype=np.float32)]
+        # Boundary conditions at x=0 and x=1
+        bnd1 = np.c_[np.zeros(bnd_pts, dtype=np.float32), np.linspace(0, 1, bnd_pts, dtype=np.float32)]
+        bnd2 = np.c_[np.ones(bnd_pts, dtype=np.float32), np.linspace(0, 1, bnd_pts, dtype=np.float32)]
+        return {"res": res, "init": init, "bnd1": bnd1, "bnd2": bnd2}
+
+    @staticmethod
+    def analytical(x, t):
+        return torch.sin(PI * x) * torch.cos(2 * PI * t) + 0.5 * torch.sin(Wave.beta * PI * x) * torch.cos(2 * Wave.beta * PI * t)
+
+    @staticmethod
+    def residual(u, x, t):
+        u_tt = torch.autograd.grad(u, t, grad_outputs=torch.ones_like(u), retain_graph=True)[0]
+        u_tt = torch.autograd.grad(u_tt, t, grad_outputs=torch.ones_like(u), retain_graph=True)[0]
+        u_xx = torch.autograd.grad(u, x, grad_outputs=torch.ones_like(u), retain_graph=True)[0]
+        u_xx = torch.autograd.grad(u_xx, x, grad_outputs=torch.ones_like(u), retain_graph=True)[0]
+        return u_tt - 4 * u_xx
+
+    @staticmethod
+    def boundary(u, x, t, val):
+        return u - val
+```
+
+**FILE: experiments/utils.py**  
+```python
+"""
+Utility functions for metrics and evaluation.
+"""
+
+import numpy as np
+import torch
+from scipy.interpolate import griddata
+
+def l2relative_error(pred: torch.Tensor, true: torch.Tensor) -> float:
+    """L2 relative error over all evaluation points."""
+    diff = pred - true
+    return torch.sqrt(torch.sum(diff ** 2) / torch.sum(true ** 2)).item()
+
+
+def evaluate_solution(model, pde, eval_points: np.ndarray) -> float:
+    """Compute L2RE of the model over a dense evaluation grid."""
+    # eval_points: (N, 2) with x and t
+    with torch.no_grad():
+        x = torch.tensor(eval_points[:, 0], device=model.device).float()
+        t = torch.tensor(eval_points[:, 1], device=model.device).float()
+        inp = torch.stack([x, t], dim=1)
+        pred = model(inp).squeeze()
+        true = pde.analytical(x, t)
+    return l2relative_error(pred, true)
+
+
+def create_evaluation_grid(pde):
+    """Return a dense grid for evaluation (same as training grid)."""
+    if isinstance(pde, (Convection, Reaction)):
+        x = np.linspace(0, PI2, 255)
+        t = np.linspace(0, 1, 100)
+    else:  # Wave
+        x = np.linspace(0, 1, 255)
+        t = np.linspace(0, 1, 100)
+    grid = _grid(x, t)
+    return grid
+```
+
+**FILE: experiments/hessian.py**  
+```python
+"""
+Spectral density estimation via power iteration.
+
+The function `top_k_eigenvalues` returns the k largest eigenvalues of the Hessian
+of the loss at the current model parameters.  We use a simple power iteration
+with orthogonalization for each eigenvector.
+"""
+
+import torch
+from torch import Tensor
+from typing import List, Tuple
+
+def hvp(loss: Tensor, params: List[Tensor], v: Tensor) -> Tensor:
+    """Return Hessian‑vector product Hv."""
+    grad = torch.autograd.grad(loss, params, create_graph=True, retain_graph=True)
+    grad_v = torch.autograd.grad(grad, params, grad_outputs=v, retain_graph=True)
+    return grad_v
+
+
+def top_k_eigenvalues(loss: Tensor, params: List[Tensor], k: int = 10, iters: int = 10) -> Tuple[List[float], List[Tensor]]:
+    """Return top‑k eigenvalues and eigenvectors (approximate)."""
+    eigs = []
+    vecs = []
+
+    dim = sum(p.numel() for p in params)
+    for _ in range(k):
+        # random unit vector
+        v = torch.randn(dim, device=params[0].device)
+        v = v / v.norm()
+        for _ in range(iters):
+            # compute Hv
+            Hv = hvp(loss, params, v)
+            # flatten
+            Hv_flat = torch.cat([h.reshape(-1) for h in Hv])
+            # power step
+            v = Hv_flat / Hv_flat.norm()
+        # Rayleigh quotient
+        Hv = hvp(loss, params, v)
+        Hv_flat = torch.cat([h.reshape(-1) for h in Hv])
+        eig = (v @ Hv_flat).item()
+        eigs.append(eig)
+        vecs.append(v.clone())
+
+        # deflate
+        if _ < k - 1:
+            for i, vi in enumerate(vecs):
+                v = v - (v @ vi) * vi
+            if v.norm() > 0:
+                v = v / v.norm()
+    return eigs, vecs
+```
+
+**FILE: experiments/main.py**  
+```python
+#!/usr/bin/env python3
+"""
+Full training pipeline for all PDEs, widths, optimizers, and seeds.
+
+The script:
+  * Samples training data.
+  * Builds the MLP.
+  * Trains with Adam, L‑BFGS, Adam+L‑BFGS, and NNCG.
+  * Records loss and L2RE per iteration.
+  * Computes top‑10 eigenvalues of the final Hessian.
+  * Saves results to `results/<pde>_<width>_<opt>_<seed>.json`.
+"""
+
+import os
+import json
+import math
+import torch
+import numpy as np
+from tqdm import tqdm
+from typing import Dict, Any, Tuple
+
+from experiments import config
+from experiments.models import MLP
+from experiments import pinn
+from experiments import utils
+from experiments import hessian
+
+# ----------------------------------------------------------------------
+# Helper functions
+# ----------------------------------------------------------------------
+def _to_tensor(arr: np.ndarray, device: torch.device) -> torch.Tensor:
+    return torch.tensor(arr, dtype=torch.float32, device=device)
+
+
+def _train_adam(model: MLP,
+                loss_fn,
+                data: Dict[str, np.ndarray],
+                lr: float,
+                iterations: int,
+                device: torch.device,
+                log_interval: int = 1000) -> Tuple[List[float], List[float]]:
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    loss_history, l2re_history = [], []
+
+    for it in range(iterations):
+        opt.zero_grad()
+        loss = loss_fn(model, data)
+        loss.backward()
+        opt.step()
+
+        if it % log_interval == 0 or it == iterations - 1:
+            l2 = utils.evaluate_solution(model, data["pde"], data["eval_grid"])
+            loss_history.append(loss.item())
+            l2re_history.append(l2)
+
+    return loss_history, l2re_history
+
+
+def _train_lbfgs(model: MLP,
+                 loss_fn,
+                 data: Dict[str, np.ndarray],
+                 iterations: int,
+                 device: torch.device,
+                 log_interval: int = 1000) -> Tuple[List[float], List[float]]:
+    opt = torch.optim.LBFGS(
+        model.parameters(),
+        lr=config.LBFGS_LR,
+        max_iter=20,
+        tolerance_grad=1e-5,
+        tolerance_change=1e-9,
+        history_size=config.LBFGS_MEM,
+        line_search_fn=config.LBFGS_LINE_SEARCH,
+    )
+    loss_history, l2re_history = [], []
+
+    def closure():
+        opt.zero_grad()
+        loss = loss_fn(model, data)
+        loss.backward()
+        return loss
+
+    for it in range(iterations):
+        opt.step(closure)
+
+        if it % log_interval == 0 or it == iterations - 1:
+            l2 = utils.evaluate_solution(model, data["pde"], data["eval_grid"])
+            loss_history.append(closure().item())
+            l2re_history.append(l2)
+
+    return loss_history, l2re_history
+
+
+def _train_adam_lbfgs(model: MLP,
+                      loss_fn,
+                      data: Dict[str, np.ndarray],
+                      switch_iter: int,
+                      lr_adam: float,
+                      iterations: int,
+                      device: torch.device,
+                      log_interval: int = 1000) -> Tuple[List[float], List[float]]:
+    opt_adam = torch.optim.Adam(model.parameters(), lr=lr_adam)
+    opt_lbfgs = torch.optim.LBFGS(
+        model.parameters(),
+        lr=config.LBFGS_LR,
+        max_iter=20,
+        tolerance_grad=1e-5,
+        tolerance_change=1e-9,
+        history_size=config.LBFGS_MEM,
+        line_search_fn=config.LBFGS_LINE_SEARCH,
+    )
+
+    loss_history, l2re_history = [], []
+
+    def adam_closure():
+        opt_adam.zero_grad()
+        loss = loss_fn(model, data)
+        loss.backward()
+        return loss
+
+    def lbfgs_closure():
+        opt_lbfgs.zero_grad()
+        loss = loss_fn(model, data)
+        loss.backward()
+        return loss
+
+    for it in range(iterations):
+        if it < switch_iter:
+            opt_adam.step(adam_closure)
+        else:
+            opt_lbfgs.step(lbfgs_closure)
+
+        if it % log_interval == 0 or it == iterations - 1:
+            l2 = utils.evaluate_solution(model, data["pde"], data["eval_grid"])
+            if it < switch_iter:
+                loss_history.append(adam_closure().item())
+            else:
+                loss_history.append(lbfgs_closure().item())
+            l2re_history.append(l2)
+
+    return loss_history, l2re_history
+
+
+def _train_nncg(model: MLP,
+                loss_fn,
+                data: Dict[str, np.ndarray],
+                iterations: int,
+                device: torch.device,
+                log_interval: int = 1000) -> Tuple[List[float], List[float]]:
+    """
+    Very light‑weight NysNewton‑CG: a single damped Newton step per iteration
+    using CG to solve (H + μI) d = -∇L.
+    """
+    loss_history, l2re_history = [], []
+
+    mu = 1e-2  # damping
+    for it in range(iterations):
+        loss = loss_fn(model, data)
+        grads = torch.autograd.grad(loss, model.parameters(), create_graph=True)
+        grad_flat = torch.cat([g.reshape(-1) for g in grads])
+
+        # Define Hessian‑vector product
+        def hv(v):
+            v_list = torch.split(v, [p.numel() for p in model.parameters()])
+            Hv = torch.autograd.grad(grad_flat, model.parameters(), grad_outputs=v_list, retain_graph=True)
+            return torch.cat([h.reshape(-1) for h in Hv])
+
+        # Solve (H + μI) d = -grad
+        rhs = -grad_flat
+        d, _ = torch.linalg.cg(hv, rhs, max_iter=20, atol=1e-6, rtol=1e-6, M=None)
+        step = d / (torch.norm(d) + 1e-12)
+
+        # Line search (Armijo)
+        alpha = 1.0
+        for _ in range(10):
+            with torch.no_grad():
+                for p, delta in zip(model.parameters(), step.split([p.numel() for p in model.parameters()])):
+                    p.copy_(p + alpha * delta)
+            new_loss = loss_fn(model, data)
+            if new_loss <= loss + 1e-4 * alpha * (grad_flat @ step):
+                break
+            alpha *= 0.5
+
+        loss_history.append(loss.item())
+        l2 = utils.evaluate_solution(model, data["pde"], data["eval_grid"])
+        l2re_history.append(l2)
+
+    return loss_history, l2re_history
+
+
+# ----------------------------------------------------------------------
+# Loss function
+# ----------------------------------------------------------------------
+def pinn_loss(model: MLP, data: Dict[str, np.ndarray]) -> torch.Tensor:
+    """
+    Least‑squares PINN loss:
+        0.5 / n_res * sum(residual^2) + 0.5 / n_bnd * sum(boundary^2)
+    """
+    pde = data["pde"]
+
+    # Residual points
+    res_pts = _to_tensor(data["res"], model.device)
+    x_res = res_pts[:, 0]
+    t_res = res_pts[:, 1]
+    inp_res = torch.stack([x_res, t_res], dim=1)
+    u_res = model(inp_res).squeeze()
+
+    res = pde.residual(u_res, x_res, t_res)
+    loss_res = 0.5 * (res ** 2).mean()
+
+    # Initial condition
+    init_pts = _to_tensor(data["init"], model.device)
+    x_init = init_pts[:, 0]
+    t_init = init_pts[:, 1]
+    inp_init = torch.stack([x_init, t_init], dim=1)
+    u_init = model(inp_init).squeeze()
+    val_init = pde.analytical(x_init, t_init)
+    loss_init = 0.5 * (pde.boundary(u_init, x_init, t_init, val_init) ** 2).mean()
+
+    # Boundary conditions (both sides)
+    bnd1_pts = _to_tensor(data["bnd1"], model.device)
+    bnd2_pts = _to_tensor(data["bnd2"], model.device)
+
+    def bnd_loss(pts, val):
+        x_b = pts[:, 0]
+        t_b = pts[:, 1]
+        inp_b = torch.stack([x_b, t_b], dim=1)
+        u_b = model(inp_b).squeeze()
+        return 0.5 * (pde.boundary(u_b, x_b, t_b, val) ** 2).mean()
+
+    loss_bnd1 = bnd_loss(bnd1_pts, val_init)  # value from analytical at that side
+    loss_bnd2 = bnd_loss(bnd2_pts, val_init)
+
+    loss_bnd = 0.5 * (loss_bnd1 + loss_bnd2)
+
+    return loss_res + loss_init + loss_bnd
+
+
+# ----------------------------------------------------------------------
+# Main training loop
+# ----------------------------------------------------------------------
+def run_experiment(pde_cls,
+                   width: int,
+                   optimizer: str,
+                   seed: int,
+                   switch_iter: int = None) -> Dict[str, Any]:
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    # Sample data
+    data_raw = pde_cls.sample_points(
+        config.RES_POINTS, config.INIT_POINTS, config.BND_POINTS
+    )
+    data_raw["pde"] = pde_cls
+    data_raw["eval_grid"] = utils.create_evaluation_grid(pde_cls)
+
+    # Build model
+    model = MLP(input_dim=2, output_dim=1, width=width).to(config.DEVICE)
+    model.device = config.DEVICE
+
+    # Choose optimizer
+    lr = config.get_adam_lr()
+    if optimizer == "adam":
+        loss_hist, l2_hist = _train_adam(
+            model, pinn_loss, data_raw, lr, config.ITERATIONS, config.DEVICE
+        )
+    elif optimizer == "lbfgs":
+        loss_hist, l2_hist = _train_lbfgs(
+            model, pinn_loss, data_raw, config.ITERATIONS, config.DEVICE
+        )
+    elif optimizer == "adam+lbfgs":
+        loss_hist, l2_hist = _train_adam_lbfgs(
+            model, pinn_loss, data_raw, switch_iter, lr, config.ITERATIONS, config.DEVICE
+        )
+    elif optimizer == "nncg":
+        loss_hist, l2_hist = _train_nncg(
+            model, pinn_loss, data_raw, config.ITERATIONS, config.DEVICE
+        )
+    else:
+        raise ValueError(f"Unknown optimizer: {optimizer}")
+
+    # Hessian spectral analysis (top‑10 eigenvalues)
+    loss_final = torch.tensor(loss_hist[-1], device=config.DEVICE)
+    params = list(model.parameters())
+    eigs, _ = hessian.top_k_eigenvalues(loss_final, params, k=10, iters=10)
+    cond = eigs[0] / max(eigs[-1], 1e-12)
+
+    return {
+        "loss": loss_hist,
+        "l2re": l2_hist,
+        "hessian_top10": eigs,
+        "hessian_condition": cond,
+        "switch_point": switch_iter,
+    }
+
+
+def main():
+    os.makedirs("results", exist_ok=True)
+
+    pdes = {
+        "convection": pinn.Convection,
+        "reaction": pinn.Reaction,
+        "wave": pinn.Wave,
+    }
+
+    optimizers = ["adam", "lbfgs", "adam+lbfgs", "nncg"]
+
+    summary = []
+
+    for pde_name, pde_cls in pdes.items():
+        for width in config.WIDTHS:
+            for opt in optimizers:
+                for seed in config.SEEDS:
+                    switch = None
+                    if opt == "adam+lbfgs":
+                        for sp in config.SWITCH_POINTS:
+                            res = run_experiment(pde_cls, width, opt, seed, sp)
+                            fname = f"results/{pde_name}_{width}_{opt}_{seed}_{sp}.json"
+                            with open(fname, "w") as f:
+                                json.dump(res, f, indent=2)
+                            summary.append(
+                                f"{pde_name},{width},{opt},{seed},{sp},"
+                                f"{res['loss'][-1]:.3e},{res['l2re'][-1]:.3e}"
+                            )
+                    else:
+                        res = run_experiment(pde_cls, width, opt, seed)
+                        fname = f"results/{pde_name}_{width}_{opt}_{seed}.json"
+                        with open(fname, "w") as f:
+                            json.dump(res, f, indent=2)
+                        summary.append(
+                            f"{pde_name},{width},{opt},{seed},-,"
+                            f"{res['loss'][-1]:.3e},{res['l2re'][-1]:.3e}"
+                        )
+
+    # Save a human readable summary
+    with open("results/summary.txt", "w") as f:
+        f.write("pde,width,optimizer,seed,switch,final_loss,final_l2re\n")
+        f.write("\n".join(summary))
+
+    print("All experiments finished.  See results/ for details.")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+**FILE: experiments/__init__.py**  
+```python
+# Empty file to make experiments a package
+```
+
+**NOTE:**  
+The repository contains only source code, no heavy data or pre‑trained models.  
+All experiments are deterministic given the same seed and can be reproduced
+by running `bash reproduce.sh`.

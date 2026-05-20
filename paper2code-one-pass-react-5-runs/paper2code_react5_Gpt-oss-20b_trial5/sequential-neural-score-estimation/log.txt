@@ -1,0 +1,143 @@
+2026-03-14 17:12:23.278638 ======================================================================
+2026-03-14 17:12:23.278749 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 17:12:23.278789 ======================================================================
+2026-03-14 17:12:23.278821 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/sequential-neural-score-estimation/paper.md
+2026-03-14 17:12:23.278855 Log path: paper2code_react5_Gpt-oss-20b_trial5/sequential-neural-score-estimation
+2026-03-14 17:12:23.278886 Model: Openai/Gpt-oss-20b
+2026-03-14 17:12:23.278918 Max iterations: 5
+2026-03-14 17:12:23.278964 Run reproduce.sh: False
+2026-03-14 17:12:23.278997 Run LLM paper check: True
+2026-03-14 17:12:23.279025 
+2026-03-14 17:12:23.279054 Loading paper...
+2026-03-14 17:12:23.279394 Paper length: 190143 chars (using 190143 for prompt)
+2026-03-14 17:12:23.279448 
+2026-03-14 17:12:23.298739 --- Iteration 0: Initial generation ---
+2026-03-14 17:13:39.561427   Created: generated_reproduction.txt
+2026-03-14 17:13:39.561579 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial5/sequential-neural-score-estimation/submission (1 files)
+2026-03-14 17:13:39.561652 
+2026-03-14 17:13:39.561721 --- Iteration 1: Observe & Refine ---
+2026-03-14 17:13:51.525213 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / incomplete elements from the paper**
+
+| Status | Requirement from the paper | Comment |
+|--------|-----------------------------|---------|
+| **MISSING** | TSNPSE sequential procedure (truncated proposals, proposal update, stopping criterion) | The toy code only trains a single model; no sequential refinement is implemented. |
+| **MISSING** | Full denoising score‑matching objective with correct weighting \(\lambda_t\) and sampling from \(p_t(\theta_t,x)\) | The loss in the code is a placeholder; the paper’s weighted Fisher divergence is not reproduced. |
+| **MISSING** | Proper forward noising schedule (e.g., variance schedule \(\beta_t\) or \(\alpha_t\)) and drift \(f(\theta,t)\) / diffusion \(g(t)\) used in the SDE | The toy implementation uses a hard‑coded simple schedule that does not match the paper’s design. |
+| **MISSING** | Probability‑flow ODE integration with the correct drift term \(\bigl[f(\theta,t)-\tfrac12 g^2(t)\nabla_\theta\log p_t(\theta|x)\bigr]\) | The ODE solver in the code is a naive Euler step and does not compute the trace term for density evaluation. |
+| **MISSING** | Evaluation metrics (KL, Wasserstein, coverage, etc.) and comparison to state‑of‑the‑art baselines (SNPE, SNLE, SNRE, etc.) | No metrics or baseline runs are present. |
+| **MISSING** | Baseline implementations (SNPE, SNLE, SNRE, etc.) for fair comparison | The repository contains only the toy NPSE implementation. |
+| **MISSING** | `reproduce.sh` or equivalent script that runs the full training, sampling, and evaluation pipeline to reproduce the paper’s results | No reproducibility script is provided. |
+| **PARTIAL** | Conditional score network architecture | A very small MLP is used, but the paper’s architecture (e.g., residual blocks, conditioning on \(x\) and \(t\)) is not fully implemented. |
+| **PARTIAL** | Training loop | The loop exists but uses a simplified loss and does not incorporate the full denoising score‑matching objective or weighting. |
+| **PARTIAL** | Sampling procedure | Posterior samples are drawn via ODE integration, but the integration scheme is simplistic and does not support density evaluation. |
+| **INCORRECT** | Hyperparameters (learning rate, batch size, number of diffusion steps) | The values are chosen arbitrarily for the toy example and do not match the paper’s reported settings. |
+| **OK** | Toy Gaussian linear model data generation | The toy benchmark is consistent with a simple simulator used for illustration. |
+| **OK** | Basic project structure and documentation | The README explains the toy implementation and its limitations. |
+
+**Conclusion**
+
+The repository implements only a very simplified, toy version of the core ideas. It does **not** reproduce the full Sequential Neural Posterior Score Estimation (SNPSE) algorithm, its training objective, sequential refinement, or evaluation against baselines. Therefore, the reproduction is incomplete.
+
+**Recommendation**
+
+Implement the missing sequential TSNPSE procedure, correct the training objective and noise schedule, add proper ODE integration, include evaluation metrics and baseline comparisons, and provide a reproducibility script. Once these are added, the reproduction will be complete.
+2026-03-14 17:13:51.525460 
+2026-03-14 17:13:51.525901 Generating refined code...
+2026-03-14 17:15:01.361128   Updated: generated_reproduction.txt
+2026-03-14 17:15:01.361251 
+2026-03-14 17:15:01.361294 --- Iteration 2: Observe & Refine ---
+2026-03-14 17:15:15.376771 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Full conditional denoising posterior score‑matching objective (DSM) with the weighting function λₜ and the correct expectation over pₜ(θₜ, x).  
+- Explicit definition of the forward SDE (drift f(θ, t) and diffusion g(t)) and sampling from the stationary distribution p_T(· | x).  
+- Truncated‑prior sampling logic as described for TSNPSE (e.g., defining the truncation region from the current posterior estimate and drawing from the truncated prior).  
+- Evaluation metrics used in the paper (KL, Wasserstein, etc.) and the protocol for computing them.  
+- Implementation of baseline SBI methods (SNPE, SNLE, SNRE, etc.) for comparison.  
+- Full experimental protocol (number of sequential rounds, simulation budget per round, hyper‑parameter settings, checkpointing).  
+- A reproducibility script (e.g., `reproduce.sh`) that runs the entire pipeline and reproduces the paper’s results.
+
+**INCORRECT**  
+- The score network may be a plain MLP without proper time‑conditioning or positional embeddings, which deviates from the paper’s conditional score‑based diffusion architecture.  
+- The ODE integration may use a simplified drift term that does not match the probability‑flow ODE derived from the SDE, leading to incorrect posterior samples.
+
+**PARTIAL**  
+- The code implements a time‑varying score network `s(θₜ, x, t)` but the implementation is toy‑ish and does not reflect the full architecture or training objective described.  
+- Sequential refinement is present, but the truncation step is simplified (e.g., hard‑cutoff on a fixed threshold) rather than the high‑probability region truncation proposed in TSNPSE.  
+- Probability‑flow ODE sampling is implemented, but the integration scheme and scaling may not match the paper’s recommended method.  
+- The toy benchmark (10‑dimensional Gaussian‑linear model) is used, but the paper evaluates on multiple SBI benchmarks and a real‑world neuroscience problem, which are not reproduced.
+
+**OK**  
+- A conditional score network is defined and trained.  
+- Probability‑flow ODE sampling is provided.  
+- A toy sequential refinement loop (TSNPSE) is included.
+
+**Conclusion**  
+ALL_OK: Reproduction appears incomplete; many core components from the paper are missing or only partially implemented.
+2026-03-14 17:15:15.376970 
+2026-03-14 17:15:15.377226 Generating refined code...
+2026-03-14 17:17:01.371778   Updated: generated_reproduction.txt
+2026-03-14 17:17:01.371886 
+2026-03-14 17:17:01.371927 --- Iteration 3: Observe & Refine ---
+2026-03-14 17:17:03.048251 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core method/algorithm (NPSE/SNPSE implementation)  
+MISSING: Hyperparameters (learning rate, batch size, training steps, etc.)  
+MISSING: Data setup (simulator, prior, observation, preprocessing, train/validation splits)  
+MISSING: Evaluation (metrics, baseline comparisons, statistical tests)  
+MISSING: Experimental setup (hardware, checkpointing, reproducibility scripts)  
+MISSING: `reproduce.sh` (full pipeline to generate paper results)  
+
+ALL_OK: Reproduction appears incomplete.
+2026-03-14 17:17:03.048455 
+2026-03-14 17:17:03.048603 Generating refined code...
+2026-03-14 17:18:42.246075   Updated: generated_reproduction.txt
+2026-03-14 17:18:42.246182 
+2026-03-14 17:18:42.246232 --- Iteration 4: Observe & Refine ---
+2026-03-14 17:18:45.092184 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING:  
+- Core method implementation (SNPSE/NPSE algorithm, conditional score-based diffusion model, training loop, reverse SDE/ODE sampling).  
+- Model architecture (score network, conditioning on data, time embedding).  
+- Hyperparameters (learning rate, batch size, number of diffusion steps, weighting function λ_t, etc.).  
+- Data setup (simulator interface, generation of (θ, x) pairs, preprocessing, train/validation splits).  
+- Evaluation protocol (metrics such as KL divergence, Wasserstein distance, posterior predictive checks, comparison to baselines).  
+- Experimental setup (hardware specifications, number of training epochs, checkpointing, logging).  
+- `reproduce.sh` or equivalent script to run the full pipeline and reproduce the paper’s results.  
+
+No INCORRECT or PARTIAL items are present because the repository contains only a `requirements.txt` file. All essential components of the paper are missing.
+2026-03-14 17:18:45.092340 
+2026-03-14 17:18:45.092657 Generating refined code...
+2026-03-14 17:19:58.956404   Updated: generated_reproduction.txt
+2026-03-14 17:19:58.956533 
+2026-03-14 17:19:58.956620 --- Iteration 5: Observe & Refine ---
+2026-03-14 17:20:01.727473 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core method/algorithm (SNPSE implementation, diffusion model, score network, training loop) — not found in code  
+MISSING: Hyperparameters (learning rate, batch size, number of diffusion steps, weighting function λ_t, etc.) — not found in code  
+MISSING: Data setup (simulator interface, prior sampling, observation handling, dataset splits) — not found in code  
+MISSING: Evaluation (metrics such as KL divergence, Wasserstein distance, baseline comparisons) — not found in code  
+MISSING: Experimental setup (training epochs, checkpointing, hardware configuration) — not found in code  
+MISSING: reproduce.sh (script to run full training and evaluation pipeline) — not found in code
+2026-03-14 17:20:01.727675 
+2026-03-14 17:20:01.727921 Generating refined code...
+2026-03-14 17:21:28.958584   Updated: generated_reproduction.txt
+2026-03-14 17:21:28.958705 
+2026-03-14 17:21:28.958744 ======================================================================
+2026-03-14 17:21:28.958776 REACT BASELINE COMPLETE
+2026-03-14 17:21:28.958807 ======================================================================
+2026-03-14 17:21:28.958854 Total iterations: 6
+2026-03-14 17:21:28.958886 API tokens: 46918 completion, 395261 prompt
+2026-03-14 17:21:28.958917 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial5/sequential-neural-score-estimation/generated_code_response.txt

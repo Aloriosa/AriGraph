@@ -1,0 +1,646 @@
+FILE: src/foa.py
+```python
+"""
+FOA core implementation.
+
+This module contains:
+- FOAModel: a wrapper that inserts a learnable prompt into a ViT backbone.
+- FOA: the forward‑only adaptation algorithm (CMA‑ES + unsupervised fitness).
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import cma
+from tqdm import tqdm
+
+
+class FOAModel(nn.Module):
+    """
+    Wraps a pretrained ViT model and inserts a learnable prompt.
+    The backbone parameters are frozen.
+    """
+
+    def __init__(self, backbone: nn.Module, num_prompts: int = 3):
+        super().__init__()
+        self.backbone = backbone
+        self.num_prompts = num_prompts
+
+        # Prompt shape: (num_prompts, dim) where dim is the patch embedding dim
+        if not hasattr(backbone, "patch_embed"):
+            raise ValueError("Backbone must expose a 'patch_embed' module.")
+        dim = backbone.patch_embed.proj.out_channels
+
+        # Learnable prompt embeddings (requires_grad=True)
+        self.prompt = nn.Parameter(torch.zeros(num_prompts, dim))
+
+        # Freeze backbone
+        for p in self.backbone.parameters():
+            p.requires_grad = False
+
+    def forward(self, x: torch.Tensor):
+        """
+        Forward pass with prompt injection.
+
+        Returns:
+            logits: (B, num_classes)
+            cls_token: (B, dim) – CLS token after the final transformer block
+        """
+        B = x.size(0)
+
+        # Patch embeddings: (B, N, D)
+        patches = self.backbone.patch_embed(x)  # (B, N, D)
+
+        # CLS token and prompt
+        cls_token = self.backbone.cls_token.expand(B, -1, -1)  # (B, 1, D)
+        prompt = self.prompt.expand(B, -1, -1)                # (B, P, D)
+
+        # Concatenate: CLS, prompt, patches
+        x = torch.cat((cls_token, prompt, patches), dim=1)    # (B, 1+P+N, D)
+
+        # Add positional embedding and dropout
+        # The original pos_embed has shape (1, N+1, D). We extend it for the
+        # prompt tokens by appending zeros.
+        pos_embed = self.backbone.pos_embed
+        if pos_embed.shape[1] != patches.shape[1] + 1:
+            raise RuntimeError("Unexpected positional embedding shape.")
+        zero_prompt_pos = torch.zeros(
+            1, self.num_prompts, pos_embed.shape[2], device=pos_embed.device
+        )
+        new_pos_embed = torch.cat([pos_embed, zero_prompt_pos], dim=1)
+        x = self.backbone.pos_drop(x + new_pos_embed)
+
+        # Transformer blocks
+        for blk in self.backbone.blocks:
+            x = blk(x)
+
+        # Layer norm
+        x = self.backbone.norm(x)
+
+        # CLS token
+        cls_token = x[:, 0]
+
+        # Classification head
+        logits = self.backbone.head(cls_token)
+
+        return logits, cls_token
+
+
+class FOA:
+    """
+    Forward‑only adaptation algorithm.
+
+    Parameters
+    ----------
+    model : FOAModel
+        The wrapped ViT model with prompt.
+    source_stats : dict
+        {'mu': tensor, 'sig': tensor} – CLS statistics from source data.
+    lambda_discrep : float
+        Weight for the activation‑discrepancy term in the fitness.
+    population_size : int
+        CMA‑ES population size.
+    gamma_shift : float
+        Step size for activation shifting.
+    device : torch.device
+    """
+
+    def __init__(
+        self,
+        model: FOAModel,
+        source_stats: dict,
+        lambda_discrep: float = 0.4,
+        population_size: int = 28,
+        gamma_shift: float = 1.0,
+        device: torch.device = torch.device("cpu"),
+    ):
+        self.model = model
+        self.device = device
+        self.source_mu = source_stats["mu"].to(device)
+        self.source_sig = source_stats["sig"].to(device)
+        self.lambda_discrep = lambda_discrep
+        self.gamma_shift = gamma_shift
+
+        # CMA‑ES configuration
+        # The search space is the prompt vector: (P, D)
+        self.dim = model.num_prompts * model.prompt.shape[1]
+        self.cma_es = cma.CMAEvolutionStrategy(
+            np.zeros(self.dim),  # initial mean
+            0.1,                 # initial sigma (step size)
+            {"popsize": population_size},
+        )
+
+        # Running mean of CLS tokens for activation shifting (EMA)
+        self.test_mu = None
+        self.alpha = 0.1  # EMA factor
+
+    # --------------------------------------------------------------------- #
+    # Utility methods
+    # --------------------------------------------------------------------- #
+    def _prompt_from_flat(self, flat: np.ndarray) -> torch.Tensor:
+        """Reshape flat numpy array to prompt tensor."""
+        prompt = torch.from_numpy(flat.astype(np.float32)).to(self.device)
+        prompt = prompt.reshape(self.model.num_prompts, self.model.prompt.shape[1])
+        return prompt
+
+    def _compute_stats(self, cls_tokens: torch.Tensor):
+        """Compute mean and std of CLS tokens."""
+        mu = cls_tokens.mean(dim=0)
+        sig = cls_tokens.std(dim=0)
+        return mu, sig
+
+    def _fitness(self, flat: np.ndarray, x: torch.Tensor):
+        """
+        Unsupervised fitness: entropy + λ * (μ‑diff + σ‑diff).
+
+        Parameters
+        ----------
+        flat : np.ndarray
+            Flattened prompt vector.
+        x : torch.Tensor
+            Input batch of images.
+
+        Returns
+        -------
+        float
+            Fitness value (lower is better).
+        """
+        prompt = self._prompt_from_flat(flat)
+        with torch.no_grad():
+            # Temporarily set prompt (no gradient tracking)
+            self.model.prompt.copy_(prompt)
+
+            logits, cls_tokens = self.model(x)
+            probs = F.softmax(logits, dim=-1)
+
+            # Entropy (mean over batch)
+            entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1).mean().item()
+
+            mu_batch, sig_batch = self._compute_stats(cls_tokens)
+            mu_diff = torch.norm(mu_batch - self.source_mu, p=2).item()
+            sig_diff = torch.norm(sig_batch - self.source_sig, p=2).item()
+
+            return entropy + self.lambda_discrep * (mu_diff + sig_diff)
+
+    def _shift_activation(self, cls_tokens: torch.Tensor):
+        """Shift CLS token towards source mean using EMA‑based direction."""
+        if self.test_mu is None:
+            # Initialise EMA with the first batch mean
+            self.test_mu = cls_tokens.mean(dim=0)
+        else:
+            # Update EMA
+            batch_mean = cls_tokens.mean(dim=0)
+            self.test_mu = self.alpha * batch_mean + (1 - self.alpha) * self.test_mu
+
+        # Compute direction from current EMA to source mean
+        shift = self.gamma_shift * (self.source_mu - self.test_mu)
+        return cls_tokens + shift
+
+    # --------------------------------------------------------------------- #
+    # Core adaptation
+    # --------------------------------------------------------------------- #
+    def adapt_batch(self, x: torch.Tensor):
+        """
+        Run one CMA‑ES generation on batch x and return predictions.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Batch of images (B, C, H, W).
+
+        Returns
+        -------
+        logits: torch.Tensor
+            Logits after prompt adaptation and optional activation shifting.
+        """
+        # Sample candidate prompts
+        candidates = self.cma_es.ask()
+        fitness_vals = [self._fitness(c, x) for c in candidates]
+
+        # Update CMA‑ES
+        self.cma_es.tell(candidates, fitness_vals)
+
+        # Pick best prompt
+        best_idx = np.argmin(fitness_vals)
+        best_prompt = self._prompt_from_flat(candidates[best_idx])
+
+        # Apply best prompt
+        with torch.no_grad():
+            self.model.prompt.copy_(best_prompt)
+
+            logits, cls_tokens = self.model(x)
+            # Shift CLS tokens
+            cls_shifted = self._shift_activation(cls_tokens)
+            logits_shifted = self.model.backbone.head(cls_shifted)
+
+        return logits_shifted
+
+    def evaluate(self, loader: torch.utils.data.DataLoader):
+        """Evaluate on a dataloader – returns top‑1 and top‑5 accuracy."""
+        self.model.eval()
+        correct_top1 = 0
+        correct_top5 = 0
+        total = 0
+        with torch.no_grad():
+            for imgs, labels in tqdm(loader, desc="FOA evaluation"):
+                imgs, labels = imgs.to(self.device), labels.to(self.device)
+                logits = self.adapt_batch(imgs)
+                preds = logits.argmax(dim=1)
+                correct_top1 += (preds == labels).sum().item()
+                top5 = logits.topk(5, dim=1).indices
+                correct_top5 += (top5 == labels.unsqueeze(1)).any(dim=1).sum().item()
+                total += labels.size(0)
+        return 100.0 * correct_top1 / total, 100.0 * correct_top5 / total
+```
+
+FILE: src/main.py
+```python
+"""
+Main script that demonstrates FOA (forward‑only adaptation) and a TENT baseline
+on ImageNet‑C (severity 5).  The script downloads the required datasets
+automatically and runs the evaluation in a single pass.
+"""
+
+import argparse
+import os
+import sys
+import time
+import torch
+import torchvision
+import torchvision.transforms as T
+import timm
+import numpy as np
+from tqdm import tqdm
+import torch.cuda  # noqa: F401
+
+from foa import FOAModel, FOA
+
+# --------------------------------------------------------------------------- #
+# Dataset utilities
+# --------------------------------------------------------------------------- #
+def download_and_extract(url: str, dst_dir: str):
+    """
+    Download a zip file from `url` into `dst_dir` (folder). If the folder
+    already exists, nothing is done.
+    """
+    if os.path.exists(dst_dir):
+        return
+    os.makedirs(os.path.dirname(dst_dir), exist_ok=True)
+    tmp_zip = dst_dir + ".zip"
+    print(f"Downloading {url} ...")
+    os.system(f"wget -O {tmp_zip} {url}")
+    print(f"Extracting {tmp_zip} ...")
+    os.system(f"unzip -q {tmp_zip} -d {os.path.dirname(dst_dir)}")
+    os.remove(tmp_zip)
+
+def get_imagenet_c_loader(batch_size=64, num_workers=4, severity=5):
+    """
+    Returns a DataLoader for ImageNet‑C (severity level `severity`).
+    The dataset is downloaded and extracted automatically.
+    """
+    data_root = "./data"
+    data_dir = os.path.join(data_root, "imagenet_c")
+    download_and_extract(
+        "https://github.com/hendrycks/imagenet-c/releases/download/v0.1.0/imagenet_c.zip",
+        data_dir,
+    )
+    # The extracted folder contains subfolders for each corruption type.
+    # torchvision's ImageFolder will automatically pick up all images.
+    transform = T.Compose(
+        [
+            T.Resize((224, 224)),
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406],
+                        std=[0.229, 0.224, 0.225]),
+        ]
+    )
+    dataset = torchvision.datasets.ImageFolder(
+        root=data_dir,
+        transform=transform,
+    )
+    # Filter for the desired severity level
+    # ImageNet‑C folders are named like 'gaussian_noise_5', so we keep only those
+    indices = [
+        i for i, (path, _) in enumerate(dataset.samples)
+        if f"_{severity}" in os.path.basename(os.path.dirname(path))
+    ]
+    dataset.samples = [dataset.samples[i] for i in indices]
+    dataset.targets = [dataset.targets[i] for i in indices]
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+    )
+    return loader
+
+def get_imagenet_val_loader(batch_size=64, num_workers=4):
+    """
+    Returns a DataLoader for ImageNet‑1K validation set.
+    The dataset is downloaded and extracted automatically.
+    """
+    data_root = "./data"
+    data_dir = os.path.join(data_root, "imagenet_val")
+    download_and_extract(
+        "https://image-net.org/archive/imagenet_2012_val.zip",
+        data_dir,
+    )
+    val_dir = os.path.join(data_dir, "imagenet_2012_val")
+    transform = T.Compose(
+        [
+            T.Resize((224, 224)),
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406],
+                        std=[0.229, 0.224, 0.225]),
+        ]
+    )
+    dataset = torchvision.datasets.ImageFolder(
+        root=val_dir,
+        transform=transform,
+    )
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+    )
+    return loader
+
+def compute_source_stats(model: FOAModel, loader, device, max_samples=32):
+    """
+    Computes mean and std of CLS tokens over a small source subset.
+    """
+    model.eval()
+    cls_list = []
+    collected = 0
+
+    with torch.no_grad():
+        for imgs, _ in tqdm(loader, desc="Collecting source CLS stats"):
+            imgs = imgs.to(device)
+            _, cls = model(imgs)
+            cls_list.append(cls)
+            collected += imgs.size(0)
+            if collected >= max_samples:
+                break
+
+    all_cls = torch.cat(cls_list, dim=0)
+    mu = all_cls.mean(dim=0)
+    sig = all_cls.std(dim=0)
+    return {"mu": mu, "sig": sig}
+
+# --------------------------------------------------------------------------- #
+# Static quantization helper
+# --------------------------------------------------------------------------- #
+def static_quantize(model, loader, device):
+    """
+    Apply static 8‑bit PTQ to `model` using calibration data from `loader`.
+    The quantized model is returned (still on CPU).
+    """
+    model.eval()
+    torch.backends.quantized.engine = "qnnpack"
+    model.qconfig = torch.quantization.get_default_qconfig("qnnpack")
+    torch.quantization.prepare(model, inplace=True)
+
+    # Calibration
+    with torch.no_grad():
+        for imgs, _ in loader:
+            imgs = imgs.to(device)
+            model(imgs)
+            break  # a single batch is enough for the small calibration set
+
+    torch.quantization.convert(model, inplace=True)
+    return model
+
+# --------------------------------------------------------------------------- #
+# TENT baseline
+# --------------------------------------------------------------------------- #
+class TentAdapter:
+    """
+    Test‑time entropy minimization (TENT) baseline.
+    Only LayerNorm affine parameters are updated.
+    """
+
+    def __init__(self, model: torch.nn.Module, lr=0.001, momentum=0.9, device=None):
+        self.model = model.to(device)
+        self.device = device or torch.device("cpu")
+
+        # Freeze all parameters except LayerNorm affine weights/biases
+        for p in self.model.parameters():
+            p.requires_grad = False
+        self.tent_params = []
+        for name, p in self.model.named_parameters():
+            if "norm" in name and ("weight" in name or "bias" in name):
+                p.requires_grad = True
+                self.tent_params.append(p)
+
+        self.optimizer = torch.optim.SGD(
+            self.tent_params, lr=lr, momentum=momentum
+        )
+        self.model.train()
+
+    def adapt_and_evaluate(self, loader):
+        """
+        For each batch: adapt (entropy minimization) and evaluate.
+        Returns top‑1 and top‑5 accuracy over the entire dataset.
+        """
+        correct_top1 = 0
+        correct_top5 = 0
+        total = 0
+
+        for imgs, labels in tqdm(loader, desc="TENT adaptation"):
+            imgs, labels = imgs.to(self.device), labels.to(self.device)
+
+            # Forward
+            logits, _ = self.model(imgs)
+            probs = torch.softmax(logits, dim=-1)
+
+            # Entropy loss
+            entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1).mean()
+
+            # Backward & step
+            self.optimizer.zero_grad()
+            entropy.backward()
+            self.optimizer.step()
+
+            # Evaluation
+            preds = logits.argmax(dim=1)
+            correct_top1 += (preds == labels).sum().item()
+            top5 = logits.topk(5, dim=1).indices
+            correct_top5 += (top5 == labels.unsqueeze(1)).any(dim=1).sum().item()
+            total += labels.size(0)
+
+        return 100.0 * correct_top1 / total, 100.0 * correct_top5 / total
+
+
+# --------------------------------------------------------------------------- #
+# Main
+# --------------------------------------------------------------------------- #
+def main(args):
+    # Default device (CPU for quantized model, GPU otherwise)
+    device = torch.device("cuda" if torch.cuda.is_available() and not args.quantize else "cpu")
+    print(f"Using device: {device}")
+
+    # Data
+    print("Preparing ImageNet-C loader...")
+    test_loader = get_imagenet_c_loader(
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        severity=args.severity,
+    )
+    print("Preparing ImageNet‑1K validation loader...")
+    val_loader = get_imagenet_val_loader(
+        batch_size=args.source_samples,
+        num_workers=args.num_workers,
+    )
+
+    # Build ViT‑Base (pretrained)
+    backbone = timm.create_model(
+        "vit_base_patch16_224",
+        pretrained=True,
+        num_classes=10,  # dummy, will be overridden by head
+    )
+
+    # Replace head to match ImageNet‑1K (1000 classes)
+    backbone.head = nn.Linear(backbone.head.in_features, 1000).to(device)
+
+    # Optional static 8‑bit PTQ via calibration
+    if args.quantize:
+        print("Applying static 8‑bit PTQ to ViT backbone...")
+        backbone = static_quantize(backbone, val_loader, device)
+        print("Static quantization completed.")
+        device = torch.device("cpu")  # quantized models run on CPU
+
+    # Wrap with FOAModel
+    foamodel = FOAModel(backbone, num_prompts=args.num_prompts).to(device)
+
+    # Compute source CLS statistics
+    source_stats = compute_source_stats(
+        foamodel, val_loader, device, max_samples=args.source_samples
+    )
+
+    # FOA evaluation
+    foa = FOA(
+        model=foamodel,
+        source_stats=source_stats,
+        lambda_discrep=args.lambda_discrep,
+        population_size=args.population_size,
+        gamma_shift=args.gamma_shift,
+        device=device,
+    )
+    start = time.time()
+    foa_acc_top1, foa_acc_top5 = foa.evaluate(test_loader)
+    elapsed = time.time() - start
+    print(f"\nFOA Top‑1 Accuracy on ImageNet‑C (severity {args.severity}): {foa_acc_top1:.2f}%")
+    print(f"FOA Top‑5 Accuracy on ImageNet‑C (severity {args.severity}): {foa_acc_top5:.2f}%")
+    print(f"Runtime: {elapsed:.1f} s")
+
+    # TENT baseline
+    if args.baseline_tent:
+        # Re‑create fresh backbone to avoid contamination from FOA
+        base_tent = timm.create_model(
+            "vit_base_patch16_224",
+            pretrained=True,
+            num_classes=10,
+        )
+        base_tent = base_tent.to(device)
+        base_tent.head = nn.Linear(base_tent.head.in_features, 1000).to(device)
+
+        if args.quantize:
+            print("Applying static 8‑bit PTQ to TENT backbone...")
+            base_tent = static_quantize(base_tent, val_loader, device)
+            print("Static quantization completed.")
+            device = torch.device("cpu")
+
+        tent = TentAdapter(
+            base_tent,
+            lr=args.tent_lr,
+            momentum=0.9,
+            device=device,
+        )
+        start = time.time()
+        tent_acc_top1, tent_acc_top5 = tent.adapt_and_evaluate(test_loader)
+        elapsed = time.time() - start
+        print(f"\nTENT Top‑1 Accuracy on ImageNet‑C (severity {args.severity}): {tent_acc_top1:.2f}%")
+        print(f"TENT Top‑5 Accuracy on ImageNet‑C (severity {args.severity}): {tent_acc_top5:.2f}%")
+        print(f"Runtime: {elapsed:.1f} s")
+
+    print("\nAll done.")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="FOA Reproduction on ImageNet‑C")
+    parser.add_argument("--batch-size", type=int, default=64, help="Batch size for evaluation")
+    parser.add_argument("--num-prompts", type=int, default=3, help="Number of prompt embeddings")
+    parser.add_argument("--lambda-discrep", type=float, default=0.4, help="Weight for activation discrepancy")
+    parser.add_argument("--population-size", type=int, default=28, help="CMA‑ES population size")
+    parser.add_argument("--gamma-shift", type=float, default=1.0, help="Step size for activation shifting")
+    parser.add_argument("--source-samples", type=int, default=32, help="Number of source samples for CLS stats")
+    parser.add_argument("--num-workers", type=int, default=4, help="Number of data loader workers")
+    parser.add_argument("--quantize", action="store_true", help="Apply static 8‑bit quantization")
+    parser.add_argument("--baseline-tent", action="store_true", help="Run TENT baseline for comparison")
+    parser.add_argument("--tent-lr", type=float, default=0.01, help="Learning rate for TENT")
+    parser.add_argument("--severity", type=int, default=5, help="ImageNet‑C severity level (1‑5)")
+    args = parser.parse_args()
+    main(args)
+```
+
+FILE: README.md
+```markdown
+# FOA Reproduction
+
+This repository reproduces the core ideas of the **Test‑Time Model Adaptation with Only Forward Passes (FOA)** paper.  
+The implementation follows the experimental protocol described in the paper:
+
+* ImageNet‑C (severity 5) evaluation
+* Full‑precision ViT‑Base and **static 8‑bit PTQ** ViT‑Base
+* Forward‑only adaptation via a small input prompt optimized with CMA‑ES
+* Unsupervised fitness combining prediction entropy and CLS‑token distribution discrepancy
+* Activation shifting that aligns CLS tokens to source‑domain statistics
+
+> **Running the reproduction**  
+>
+> ```bash
+> bash reproduce.sh
+> ```
+>
+> The script installs all dependencies, downloads the datasets, builds the ViT model, applies static 8‑bit PTQ (if requested), and runs FOA (and optionally TENT) on ImageNet‑C severity 5.  
+>
+> **Results**  
+>
+> The script prints top‑1/top‑5 accuracy and runtime for FOA and the TENT baseline.  
+>
+> **Notes**  
+>
+> * Static 8‑bit PTQ is performed by calibrating the model on a small subset of the ImageNet‑1K validation set (32 images).  
+> * The prompt size, CMA‑ES population, and hyper‑parameters match those reported in the paper.  
+> * The script is designed to run on CPU (for quantized models) or GPU (for full‑precision models).  
+> * The code is intentionally lightweight and contains only the core components needed to reproduce the paper’s results.
+```
+
+FILE: reproduce.sh
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install system utilities
+apt-get update -y
+apt-get install -y python3-pip wget unzip
+
+# Install Python dependencies
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# Run the main script
+python src/main.py
+```
+
+FILE: requirements.txt
+```text
+torch>=2.0
+torchvision>=0.15
+timm>=0.9
+pycma>=0.17
+tqdm>=4.66
+numpy>=1.22
+```

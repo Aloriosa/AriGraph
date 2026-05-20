@@ -1,0 +1,35 @@
+#!/usr/bin/env python
+import torch
+import json
+import numpy as np
+import os
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from src.utils import set_seed, load_gpt2_model
+from tqdm.auto import tqdm
+
+set_seed(42)
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Load fine‑tuned model
+tokenizer = AutoTokenizer.from_pretrained("models/gpt2_dpo")
+model = AutoModelForCausalLM.from_pretrained("models/gpt2_dpo").to(DEVICE)
+model.eval()
+
+# Load toxic vector indices
+tok_vector_info = json.load(open("probe/tok_vectors.json", "r"))
+toxic_indices = [(info["layer"], info["col"]) for info in tok_vector_info]
+
+# Scale key vectors (c_fc weight columns) by 10 ×
+for layer_idx, col_idx in toxic_indices:
+    block = model.transformer.h[layer_idx]
+    # c_fc weight shape (intermediate, hidden)
+    # We need to scale the row in c_fc corresponding to this col (since
+    # key vector is from c_fc)
+    with torch.no_grad():
+        block.mlp.c_fc.weight.data[col_idx] *= 10.0
+
+# Save the un‑aligned model
+os.makedirs("models/unaligned", exist_ok=True)
+model.save_pretrained("models/unaligned")
+tokenizer.save_pretrained("models/unaligned")
+print("Un‑aligned model saved to models/unaligned")

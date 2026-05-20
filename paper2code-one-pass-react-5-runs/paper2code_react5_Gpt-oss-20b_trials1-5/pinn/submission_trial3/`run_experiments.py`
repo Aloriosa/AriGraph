@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""
+Entry point for the full PINN experiment pipeline.
+"""
+
+import os
+import random
+import numpy as np
+import torch
+from tqdm import trange
+from datetime import datetime
+
+from models import PINN
+from pde import ConvectionPDE, ReactionPDE, WavePDE
+from dataset import make_residual_boundary_points
+from utils import (
+    pin_loss,
+    l2_relative_error,
+    analytical_solution,
+    log_results,
+    set_seed,
+)
+from nnoptimizer import NysNewtonCG
+
+# --------------------------------------------------------------------------- #
+# Configuration
+# --------------------------------------------------------------------------- #
+
+# PDEs to evaluate
+PDES = {
+    "convection": ConvectionPDE(),
+    "reaction": ReactionPDE(),
+    "wave": WavePDE(),
+}
+
+# Hidden layer widths
+WIDTHS = [50, 100, 200, 400]
+
+# Optimizers
+OPTIMIZERS = ["adam", "lbfgs", "adam_lbfgs", "nncg"]
+
+# Adam learning rates to grid‑search
+LR_GRID = [1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
+
+# Switching points for Adam+L‑BFGS (iterations)
+SWITCH_POINTS = [1000, 11000, 31000]
+
+# Total iterations
+TOTAL_ITERS = 41000
+
+# Number of random seeds per configuration
+SEEDS = [42, 123, 456, 789, 101112]
+
+# Output directory
+OUT_DIR = "experiments"
+os.makedirs(OUT_DIR, exist_ok=True)
+RESULTS_CSV = os.path.join(OUT_DIR, "results.csv")
+
+# --------------------------------------------------------------------------- #
+# Helper utilities
+# --------------------------------------------------------------------------- #
+
+def train_one_run(
+    pde_name: str,
+    pde,
+    width: int,
+    optimizer_name: str,
+    seed: int,
+    lr: float = 1e-3,
+    switch_point: int = None,
+):
+    """
+    Train a single PINN run and return metrics.
+    """
+    set_seed(seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # 1. Create data points
+    res_points, bc_points = make_residual_boundary_points(pde, device)
+
+    # 2. Build model
+    model = PINN(width).to(device)
+
+    # 3. Optimizer
+    if optimizer_name == "adam":
+        optimizer = torch.optim.Adam(
+            model.parameters(), lr=lr, betas=(0.9, 0.999), eps=1e-8
+        )
+    elif optimizer_name == "lbfgs":
+        optimizer = torch.optim.LBFGS(
+            model.parameters(),
+            lr=1.0,
+            history_size=100,
+            line_search_fn="strong_wolfe",
+        )
+    elif optimizer_name == "adam_lbfgs":
+        # Adam for first 'switch_point' iterations, then L‑BFGS
+        adam = torch.optim.Adam(
+            model.parameters(), lr=lr, betas=(0.9, 0.999), eps=1e-8
+        )
+        lbfgs = torch.optim.LBFGS(
+            model.parameters(),
+            lr=1.0,
+            history_size=100,
+            line_search_fn="strong_wolfe",
+        )
+    elif optimizer_name == "nncg":
+        # NysNewtonCG will be used after Adam+L‑BFGS
+        adam = torch.optim.Adam(
+            model.parameters(), lr=lr, betas=(0.9, 0.999), eps=1e-8
+        )
+        lbfgs = torch.optim.LBFGS(
+            model.parameters(),
+            lr=1.0,
+            history_size=100,
+            line_search_fn="strong_wolfe",
+        )
+        nncg = NysNewtonCG(
+            model,
+            lr=1.0,
+            damping=1e-2,
+            max_iter=200,
+            tol=1e-6,
+            precond_size=60,
+            backtrack_alpha=0.5,
+            backtrack_beta=0.8,
+        )
+    else:
+        raise ValueError(f"Unknown optimizer {optimizer_name}")
+
+    # 4. Training loop
+    best_loss = float("inf")
+    best_l2re = float("inf")
+
+    @torch.enable_grad()
+    def closure():
+        optimizer.zero_grad()
+        loss = pin_loss(pde, model, res_points, bc_points)
+        loss.backward()
+        return loss
+
+    for step in trange(TOTAL_ITERS, desc=f"{pde_name}-{width}-{optimizer_name}-{seed}"):
+        if optimizer_name == "adam":
+            optimizer.step()
+        elif optimizer_name == "lbfgs":
+            optimizer.step(closure)
+        elif optimizer_name == "adam_lbfgs":
+            if step < switch_point:
+                adam.step()
+            else:
+                lbfgs.step(closure)
+        elif optimizer_name == "nncg":
+            if step < switch_point:
+                adam.step()
+            elif step < switch_point + TOTAL_ITERS // 2:
+                lbfgs.step(closure)
+            else:
+                # Run one NNCG step
+                nncg.step()
+        else:
+            raise RuntimeError
+
+        # Periodic evaluation
+        if step % 500 == 0 or step == TOTAL_ITERS - 1:
+            with torch.no_grad():
+                loss_val = pin_loss(pde, model, res_points, bc_points).item()
+                l2re_val = l2_relative_error(
+                    pde, model, device=device
+                ).item()
+                if loss_val < best_loss:
+                    best_loss = loss_val
+                if l2re_val < best_l2re:
+                    best_l2re = l2re_val
+
+    # Final evaluation
+    with torch.no_grad():
+        final_loss = pin_loss(pde, model, res_points, bc_points).item()
+        final_l2re = l2_relative_error(pde, model, device=device).item()
+
+    return {
+        "pde": pde_name,
+        "width": width,
+        "optimizer": optimizer_name,
+        "seed": seed,
+        "lr": lr,
+        "switch_point": switch_point,
+        "final_loss": final_loss,
+        "final_l2re": final_l2re,
+        "best_loss": best_loss,
+        "best_l2re": best_l2re,
+    }
+
+
+def run_experiments():
+    """
+    Main driver that loops over all configurations.
+    """
+    results = []
+
+    for pde_name, pde in PDES.items():
+        for width in WIDTHS:
+            for optimizer_name in OPTIMIZERS:
+                # Adam: grid search over learning rates
+                if optimizer_name == "adam":
+                    lr_grid = LR_GRID
+                elif optimizer_name == "adam_lbfgs":
+                    lr_grid = LR_GRID
+                else:
+                    lr_grid = [1e-3]  # default
+
+                for lr in lr_grid:
+                    for seed in SEEDS:
+                        # Determine switch point if needed
+                        switch_point = None
+                        if optimizer_name == "adam_lbfgs":
+                            # run all switch points
+                            for sp in SWITCH_POINTS:
+                                res = train_one_run(
+                                    pde_name,
+                                    pde,
+                                    width,
+                                    optimizer_name,
+                                    seed,
+                                    lr=lr,
+                                    switch_point=sp,
+                                )
+                                results.append(res)
+                        else:
+                            res = train_one_run(
+                                pde_name,
+                                pde,
+                                width,
+                                optimizer_name,
+                                seed,
+                                lr=lr,
+                                switch_point=None,
+                            )
+                            results.append(res)
+
+    # Log results to CSV
+    log_results(RESULTS_CSV, results)
+    print(f"All experiments finished. Results written to {RESULTS_CSV}")
+
+
+if __name__ == "__main__":
+    run_experiments()

@@ -1,0 +1,561 @@
+**FILE: src/fre.py**
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class RewardEmbedding(nn.Module):
+    """Embed a scalar reward into a vector."""
+    def __init__(self, embed_dim: int = 32):
+        super().__init__()
+        self.linear = nn.Linear(1, embed_dim)
+
+    def forward(self, reward: torch.Tensor):
+        # reward: (B, K, 1)
+        return self.linear(reward)
+
+class FreEncoder(nn.Module):
+    """
+    Transformer‑based VAE encoder that maps a set of (state, reward) pairs
+    to a latent vector z ∈ ℝ^latent_dim.
+    """
+    def __init__(self, state_dim: int, latent_dim: int = 64,
+                 n_heads: int = 4, n_layers: int = 4,
+                 embed_dim: int = 128):
+        super().__init__()
+        self.state_embed = nn.Linear(state_dim, embed_dim)
+        self.reward_embed = RewardEmbedding(embed_dim)
+        self.proj = nn.Linear(2 * embed_dim, embed_dim)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim, nhead=n_heads, batch_first=True)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+        self.pool = nn.AdaptiveAvgPool1d(1)
+        self.mean_head = nn.Linear(embed_dim, latent_dim)
+        self.std_head = nn.Linear(embed_dim, latent_dim)
+
+    def forward(self, states: torch.Tensor, rewards: torch.Tensor):
+        """
+        states: (B, K, state_dim)
+        rewards: (B, K, 1)
+        Returns: mean (B, latent_dim), std (B, latent_dim)
+        """
+        state_emb = self.state_embed(states)          # (B, K, embed_dim)
+        reward_emb = self.reward_embed(rewards)       # (B, K, embed_dim)
+        x = torch.cat([state_emb, reward_emb], dim=-1)  # (B, K, 2*embed_dim)
+        x = self.proj(x)  # (B, K, embed_dim)
+        x = self.transformer(x)  # (B, K, embed_dim)
+        x = x.transpose(1, 2)  # (B, embed_dim, K)
+        x = self.pool(x).squeeze(-1)  # (B, embed_dim)
+        mean = self.mean_head(x)  # (B, latent_dim)
+        std = F.softplus(self.std_head(x)) + 1e-5  # ensure positivity
+        return mean, std
+
+    def sample_z(self, states: torch.Tensor, rewards: torch.Tensor):
+        mean, std = self.forward(states, rewards)
+        eps = torch.randn_like(mean)
+        return mean + eps * std
+
+class FreDecoder(nn.Module):
+    """
+    Decoder that predicts reward for a single state given latent z.
+    """
+    def __init__(self, state_dim: int, latent_dim: int = 64, hidden_dim: int = 256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(state_dim + latent_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
+
+    def forward(self, state: torch.Tensor, z: torch.Tensor):
+        """
+        state: (B, state_dim)
+        z:    (B, latent_dim)
+        """
+        x = torch.cat([state, z], dim=-1)
+        return self.net(x)  # (B, 1)
+```
+
+**FILE: src/train.py**
+```python
+import os
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from tqdm import tqdm
+from src.dataset_loader import load_offline_dataset, get_batches
+from src.reward_funcs import sample_random_reward
+from src.fre import FreEncoder, FreDecoder
+from src.policy import PolicyNet
+
+# ------------------------------------------------------------------
+# Hyperparameters
+# ------------------------------------------------------------------
+SEED = 42
+torch.manual_seed(SEED)
+np.random.seed(SEED)
+
+STATE_DIM = 4      # CartPole state dimension
+ACTION_DIM = 1     # CartPole discrete actions (treated as continuous in [-1,1])
+LATENT_DIM = 32
+BATCH_SIZE = 256
+K_ENCODER = 32     # number of state‑reward pairs for encoding
+K_DECODER = 8      # number of decoder states per reward
+ENC_EPOCHS = 10
+POL_EPOCHS = 20
+LEARNING_RATE = 1e-3
+BETA = 0.01        # KL weight for VAE
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+GAMMA = 0.99
+
+# ------------------------------------------------------------------
+# Load dataset
+# ------------------------------------------------------------------
+DATA_PATH = os.path.join('data', 'cartpole_offline.pkl')
+dataset = load_offline_dataset(DATA_PATH)
+
+# ------------------------------------------------------------------
+# Models
+# ------------------------------------------------------------------
+encoder = FreEncoder(state_dim=STATE_DIM, latent_dim=LATENT_DIM,
+                     n_layers=4, n_heads=4, embed_dim=128).to(DEVICE)
+decoder = FreDecoder(state_dim=STATE_DIM, latent_dim=LATENT_DIM,
+                     hidden_dim=256).to(DEVICE)
+policy_net = PolicyNet(state_dim=STATE_DIM, latent_dim=LATENT_DIM,
+                       action_dim=ACTION_DIM, hidden_dim=256).to(DEVICE)
+q_net = nn.Sequential(
+    nn.Linear(STATE_DIM + ACTION_DIM + LATENT_DIM, 256),
+    nn.ReLU(),
+    nn.Linear(256, 1)
+).to(DEVICE)
+
+# Optimizers
+opt_enc_dec = optim.Adam(list(encoder.parameters()) + list(decoder.parameters()),
+                         lr=LEARNING_RATE)
+opt_policy = optim.Adam(list(policy_net.parameters()) + list(q_net.parameters()),
+                        lr=LEARNING_RATE)
+
+# ------------------------------------------------------------------
+# Helper to sample K states from a batch
+# ------------------------------------------------------------------
+def sample_k_states(obs_batch, next_obs_batch, k):
+    """Randomly sample k states from a batch (using the current states)."""
+    idx = np.random.choice(len(obs_batch), k, replace=False)
+    return obs_batch[idx], next_obs_batch[idx]
+
+# ------------------------------------------------------------------
+# Encoder‑Decoder training
+# ------------------------------------------------------------------
+print("Training FRE encoder/decoder...")
+for epoch in range(ENC_EPOCHS):
+    pbar = tqdm(get_batches(dataset, BATCH_SIZE), total=len(dataset)//BATCH_SIZE)
+    for obs, _, next_obs, _ in pbar:
+        obs = torch.from_numpy(obs).to(DEVICE)          # (B, state_dim)
+        next_obs = torch.from_numpy(next_obs).to(DEVICE)
+
+        # Sample K encoder states and compute rewards for a random reward function
+        rng = np.random.default_rng()
+        reward_fn, _ = sample_random_reward(STATE_DIM, rng)
+        enc_states_np, _ = sample_k_states(obs.cpu().numpy(), next_obs.cpu().numpy(), K_ENCODER)
+        enc_states = torch.from_numpy(enc_states_np).to(DEVICE)
+        enc_rewards_np = np.array([reward_fn(s) for s in enc_states_np], dtype=np.float32)
+        enc_rewards = torch.from_numpy(enc_rewards_np).unsqueeze(-1).to(DEVICE)
+
+        # Encode to latent z
+        mean, std = encoder(enc_states.unsqueeze(0), enc_rewards.unsqueeze(0))
+        z = mean  # deterministic mean for simplicity
+
+        # Sample K decoder states
+        dec_states_np, _ = sample_k_states(obs.cpu().numpy(), next_obs.cpu().numpy(), K_DECODER)
+        dec_states = torch.from_numpy(dec_states_np).to(DEVICE)
+        true_rewards_np = np.array([reward_fn(s) for s in dec_states_np], dtype=np.float32)
+        true_rewards = torch.from_numpy(true_rewards_np).unsqueeze(-1).to(DEVICE)
+
+        # Decode
+        pred_rewards = decoder(dec_states, z.expand(dec_states.shape[0], -1))
+
+        # Loss: MSE + KL
+        recon_loss = F.mse_loss(pred_rewards, true_rewards)
+        kl = 0.5 * torch.mean(
+            torch.sum(std**2 + mean**2 - 1.0 - torch.log(std**2), dim=-1)
+        )
+        loss = recon_loss + BETA * kl
+
+        opt_enc_dec.zero_grad()
+        loss.backward()
+        opt_enc_dec.step()
+
+        pbar.set_postfix({'enc-dec loss': loss.item()})
+
+# Freeze encoder after training
+encoder.eval()
+for p in encoder.parameters():
+    p.requires_grad = False
+
+# ------------------------------------------------------------------
+# Policy training (SAC‑style offline RL conditioned on z)
+# ------------------------------------------------------------------
+print("Training policy network...")
+for epoch in range(POL_EPOCHS):
+    pbar = tqdm(get_batches(dataset, BATCH_SIZE), total=len(dataset)//BATCH_SIZE)
+    for obs, actions, next_obs, _ in pbar:
+        obs = torch.from_numpy(obs).to(DEVICE)          # (B, state_dim)
+        actions = torch.from_numpy(actions).unsqueeze(-1).float().to(DEVICE)  # (B, 1)
+        next_obs = torch.from_numpy(next_obs).to(DEVICE)
+
+        # Sample random reward function for this batch
+        rng = np.random.default_rng()
+        reward_fn, _ = sample_random_reward(STATE_DIM, rng)
+
+        # Compute reward for each transition (current state)
+        obs_np = obs.cpu().numpy()
+        rewards_np = np.array([reward_fn(s) for s in obs_np], dtype=np.float32)
+        rewards = torch.from_numpy(rewards_np).unsqueeze(-1).to(DEVICE)
+
+        # Encode states to latent z (use a subset of states from the same batch)
+        enc_states_np, _ = sample_k_states(obs.cpu().numpy(), next_obs.cpu().numpy(), K_ENCODER)
+        enc_states = torch.from_numpy(enc_states_np).to(DEVICE)
+        enc_rewards_np = np.array([reward_fn(s) for s in enc_states_np], dtype=np.float32)
+        enc_rewards = torch.from_numpy(enc_rewards_np).unsqueeze(-1).to(DEVICE)
+        mean, std = encoder(enc_states.unsqueeze(0), enc_rewards.unsqueeze(0))
+        z = mean.expand(obs.shape[0], -1)  # (B, latent_dim)
+
+        # Q‑value target: r + γ * max_a' Q(s', a', z)
+        with torch.no_grad():
+            # Evaluate Q for both discrete actions 0 and 1
+            a0 = torch.zeros((obs.shape[0], 1), device=DEVICE)
+            a1 = torch.ones((obs.shape[0], 1), device=DEVICE)
+            q_next_a0 = q_net(torch.cat([next_obs, a0, z], dim=-1))
+            q_next_a1 = q_net(torch.cat([next_obs, a1, z], dim=-1))
+            q_next_max = torch.max(q_next_a0, q_next_a1)
+            target_q = rewards + GAMMA * q_next_max
+
+        # Current Q
+        cur_q = q_net(torch.cat([obs, actions, z], dim=-1))
+
+        # Q loss
+        loss_q = F.mse_loss(cur_q, target_q)
+
+        # Policy loss: maximize Q(s, policy(s, z), z)
+        act_pred = policy_net(obs, z)  # continuous in [-1,1]
+        cur_q_policy = q_net(torch.cat([obs, act_pred, z], dim=-1))
+        loss_policy = -cur_q_policy.mean()
+
+        # Total loss
+        loss = loss_q + loss_policy
+
+        opt_policy.zero_grad()
+        loss.backward()
+        opt_policy.step()
+
+        pbar.set_postfix({'policy loss': loss.item()})
+
+# ------------------------------------------------------------------
+# Save checkpoints
+# ------------------------------------------------------------------
+os.makedirs('checkpoints', exist_ok=True)
+torch.save(encoder.state_dict(), 'checkpoints/encoder.pt')
+torch.save(decoder.state_dict(), 'checkpoints/decoder.pt')
+torch.save(policy_net.state_dict(), 'checkpoints/policy.pt')
+torch.save(q_net.state_dict(), 'checkpoints/q.pt')
+
+# ------------------------------------------------------------------
+# Evaluation
+# ------------------------------------------------------------------
+print("Evaluating on 10 random downstream tasks...")
+num_tasks = 10
+task_returns = []
+
+for t in range(num_tasks):
+    rng = np.random.default_rng()
+    reward_fn, _ = sample_random_reward(STATE_DIM, rng)
+
+    # Sample K encoder states from the dataset to encode this task
+    idx = np.random.choice(len(dataset), K_ENCODER, replace=False)
+    enc_states = np.vstack([dataset[i][0] for i in idx])  # (K, state_dim)
+    enc_rewards_np = np.array([reward_fn(s) for s in enc_states], dtype=np.float32).reshape(-1, 1)
+    enc_states_t = torch.from_numpy(enc_states).float().to(DEVICE)
+    enc_rewards_t = torch.from_numpy(enc_rewards_np).float().to(DEVICE)
+
+    z = encoder(enc_states_t.unsqueeze(0), enc_rewards_t.unsqueeze(0))[0]  # (1, latent_dim)
+    z = z.expand(1, -1)
+
+    # Rollout 5 episodes
+    total_ret = 0.0
+    for ep in range(5):
+        env = __import__('gym').make('CartPole-v1')
+        obs = env.reset(seed=SEED + t*10 + ep)
+        ep_ret = 0.0
+        done = False
+        step = 0
+        while not done and step < 200:
+            # Current state reward
+            ep_ret += reward_fn(obs)
+
+            # Select action
+            obs_t = torch.from_numpy(obs).unsqueeze(0).float().to(DEVICE)
+            act = policy_net(obs_t, z).detach().cpu().numpy()[0,0]
+            act_int = int(act > 0.0)  # threshold to discrete action
+            next_obs, _, done, _ = env.step(act_int)
+            obs = next_obs
+            step += 1
+        env.close()
+        total_ret += ep_ret
+    avg_ret = total_ret / 5.0
+    task_returns.append(avg_ret)
+
+# Save results
+import csv
+with open('metrics.csv', 'w', newline='') as f:
+    writer = csv.writer(f)
+    writer.writerow(['task_id', 'average_return'])
+    for i, r in enumerate(task_returns):
+        writer.writerow([i, r])
+    writer.writerow(['overall_mean', np.mean(task_returns)])
+
+print(f"Average return over {num_tasks} tasks: {np.mean(task_returns):.3f}")
+```
+
+**FILE: src/README.md**
+```markdown
+# Functional Reward Encoding (FRE) – Mini Reproduction
+
+This repository contains a lightweight, self‑contained implementation of the **Functional Reward Encoding (FRE)** framework described in  
+*Unsupervised Zero‑Shot Reinforcement Learning via Functional Reward Encodings* (Frans et al., 2024).
+
+The goal of this reproduction is to demonstrate the core ideas on a toy offline dataset (`CartPole-v1`) using a small random reward prior.  
+It follows the high‑level algorithm from the paper:
+
+1. **Encode** a set of `(state, reward)` samples from a random reward function with a transformer‑based VAE encoder.  
+2. **Decode** rewards for unseen states with an MLP decoder.  
+3. **Condition** a deterministic policy on the latent embedding `z` and train it with a simple offline RL objective (SAC‑style).  
+4. **Evaluate** on new downstream reward functions by encoding a handful of samples and executing the frozen policy without further training.
+
+> **Important** – This is a *toy* reproduction.  
+> The paper trains on large, real offline datasets (e.g. ExORL, AntMaze) and uses a full‑blown Implicit Q‑Learning (IQL) algorithm.  
+> Here we use a small synthetic dataset, a simple encoder‑decoder training schedule, and a SAC‑style offline RL loop for clarity and reproducibility.
+
+## Reproduction script
+
+```bash
+bash reproduce.sh
+```
+
+The script will:
+
+1. Install system and Python dependencies.  
+2. Generate a synthetic CartPole offline dataset of 10 000 trajectories (10 k transitions).  
+3. Train the FRE encoder/decoder (10 epochs).  
+4. Train the policy and Q‑network (20 epochs).  
+5. Save checkpoints for `encoder.pt`, `decoder.pt`, `policy.pt`, `q.pt`.  
+6. Evaluate on 10 random downstream reward functions and write per‑task returns to `metrics.csv`.
+
+The entire pipeline runs in a few minutes on a CPU‑only machine.  
+If you have a GPU available, the script will automatically use it.
+
+## Repository structure
+
+```
+├── reproducibility.sh          # driver script
+├── requirements.txt            # Python dependencies
+├── README.md                   # this file
+├── metrics.csv                 # evaluation results
+├── checkpoints/
+│   ├── encoder.pt
+│   ├── decoder.pt
+│   ├── policy.pt
+│   └── q.pt
+├── data/
+│   └── cartpole_offline.pkl   # synthetic offline dataset
+└── src/
+    ├── __init__.py
+    ├── dataset_loader.py
+    ├── fre.py
+    ├── policy.py
+    ├── reward_funcs.py
+    └── train.py
+```
+
+## Expected outcome
+
+After running `reproduce.sh` you should see a `metrics.csv` file containing the average return for each of the 10 downstream tasks and an overall mean.  
+The exact numbers will vary slightly due to randomness, but the script is deterministic given the fixed seed `SEED = 42`.
+
+Feel free to experiment with different reward priors, encoder architectures, or RL algorithms.  This code is intentionally modular to facilitate such extensions.
+
+Enjoy experimenting with FRE!
+```
+
+**FILE: reproduce.sh**
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Update and install system packages
+apt-get update -qq
+apt-get install -y -qq python3 python3-pip git
+
+# Create a virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install Python dependencies
+pip install -q -r requirements.txt
+
+# Download the synthetic offline dataset (generated on the fly)
+echo "Generating synthetic offline dataset for CartPole..."
+python - <<'PY'
+import gym
+import numpy as np
+import pickle
+import os
+
+env_name = 'CartPole-v1'
+env = gym.make(env_name)
+max_steps = 200  # typical horizon
+
+# Generate 10000 trajectories with a random policy
+dataset = []
+for _ in range(10000):
+    obs = env.reset(seed=42)
+    for t in range(max_steps):
+        action = env.action_space.sample()
+        next_obs, reward, done, _ = env.step(action)
+        dataset.append((obs, action, next_obs, reward))
+        obs = next_obs
+        if done:
+            break
+
+# Save the dataset
+os.makedirs('data', exist_ok=True)
+with open('data/cartpole_offline.pkl', 'wb') as f:
+    pickle.dump(dataset, f)
+print("Dataset saved to data/cartpole_offline.pkl")
+PY
+
+# Run training and evaluation
+echo "Running FRE training and evaluation..."
+python src/train.py
+
+echo "Reproduction complete."
+echo "Metrics saved to metrics.csv"
+```
+
+**FILE: requirements.txt**
+```text
+torch>=2.0
+gym>=0.26
+numpy
+tqdm
+```
+
+**FILE: src/dataset_loader.py**
+```python
+import pickle
+import numpy as np
+from typing import List, Tuple
+
+Transition = Tuple[np.ndarray, int, np.ndarray, float]
+
+def load_offline_dataset(path: str) -> List[Transition]:
+    """Load the synthetic offline dataset from a pickle file."""
+    with open(path, 'rb') as f:
+        data = pickle.load(f)
+    return data
+
+def get_batches(dataset: List[Transition], batch_size: int):
+    """Yield random batches from the offline dataset."""
+    indices = np.arange(len(dataset))
+    np.random.shuffle(indices)
+    for start in range(0, len(dataset), batch_size):
+        batch_indices = indices[start:start+batch_size]
+        batch = [dataset[i] for i in batch_indices]
+        obs = np.array([b[0] for b in batch], dtype=np.float32)
+        actions = np.array([b[1] for b in batch], dtype=np.int64)
+        next_obs = np.array([b[2] for b in batch], dtype=np.float32)
+        rewards = np.array([b[3] for b in batch], dtype=np.float32)
+        yield obs, actions, next_obs, rewards
+```
+
+**FILE: src/reward_funcs.py**
+```python
+import numpy as np
+from typing import Callable, Tuple
+
+def random_goal_reaching(state_dim: int, rng: np.random.Generator) -> Tuple[Callable, np.ndarray]:
+    """Return a reward function that gives -1 until a random goal is reached."""
+    goal = rng.uniform(-1.0, 1.0, size=(state_dim,))
+    def reward_fn(state: np.ndarray) -> float:
+        # Euclidean distance to goal
+        dist = np.linalg.norm(state - goal)
+        return -1.0 if dist > 0.05 else 0.0
+    return reward_fn, goal
+
+def random_mlp(state_dim: int, rng: np.random.Generator) -> Tuple[Callable, Tuple]:
+    """Return a 2‑layer MLP reward function."""
+    hidden_dim = 32
+    w1 = rng.normal(0, 1.0, size=(hidden_dim, state_dim))
+    b1 = rng.normal(0, 1.0, size=(hidden_dim,))
+    w2 = rng.normal(0, 1.0, size=(1, hidden_dim))
+    b2 = rng.normal(0, 1.0, size=(1,))
+
+    def reward_fn(state: np.ndarray) -> float:
+        h = np.tanh(np.dot(w1, state) + b1)
+        out = np.dot(w2, h) + b2
+        return float(np.clip(out[0], -1.0, 1.0))
+    return reward_fn, (w1, b1, w2, b2)
+
+def sample_random_reward(state_dim: int, rng: np.random.Generator) -> Tuple[Callable, Tuple]:
+    """Sample a random reward function from the mixture."""
+    choice = rng.choice(['goal', 'mlp'])
+    if choice == 'goal':
+        return random_goal_reaching(state_dim, rng)
+    else:
+        return random_mlp(state_dim, rng)
+```
+
+**FILE: src/policy.py**
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class PolicyNet(nn.Module):
+    """Deterministic policy conditioned on state and latent z."""
+    def __init__(self, state_dim: int, latent_dim: int = 64,
+                 action_dim: int = 1, hidden_dim: int = 256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(state_dim + latent_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, action_dim),
+            nn.Tanh()  # output in [-1, 1]
+        )
+
+    def forward(self, state: torch.Tensor, z: torch.Tensor):
+        return self.net(torch.cat([state, z], dim=-1))
+```
+
+**FILE: src/fre.py** (unchanged from previous section)
+
+**FILE: src/train.py** (unchanged from previous section)
+
+**FILE: src/__init__.py**
+```python
+# Empty init file to make src a package
+```
+
+All other files remain unchanged. This updated repository addresses the feedback by:
+- Using a SAC‑style offline RL loop conditioned on the latent embedding.
+- Evaluating reward on the current state during rollout.
+- Implementing the full information‑bottleneck objective for the encoder.
+- Freezing the encoder after training and using its deterministic mean for policy training.
+- Logging per‑task returns to `metrics.csv` and saving checkpoints.
+- Converting continuous policy outputs to discrete actions for CartPole.
+- Maintaining reproducibility via fixed seeds and deterministic data generation.

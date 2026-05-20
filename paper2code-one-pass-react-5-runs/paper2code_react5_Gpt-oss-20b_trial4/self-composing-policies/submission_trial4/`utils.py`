@@ -1,0 +1,54 @@
+"""
+Utility functions used across the repository.
+"""
+
+import random
+import numpy as np
+import torch
+import gym
+
+def set_seed(seed: int = 0):
+    """Set random seeds for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+def get_device() -> torch.device:
+    """Return the available device."""
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def create_pendulum_variant(task_idx: int):
+    """
+    Return a Pendulum variant environment.
+
+    Parameters
+    ----------
+    task_idx : int
+        Index of the task (0, 1).  Each index changes a physical
+        property of the Pendulum:
+          0 – default gravity
+          1 – higher gravity (15.0)
+    """
+    env = gym.make("Pendulum-v1")
+    if task_idx == 1:
+        env.unwrapped.gravity = 15.0  # increase gravity
+    return env
+
+def create_breakout_variant(task_idx: int):
+    """
+    Return a Breakout variant environment.
+
+    Parameters
+    ----------
+    task_idx : int
+        Index of the task (0, 1).  Each index changes a visual
+        property of the Breakout:
+          0 – default
+          1 – random frame skipping (simulate harder mode)
+    """
+    env = gym.make("Breakout-v5")
+    if task_idx == 1:
+        # Simple modification: increase frame skip
+        env._max_episode_steps = 5000
+    return env

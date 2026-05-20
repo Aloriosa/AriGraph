@@ -1,107 +1,179 @@
-"""
-Ontology for the cookbook knowledge graph.
-Defines allowed relations, entity types, and validation/normalization helpers.
-"""
+"""Domain ontology for topology-friendly reproduction graphs."""
 
-# Pattern layer relations (pipelines, config, evaluation)
-PATTERN_RELATIONS = frozenset({
-    "step_1", "step_2", "step_3", "step_4", "step_5", "step_6", "step_7", "step_8", "step_9", "step_10",
-    "requires",
-    "typically_uses",
-    "has_config",
-    "evaluated_by",
-})
+from __future__ import annotations
 
-# Mapping layer: pattern -> hypernode (code implementation)
-# Also includes legacy linking relations from prompt_paper_code_linking
-MAPPING_RELATIONS = frozenset({
-    "implemented_in",
-    "configured_in",
-    "handles",
-    "executes",
-    "defined_in",
-})
+import re
+from typing import Dict, Tuple
 
-# Entity resolution: variant patterns
-ENTITY_RESOLUTION_RELATIONS = frozenset({
-    "variant_of",
-    "differs_by",
-    "alternative_impl",
-})
 
-# Implementation knowledge (paper extraction): hyperparameters, config, procedures, results
-IMPLEMENTATION_RELATIONS = frozenset({
-    "value", "type", "is_a", "has", "has_component", "uses", "includes",
-    "trained_on", "improves", "reduces", "increases", "maintains", "preserves",
-    "achieves", "causes", "combined_with", "combines", "introduces",
-    "solved_by", "caused_by", "prevents", "prunes", "keeps", "speeds_up",
-    "discards", "adjusts", "allows", "tunes", "removes", "shows", "have",
-    "stands_for", "adds", "integrate_with", "provides", "integrated_with",
-    "reaches", "pruned_by", "compared_to", "takes", "makes", "shares",
-    "does_not_provide", "fine_tuned_for", "incurs", "diminish",
-    "increase_training_efficiency", "increase_inference_efficiency",
-})
-
-ALLOWED_RELATIONS = (
-    PATTERN_RELATIONS | MAPPING_RELATIONS | ENTITY_RESOLUTION_RELATIONS | IMPLEMENTATION_RELATIONS
+NODE_TYPES = frozenset(
+    {
+        "module",
+        "algorithm_step",
+        "hyperparameter",
+        "schedule",
+        "metric",
+        "dataset",
+        "artifact",
+        "script",
+        "failure_mode",
+        "fix",
+        "symbol",
+        "unknown",
+    }
 )
 
-# Aliases for LLM output normalization (common variations -> canonical)
+RELATION_FAMILIES: Dict[str, str] = {
+    "part_of": "structure",
+    "has_component": "structure",
+    "uses": "dependency",
+    "requires": "dependency",
+    "depends_on": "dependency",
+    "configured_by": "configuration",
+    "has_config": "configuration",
+    "value": "configuration",
+    "precedes": "procedure",
+    "executes": "procedure",
+    "trained_on": "data",
+    "evaluated_by": "evaluation",
+    "achieves": "evaluation",
+    "produces": "artifact",
+    "consumes": "artifact",
+    "implemented_by": "mapping",
+    "implemented_in": "mapping",
+    "configured_in": "mapping",
+    "defined_in": "mapping",
+    "handles": "mapping",
+    "fails_on": "diagnostics",
+    "caused_by": "diagnostics",
+    "solved_by": "diagnostics",
+    "fixed_by": "diagnostics",
+    "improves": "performance",
+    "reduces": "performance",
+    "increases": "performance",
+    "maintains": "performance",
+    "preserves": "performance",
+}
+
+ALLOWED_RELATIONS = frozenset(RELATION_FAMILIES.keys())
+PATTERN_RELATIONS = frozenset(
+    rel for rel, family in RELATION_FAMILIES.items() if family in {"procedure", "dependency", "configuration", "evaluation"}
+)
+MAPPING_RELATIONS = frozenset(
+    rel for rel, family in RELATION_FAMILIES.items() if family == "mapping"
+)
+ENTITY_RESOLUTION_RELATIONS = frozenset({"part_of"})
+
 RELATION_ALIASES = {
-    "step 1": "step_1", "step1": "step_1",
-    "step 2": "step_2", "step2": "step_2",
-    "step 3": "step_3", "step3": "step_3",
-    "step 4": "step_4", "step4": "step_4",
-    "step 5": "step_5", "step5": "step_5",
-    "step 6": "step_6", "step6": "step_6",
-    "step 7": "step_7", "step7": "step_7",
-    "step 8": "step_8", "step8": "step_8",
-    "step 9": "step_9", "step9": "step_9",
-    "step 10": "step_10", "step10": "step_10",
-    "implemented in": "implemented_in",
-    "implemented_in": "implemented_in",
-    "typically uses": "typically_uses",
+    "step 1": "precedes",
+    "step1": "precedes",
+    "step_1": "precedes",
+    "step 2": "precedes",
+    "step2": "precedes",
+    "step_2": "precedes",
+    "step 3": "precedes",
+    "step3": "precedes",
+    "step_3": "precedes",
+    "typically uses": "uses",
     "has config": "has_config",
-    "evaluated by": "evaluated_by",
-    "variant of": "variant_of",
-    "differs by": "differs_by",
-    "alternative impl": "alternative_impl",
+    "implemented in": "implemented_in",
+    "implemented by": "implemented_by",
+    "variant of": "part_of",
+    "differs by": "configured_by",
+    "alternative impl": "implemented_by",
+    "increase_training_efficiency": "improves",
+    "increase_inference_efficiency": "improves",
+}
+
+ENTITY_ALIASES = {
+    "learning rate": "learning_rate",
+    "lr": "learning_rate",
+    "warmup steps": "warmup_steps",
+    "batch size": "batch_size",
+    "validation set": "val_split",
+    "top-k": "top_k",
+    "moe": "mixture_of_experts",
+}
+
+RELATION_TO_TYPE_HINTS: Dict[str, Tuple[str, str]] = {
+    "configured_by": ("module", "hyperparameter"),
+    "has_config": ("module", "hyperparameter"),
+    "value": ("hyperparameter", "artifact"),
+    "trained_on": ("module", "dataset"),
+    "evaluated_by": ("module", "metric"),
+    "implemented_in": ("module", "symbol"),
+    "implemented_by": ("module", "symbol"),
+    "defined_in": ("module", "symbol"),
+    "fails_on": ("module", "failure_mode"),
+    "fixed_by": ("failure_mode", "fix"),
 }
 
 
+def normalize_entity(entity: str) -> str:
+    if not entity or not isinstance(entity, str):
+        return ""
+    canonical = re.sub(r"\s+", " ", entity.strip().lower())
+    canonical = canonical.replace("-", "_").replace(" ", "_")
+    return ENTITY_ALIASES.get(canonical, canonical)
+
+
 def normalize_relation(rel: str) -> str:
-    """
-    Map LLM output to canonical relation string.
-    Returns normalized relation; if not in aliases, lowercases and replaces spaces with underscores.
-    """
+    """Map LLM output relation to a canonical ontology relation."""
     if not rel or not isinstance(rel, str):
         return ""
-    rel = rel.strip().lower()
-    canonical = RELATION_ALIASES.get(rel)
-    if canonical:
-        return canonical
-    # Generic normalization
-    normalized = rel.replace(" ", "_")
-    return normalized if normalized in ALLOWED_RELATIONS else rel
+    rel_norm = rel.strip().lower()
+    rel_norm = RELATION_ALIASES.get(rel_norm, rel_norm)
+    rel_norm = rel_norm.replace(" ", "_")
+    return rel_norm if rel_norm in ALLOWED_RELATIONS else rel_norm
+
+
+def infer_node_type(entity: str, relation: str = "", role: str = "subject") -> str:
+    ent = normalize_entity(entity)
+    rel = normalize_relation(relation)
+    if rel in RELATION_TO_TYPE_HINTS:
+        subj_hint, obj_hint = RELATION_TO_TYPE_HINTS[rel]
+        return subj_hint if role == "subject" else obj_hint
+
+    if any(tok in ent for tok in ("dataset", "corpus", "split")):
+        return "dataset"
+    if any(tok in ent for tok in ("loss", "metric", "accuracy", "bleu", "f1")):
+        return "metric"
+    if any(tok in ent for tok in ("lr", "learning_rate", "dropout", "batch_size", "epochs", "steps")):
+        return "hyperparameter"
+    if any(tok in ent for tok in ("script", "reproduce.sh", ".sh")):
+        return "script"
+    if any(tok in ent for tok in ("error", "failure", "nan", "oom")):
+        return "failure_mode"
+    if any(tok in ent for tok in ("fix", "clip", "stabilize")):
+        return "fix"
+    if any(tok in ent for tok in (".py", "::", "function", "method", "class")):
+        return "symbol"
+    return "module"
+
+
+def relation_family(relation: str) -> str:
+    rel = normalize_relation(relation)
+    return RELATION_FAMILIES.get(rel, "other")
 
 
 def validate_triplet(triplet) -> bool:
-    """
-    Check (subj, obj, rel) against ontology.
-    Triplet format: [subj, obj, {"label": rel}]
-    Returns True if valid, False otherwise.
-    """
+    """Check (subj, obj, rel) against ontology constraints."""
     if not triplet or len(triplet) != 3:
         return False
     subj, obj, rel_data = triplet
     rel = rel_data.get("label") if isinstance(rel_data, dict) else rel_data
     if not rel or not isinstance(rel, str):
         return False
+
     rel_norm = normalize_relation(rel)
     if rel_norm not in ALLOWED_RELATIONS:
         return False
-    if not subj or not obj:
+
+    subj_norm = normalize_entity(str(subj))
+    obj_norm = normalize_entity(str(obj))
+    if not subj_norm or not obj_norm:
         return False
-    subj_str = str(subj).strip() if subj else ""
-    obj_str = str(obj).strip() if obj else ""
-    return len(subj_str) > 0 and len(obj_str) > 0
+
+    subj_type = infer_node_type(subj_norm, rel_norm, role="subject")
+    obj_type = infer_node_type(obj_norm, rel_norm, role="object")
+    return subj_type in NODE_TYPES and obj_type in NODE_TYPES

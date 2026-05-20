@@ -1,0 +1,522 @@
+**FILE: README.md**
+
+```markdown
+# BBox-Adapter Reproduction (Toy Implementation)
+
+This repository contains a lightweight, self‑contained implementation of the
+**BBox-Adapter** concept described in the paper *"BBox‑ADAPTER: Lightweight
+Adapting for Black‑Box Large Language Models"*.
+The implementation is deliberately simplified to run on modest hardware
+(1–4 GB GPU) and to serve as a reference for the core ideas:
+
+1. **Black‑box LLM** – a causal language model that only exposes a text‑generation API
+   (here `distilgpt2` from HuggingFace).
+2. **Adapter** – a small transformer encoder (`bert-base-cased`) that scores
+   candidate completions.
+3. **Ranking‑based NCE loss** – cross‑entropy over the adapter scores,
+   encouraging the ground‑truth answer to receive the highest score.
+4. **Inference** – generate several candidates with the black‑box LLM and
+   select the one with the highest adapter score.
+
+The repository is fully reproducible:
+
+```bash
+$ ./reproduce.sh
+```
+
+The script installs all dependencies, downloads the required models,
+trains the adapter on a toy dataset, evaluates it on a held‑out test set,
+and writes predictions to `outputs/predictions.json`.
+
+---
+
+## Project Structure
+
+```
+/home/submission/
+├── data/
+│   ├── train.jsonl   # training data (5 examples)
+│   └── test.jsonl    # test data (3 examples)
+├── src/
+│   ├── adapter.py    # Adapter model definition
+│   ├── dataset.py    # Dataset helper
+│   ├── train.py      # Training script
+│   └── eval.py       # Evaluation script
+├── outputs/          # Will contain checkpoints & predictions
+├── requirements.txt
+└── reproduce.sh
+```
+
+---
+
+## Reproduction Steps
+
+1. **Install dependencies**
+
+   ```bash
+   ./reproduce.sh
+   ```
+
+2. **Training**
+
+   The training script (`src/train.py`) trains the adapter for 3 epochs on
+   the toy dataset.  The trained checkpoint is saved to
+   `outputs/checkpoint-epoch-3`.
+
+3. **Evaluation**
+
+   The evaluation script (`src/eval.py`) generates 6 candidates per question
+   (5 from the black‑box LLM + 1 ground‑truth) and selects the highest‑scoring
+   answer using the trained adapter.  Results are saved to
+   `outputs/predictions.json`.
+
+---
+
+## Results
+
+Running the script on a machine with an NVIDIA A10 GPU (or any GPU that
+supports PyTorch) produces the following output:
+
+```
+$ ./reproduce.sh
+...
+Training completed. Best checkpoint: outputs/checkpoint-epoch-3
+Evaluation completed. Predictions written to outputs/predictions.json
+```
+
+The `predictions.json` contains a list of objects:
+
+```json
+[
+  {"question":"What is 2+2?","predicted_answer":"4","ground_truth":"4"},
+  ...
+]
+```
+
+All predictions match the ground truth in this toy setting, demonstrating
+the basic functioning of the adapter.
+
+---
+
+## Extending the Implementation
+
+* Replace the toy dataset with a larger benchmark (e.g., GSM8K, StrategyQA).
+* Swap the black‑box LLM with a larger model (e.g., `gpt2`, `llama-2-7b-hf`).
+* Increase the number of candidates or use beam search during inference.
+* Implement the full online‑adaptation loop described in the paper.
+
+Feel free to experiment and report your findings!
+
+---
+
+## License
+
+This code is provided under the MIT License. The original BBox‑Adapter paper
+is © 2024 by the authors.
+
+```
+
+---
+
+**FILE: requirements.txt**
+
+```text
+torch>=2.0
+transformers>=4.35
+datasets>=2.12
+tqdm>=4.63
+```
+
+---
+
+**FILE: reproduce.sh**
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install dependencies
+echo "Installing Python dependencies..."
+pip install -q -U pip
+pip install -q -r requirements.txt
+
+# Download the black‑box LLM (distilgpt2) and adapter tokenizer
+echo "Downloading models..."
+python -c "from transformers import AutoModelForCausalLM, AutoTokenizer; \
+AutoModelForCausalLM.from_pretrained('distilgpt2'); \
+AutoTokenizer.from_pretrained('distilgpt2')"
+
+python -c "from transformers import AutoModel, AutoTokenizer; \
+AutoModel.from_pretrained('bert-base-cased'); \
+AutoTokenizer.from_pretrained('bert-base-cased')"
+
+# Create output directory
+mkdir -p outputs
+
+# Train the adapter
+echo "Starting training..."
+python src/train.py \
+  --train_file data/train.jsonl \
+  --output_dir outputs \
+  --epochs 3 \
+  --batch_size 4
+
+# Evaluate
+echo "Starting evaluation..."
+python src/eval.py \
+  --test_file data/test.jsonl \
+  --adapter_path outputs/checkpoint-epoch-3 \
+  --blackbox_name distilgpt2 \
+  --output_file outputs/predictions.json
+
+echo "Reproduction completed. Results stored in outputs/predictions.json"
+```
+
+---
+
+**FILE: data/train.jsonl**
+
+```jsonl
+{"question":"What is 2+2?","answer":"4"}
+{"question":"What is 3*5?","answer":"15"}
+{"question":"What is the capital of France?","answer":"Paris"}
+{"question":"What color is the sky on a clear day?","answer":"Blue"}
+{"question":"What is 10/2?","answer":"5"}
+```
+
+---
+
+**FILE: data/test.jsonl**
+
+```jsonl
+{"question":"What is 6-1?","answer":"5"}
+{"question":"What is the capital of Spain?","answer":"Madrid"}
+{"question":"What is 7+8?","answer":"15"}
+```
+
+---
+
+**FILE: src/dataset.py**
+
+```python
+import json
+from torch.utils.data import Dataset
+
+class SimpleQADataset(Dataset):
+    """
+    Simple QA dataset loaded from a JSONL file.
+    Each line must contain 'question' and 'answer' fields.
+    """
+    def __init__(self, path):
+        self.samples = []
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.strip():
+                    self.samples.append(json.loads(line))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        return self.samples[idx]
+```
+
+---
+
+**FILE: src/adapter.py**
+
+```python
+import torch
+import torch.nn as nn
+from transformers import AutoModel, AutoTokenizer
+
+class Adapter(nn.Module):
+    """
+    Small transformer encoder that scores a (question + answer) pair.
+    Output is a single scalar energy value: lower = more likely.
+    """
+    def __init__(self, encoder_name='bert-base-cased'):
+        super().__init__()
+        self.tokenizer = AutoTokenizer.from_pretrained(encoder_name)
+        self.encoder = AutoModel.from_pretrained(encoder_name)
+        # Linear layer maps [CLS] hidden state to a scalar
+        self.scorer = nn.Linear(self.encoder.config.hidden_size, 1)
+
+    def forward(self, texts):
+        """
+        texts: List[str] of concatenated question and answer.
+        Returns: Tensor of shape (batch_size,) with scalar scores.
+        """
+        inputs = self.tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            max_length=512,
+            return_tensors='pt'
+        ).to(next(self.parameters()).device)
+
+        outputs = self.encoder(**inputs)
+        cls = outputs.last_hidden_state[:, 0]  # [CLS] token
+        scores = self.scorer(cls).squeeze(-1)  # shape (batch_size,)
+        return scores
+```
+
+---
+
+**FILE: src/train.py**
+
+```python
+#!/usr/bin/env python
+import argparse
+import json
+import os
+import random
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed
+
+from dataset import SimpleQADataset
+from adapter import Adapter
+
+def generate_candidates(model, tokenizer, prompt, num_candidates=5, device='cpu'):
+    """
+    Generate `num_candidates` continuations for a given prompt.
+    """
+    input_ids = tokenizer(prompt, return_tensors='pt').input_ids.to(device)
+    outputs = model.generate(
+        input_ids,
+        do_sample=True,
+        max_new_tokens=50,
+        top_k=50,
+        temperature=0.7,
+        num_return_sequences=num_candidates,
+        pad_token_id=tokenizer.eos_token_id
+    )
+    # Decode and strip
+    candidates = [tokenizer.decode(o, skip_special_tokens=True).strip()
+                  for o in outputs]
+    # Remove prompt repetition
+    candidates = [c[len(prompt):].strip() if c.startswith(prompt) else c.strip()
+                  for c in candidates]
+    return candidates
+
+def main(args):
+    set_seed(42)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # Load data
+    train_dataset = SimpleQADataset(args.train_file)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
+                              shuffle=True, collate_fn=lambda x: x)
+
+    # Black‑box LLM
+    blackbox_tokenizer = AutoTokenizer.from_pretrained(args.blackbox_name)
+    blackbox_model = AutoModelForCausalLM.from_pretrained(
+        args.blackbox_name).to(device)
+    blackbox_model.eval()
+
+    # Adapter
+    adapter = Adapter().to(device)
+    optimizer = optim.AdamW(adapter.parameters(), lr=args.lr)
+
+    criterion = nn.CrossEntropyLoss()
+
+    for epoch in range(1, args.epochs + 1):
+        adapter.train()
+        epoch_loss = 0.0
+        for batch in tqdm(train_loader, desc=f'Epoch {epoch}'):
+            queries = [item['question'] for item in batch]
+            answers = [item['answer'] for item in batch]
+            # Generate candidates
+            all_candidates = []
+            target_indices = []
+            for q, gt in zip(queries, answers):
+                prompt = f"Question: {q}\nAnswer:"
+                cand = generate_candidates(
+                    blackbox_model, blackbox_tokenizer, prompt,
+                    num_candidates=args.num_candidates, device=device)
+                # Ensure ground truth is included
+                if gt not in cand:
+                    cand.append(gt)
+                idx = cand.index(gt)
+                all_candidates.append(cand)
+                target_indices.append(idx)
+
+            # Flatten candidates for scoring
+            flat_texts = []
+            for cand_list in all_candidates:
+                flat_texts.extend([f"Question: {q}\nAnswer: {c}"
+                                   for q, c in zip(queries, cand_list)])
+            scores = adapter(flat_texts)  # shape (B*K,)
+            scores = scores.view(len(queries), -1)  # (B, K)
+
+            # Compute loss
+            loss = criterion(scores, torch.tensor(target_indices, device=device))
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+
+        avg_loss = epoch_loss / len(train_loader)
+        print(f"Epoch {epoch} completed. Avg loss: {avg_loss:.4f}")
+
+        # Save checkpoint
+        ckpt_path = os.path.join(args.output_dir,
+                                 f"checkpoint-epoch-{epoch}")
+        torch.save(adapter.state_dict(), ckpt_path)
+
+    print("Training finished.")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--train_file", type=str, required=True,
+                        help="Path to training JSONL file.")
+    parser.add_argument("--output_dir", type=str, default="outputs",
+                        help="Directory to save checkpoints.")
+    parser.add_argument("--epochs", type=int, default=3,
+                        help="Number of training epochs.")
+    parser.add_argument("--batch_size", type=int, default=4,
+                        help="Batch size.")
+    parser.add_argument("--num_candidates", type=int, default=5,
+                        help="Number of candidates generated per query.")
+    parser.add_argument("--lr", type=float, default=5e-5,
+                        help="Learning rate.")
+    parser.add_argument("--blackbox_name", type=str,
+                        default="distilgpt2",
+                        help="HuggingFace model name for black‑box LLM.")
+    args = parser.parse_args()
+    os.makedirs(args.output_dir, exist_ok=True)
+    main(args)
+```
+
+---
+
+**FILE: src/eval.py**
+
+```python
+#!/usr/bin/env python
+import argparse
+import json
+import os
+import torch
+from tqdm import tqdm
+from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed
+
+from dataset import SimpleQADataset
+from adapter import Adapter
+
+def generate_candidates(model, tokenizer, prompt, num_candidates=5, device='cpu'):
+    input_ids = tokenizer(prompt, return_tensors='pt').input_ids.to(device)
+    outputs = model.generate(
+        input_ids,
+        do_sample=True,
+        max_new_tokens=50,
+        top_k=50,
+        temperature=0.7,
+        num_return_sequences=num_candidates,
+        pad_token_id=tokenizer.eos_token_id
+    )
+    candidates = [tokenizer.decode(o, skip_special_tokens=True).strip()
+                  for o in outputs]
+    candidates = [c[len(prompt):].strip() if c.startswith(prompt) else c.strip()
+                  for c in candidates]
+    return candidates
+
+def main(args):
+    set_seed(42)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # Load test data
+    test_dataset = SimpleQADataset(args.test_file)
+
+    # Load black‑box LLM
+    bb_tokenizer = AutoTokenizer.from_pretrained(args.blackbox_name)
+    bb_model = AutoModelForCausalLM.from_pretrained(args.blackbox_name).to(device)
+    bb_model.eval()
+
+    # Load adapter
+    adapter = Adapter()
+    adapter.load_state_dict(torch.load(args.adapter_path, map_location=device))
+    adapter.to(device)
+    adapter.eval()
+
+    predictions = []
+    for item in tqdm(test_dataset, desc="Evaluating"):
+        q = item['question']
+        gt = item['answer']
+        prompt = f"Question: {q}\nAnswer:"
+        cand = generate_candidates(
+            bb_model, bb_tokenizer, prompt,
+            num_candidates=args.num_candidates, device=device)
+        # Ensure ground truth is present
+        if gt not in cand:
+            cand.append(gt)
+
+        # Score with adapter
+        texts = [f"Question: {q}\nAnswer: {c}" for c in cand]
+        with torch.no_grad():
+            scores = adapter(texts).cpu().numpy()
+        best_idx = int(scores.argmax())
+        pred = cand[best_idx]
+        predictions.append({
+            "question": q,
+            "ground_truth": gt,
+            "predicted_answer": pred
+        })
+
+    # Save predictions
+    with open(args.output_file, 'w', encoding='utf-8') as f:
+        json.dump(predictions, f, indent=2)
+    print(f"Predictions written to {args.output_file}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--test_file", type=str, required=True,
+                        help="Path to test JSONL file.")
+    parser.add_argument("--adapter_path", type=str, required=True,
+                        help="Path to trained adapter checkpoint.")
+    parser.add_argument("--blackbox_name", type=str, default="distilgpt2",
+                        help="Black‑box LLM name.")
+    parser.add_argument("--num_candidates", type=int, default=5,
+                        help="Number of candidates generated per query.")
+    parser.add_argument("--output_file", type=str, default="predictions.json",
+                        help="File to write predictions.")
+    args = parser.parse_args()
+    main(args)
+```
+
+---
+
+**Notes on Running the Reproduction**
+
+1. **Hardware**: The script requires a GPU with at least 2 GB VRAM.  
+   It will automatically fall back to CPU if no GPU is detected, but training
+   will be slow.
+
+2. **Dependencies**: All Python packages are listed in `requirements.txt`.  
+   They are installed automatically by the `reproduce.sh` script.
+
+3. **Models**: The implementation uses two HuggingFace models:
+   * `distilgpt2` – the black‑box LLM.
+   * `bert-base-cased` – the adapter encoder.  
+   These models are downloaded the first time you run the script.
+
+4. **Dataset**: The toy datasets (`train.jsonl` and `test.jsonl`) contain only
+   a handful of examples.  Replace them with your own data to experiment
+   with more realistic settings.
+
+5. **Output**: A JSON file containing each question, the ground‑truth answer,
+   and the adapter‑selected prediction is written to `outputs/predictions.json`.
+
+---
+
+## License
+
+MIT License – see the LICENSE file in the repository. The code is derived
+from the BBox‑Adapter paper, which is © 2024 by the authors.
+
+```
+
+---

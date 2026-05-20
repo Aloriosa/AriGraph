@@ -1,0 +1,152 @@
+2026-03-14 16:14:45.552910 ======================================================================
+2026-03-14 16:14:45.553083 REACT BASELINE: Paper md -> Generate -> Observe -> Refine (loop)
+2026-03-14 16:14:45.553131 ======================================================================
+2026-03-14 16:14:45.553176 Paper: /data/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/rice/paper.md
+2026-03-14 16:14:45.553212 Log path: paper2code_react5_Gpt-oss-20b_trial5/rice
+2026-03-14 16:14:45.553248 Model: Openai/Gpt-oss-20b
+2026-03-14 16:14:45.553282 Max iterations: 5
+2026-03-14 16:14:45.553333 Run reproduce.sh: False
+2026-03-14 16:14:45.553412 Run LLM paper check: True
+2026-03-14 16:14:45.553445 
+2026-03-14 16:14:45.553479 Loading paper...
+2026-03-14 16:14:45.553884 Paper length: 106166 chars (using 106166 for prompt)
+2026-03-14 16:14:45.553942 
+2026-03-14 16:14:45.574193 --- Iteration 0: Initial generation ---
+2026-03-14 16:15:25.691880   Created: generated_reproduction.txt
+2026-03-14 16:15:25.691992 Generated repo at /data/home/asagirova/arigraph/paper2code_react5_Gpt-oss-20b_trial5/rice/submission (1 files)
+2026-03-14 16:15:25.692035 
+2026-03-14 16:15:25.692076 --- Iteration 1: Observe & Refine ---
+2026-03-14 16:15:43.013179 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**Missing / Incorrect / Partial – What the current repo does NOT (or does incorrectly) implement from the paper**
+
+| Status | Requirement from the paper | Comment |
+|--------|----------------------------|---------|
+| **MISSING** | Full implementation of the *StateMask* explanation method (step‑level attribution, critical‑state identification, objective function, reward bonus for “blinding”). | The repo only mentions a “mask network” but does not reproduce the StateMask algorithm or its improved objective. |
+| **MISSING** | Construction of the *mixed initial state distribution* (default initial states + identified critical states). | No code resets the environment to critical states or mixes them with the default distribution. |
+| **MISSING** | The *exploration step* that starts from the mixed initial states and uses an intrinsic reward derived from the explanation. | RND is used instead of the explanation‑based intrinsic bonus described in the paper. |
+| **MISSING** | Theoretical analysis / sub‑optimality bound implementation (distribution‑mismatch coefficient, advantage assumptions). | No code or tests for the theoretical guarantees. |
+| **MISSING** | Experiments on the four MuJoCo tasks and the four real‑world applications (cryptocurrency mining, cyber‑defense, autonomous driving, malware mutation). | Only a toy CartPole experiment is shown. |
+| **MISSING** | Baselines: JSRL, StateMask‑R, PPO++, and the original StateMask refining method. | No comparative training scripts or evaluation scripts for these baselines. |
+| **MISSING** | Exact hyper‑parameters from the paper (learning rates, batch sizes, rollout lengths, etc.). | The repo uses generic PPO hyper‑parameters that are not tied to the paper’s settings. |
+| **MISSING** | Pre‑training of the policy with the same algorithm and data as in the paper. | The repo trains a PPO policy from scratch on CartPole, not the pre‑trained policy used in RICE. |
+| **MISSING** | Evaluation protocol (average return, success rate, statistical significance). | Only a single run on CartPole is reported. |
+| **MISSING** | `reproduce.sh` that runs the full pipeline (pre‑train → explanation → refine → evaluate) and outputs the same metrics as the paper. | The script is only described in comments; no actual implementation is provided. |
+| **MISSING** | Logging, checkpointing, and reproducibility utilities (seeds, GPU/CPU handling). | Not present. |
+| **INCORRECT** | Use of Random Network Distillation (RND) as the intrinsic reward. | The paper proposes an explanation‑based intrinsic bonus, not RND. |
+| **INCORRECT** | The “mask network” is not tied to the StateMask objective or the new reward bonus. | It is a placeholder rather than the actual method. |
+| **PARTIAL** | The code contains a PPO training loop on CartPole. | This is a minimal demo but does not reflect the paper’s core algorithm or experimental setup. |
+
+**Conclusion**
+
+The current repository does **not** reproduce the core RICE algorithm, its explanation component, the mixed initial distribution, or the experimental evaluation described in the paper. Many key elements are missing or incorrectly implemented.  
+
+**ALL_OK**: *Reproduction appears complete.* – **No**.
+2026-03-14 16:15:43.013422 
+2026-03-14 16:15:43.013676 Generating refined code...
+2026-03-14 16:16:47.181618   Updated: generated_reproduction.txt
+2026-03-14 16:16:47.181704 
+2026-03-14 16:16:47.181757 --- Iteration 2: Observe & Refine ---
+2026-03-14 16:16:55.290835 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+**MISSING**  
+- Full MuJoCo and real‑world task data pipelines (cryptocurrency mining, cyber‑defense, autonomous driving, malware mutation).  
+- Evaluation protocol that compares RICE against StateMask‑R, JSRL, and other baselines as reported in the paper.  
+- `reproduce.sh` (or equivalent) that runs the entire pipeline end‑to‑end and produces the paper’s tables/figures.  
+- Explicit hyperparameter table matching the paper (learning rates, batch sizes, rollout lengths, etc.).  
+- Implementation of the theoretical sub‑optimality bound (no code for the analysis).  
+- Detailed mixed‑initial‑state distribution logic (combining default initial states with critical states).  
+- Proper RND intrinsic‑bonus integration (the code only mentions it).  
+- Training‑step counts, checkpointing strategy, and hardware specifications used in the experiments.
+
+**INCORRECT**  
+- Hyperparameters: the values used in the code (e.g., PPO learning rate, batch size) do not match those reported in the paper.  
+- StateMask explanation: the mask network is a placeholder and does not reproduce the exact objective or reward‑bonus formulation described in the paper.  
+- RND bonus: the intrinsic reward is added incorrectly (e.g., wrong scaling or missing normalization).
+
+**PARTIAL**  
+- Core RICE algorithm: the code sketches a roll‑in + exploration loop but does not fully implement the mixed‑state reset or the curriculum logic.  
+- Explanation network: a simple network is provided, but the step‑level attribution and critical‑state selection logic are incomplete.  
+- Mixed initial distribution: the code mixes default and critical states only in a toy way; the weighting scheme and sampling strategy are not fully aligned with the paper.  
+- Exploration step: only a generic RND bonus is added; the exploration policy update and curriculum schedule are not fully realized.
+
+**OK**  
+- Basic PPO training loop on CartPole‑v1.  
+- Placeholder mask network and simple evaluation of refined policy.  
+
+**Conclusion**  
+ALL_OK: Reproduction appears complete.
+2026-03-14 16:16:55.291039 
+2026-03-14 16:16:55.291168 Generating refined code...
+2026-03-14 16:18:03.455702   Updated: generated_reproduction.txt
+2026-03-14 16:18:03.455805 
+2026-03-14 16:18:03.455849 --- Iteration 3: Observe & Refine ---
+2026-03-14 16:18:06.305150 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core RICE algorithm implementation (roll‑in + exploration logic)  
+MISSING: StateMask explanation method (step‑level importance scoring)  
+MISSING: Construction of mixed initial state distribution (default + critical states)  
+MISSING: Exploration step that starts from the mixed initial states  
+MISSING: Hyperparameter definitions (learning rate, batch size, discount factor, etc.)  
+MISSING: Data / environment setup (MuJoCo, cryptocurrency mining, cyber‑defense, etc.)  
+MISSING: Evaluation protocol (metrics, training steps, checkpoints)  
+MISSING: Baseline comparisons (StateMask‑R, JSRL, PPO++)  
+MISSING: reproduce.sh or equivalent script to run the full training and evaluation pipeline  
+
+All critical components from the paper are absent in the provided code.
+2026-03-14 16:18:06.305308 
+2026-03-14 16:18:06.305532 Generating refined code...
+2026-03-14 16:19:37.284897   Updated: generated_reproduction.txt
+2026-03-14 16:19:37.284987 
+2026-03-14 16:19:37.285037 --- Iteration 4: Observe & Refine ---
+2026-03-14 16:19:40.206942 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING:  
+- Full implementation of the RICE algorithm (roll‑in with mixed initial state distribution, exploration step, and policy fine‑tuning).  
+- Implementation of the improved StateMask explanation method (objective reformulation, reward bonus).  
+- Hyperparameter configuration (learning rate, batch size, discount factor, number of training steps, etc.) as used in the paper’s experiments.  
+- Data/environment setup for the four MuJoCo games and the four real‑world applications (cryptocurrency mining, cyber defense, autonomous driving, malware mutation).  
+- Evaluation protocol (metrics, episode length, averaging over seeds, baseline comparisons to JSRL, StateMask‑R, etc.).  
+- Training loop that records checkpoints, logs, and reproduces the reported performance curves.  
+- A `reproduce.sh` (or equivalent) script that installs dependencies, runs the full training pipeline, and generates the paper’s figures/results.  
+
+INCORRECT:  
+- None (no relevant code is present).  
+
+PARTIAL:  
+- None (no partial implementation exists).  
+
+**ALL_OK**: Reproduction appears incomplete.
+2026-03-14 16:19:40.207101 
+2026-03-14 16:19:40.207213 Generating refined code...
+2026-03-14 16:20:18.814724   Updated: generated_reproduction.txt
+2026-03-14 16:20:18.814840 
+2026-03-14 16:20:18.814900 --- Iteration 5: Observe & Refine ---
+2026-03-14 16:20:20.899277 Feedback:
+Compile check: PASSED
+
+PAPER REPRODUCTION CHECK (missing/incorrect):
+MISSING: Core method/algorithm implementation (RICE algorithm)  
+MISSING: Hyperparameters (learning rate, batch size, etc.)  
+MISSING: Data setup (environment configuration, state/observation preprocessing)  
+MISSING: Evaluation metrics and protocol (performance metrics, baselines, statistical tests)  
+MISSING: Experimental setup details (hardware, training steps, checkpointing, random seeds)  
+MISSING: `reproduce.sh` or equivalent script to run the full pipeline and reproduce the paper’s results.
+2026-03-14 16:20:20.899440 
+2026-03-14 16:20:20.899708 Generating refined code...
+2026-03-14 16:21:09.283397   Updated: generated_reproduction.txt
+2026-03-14 16:21:09.283500 
+2026-03-14 16:21:09.283548 ======================================================================
+2026-03-14 16:21:09.283588 REACT BASELINE COMPLETE
+2026-03-14 16:21:09.283626 ======================================================================
+2026-03-14 16:21:09.283679 Total iterations: 6
+2026-03-14 16:21:09.283718 API tokens: 41002 completion, 195480 prompt
+2026-03-14 16:21:09.283754 Raw model response saved to: paper2code_react5_Gpt-oss-20b_trial5/rice/generated_code_response.txt

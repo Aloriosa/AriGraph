@@ -1,0 +1,414 @@
+**FILE: requirements.txt**  
+```text
+torch>=2.0
+transformers>=4.30
+datasets>=2.12
+tqdm>=4.65
+```
+
+---
+
+**FILE: cfg.py**  
+```python
+"""
+Simple implementation of Classifier‑Free Guidance (CFG) for
+autoregressive language models (e.g. GPT‑2, Pythia, LLaMA).
+Supports:
+  * vanilla CFG (γ = 1.0 → no guidance)
+  * negative prompting (γ > 0, negative_prompt supplied)
+  * top‑k / nucleus filtering
+"""
+
+import torch
+import torch.nn.functional as F
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+
+class CFGGenerator:
+    """
+    Minimal CFG generator.
+
+    Parameters
+    ----------
+    model_name : str
+        HuggingFace model identifier (e.g. "gpt2", "EleutherAI/gpt-neo-2.7B",
+        "meta-llama/Llama-2-7b-hf").
+    device : str | None
+        Device to run on.  If None, the code will automatically choose CUDA if
+        available.
+    """
+
+    def __init__(self, model_name: str = "gpt2", device: str | None = None):
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_name, use_fast=True
+        )
+        # Ensure the tokenizer has a BOS token for models that require it
+        if self.tokenizer.bos_token is None:
+            self.tokenizer.bos_token = self.tokenizer.eos_token or self.tokenizer.pad_token
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+        ).to(self.device)
+        self.model.eval()
+
+    # ------------------------------------------------------------------
+    # Helper methods
+    # ------------------------------------------------------------------
+    def _apply_filtering(
+        self,
+        logits: torch.Tensor,
+        top_k: int,
+        top_p: float,
+    ) -> torch.Tensor:
+        """
+        Apply top‑k and nucleus (top‑p) filtering.
+        """
+        if top_k > 0:
+            topk_vals, _ = torch.topk(logits, top_k, dim=-1)
+            min_val = topk_vals[:, -1].unsqueeze(-1)
+            logits = torch.where(logits < min_val, torch.full_like(logits, -float("inf")), logits)
+
+        if top_p > 0.0:
+            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+            cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+            sorted_indices_to_remove = cumulative_probs > top_p
+            # shift the indices to keep the first token
+            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+            sorted_indices_to_remove[..., 0] = False
+            indices_to_remove = sorted_indices[sorted_indices_to_remove]
+            logits[indices_to_remove] = -float("inf")
+
+        return logits
+
+    # ------------------------------------------------------------------
+    # Generation
+    # ------------------------------------------------------------------
+    def generate(
+        self,
+        prompt: str,
+        negative_prompt: str | None = None,
+        max_new_tokens: int = 50,
+        gamma: float = 1.0,
+        temperature: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 0.9,
+        seed: int | None = None,
+    ) -> str:
+        """
+        Generate text from the prompt using CFG sampling.
+
+        Parameters
+        ----------
+        prompt : str
+            Text prompt.
+        negative_prompt : str | None
+            Text used as the negative conditioning (¬c).  If provided,
+            the model will use the logits of `negative_prompt` as the base.
+        max_new_tokens : int
+            Number of tokens to generate.
+        gamma : float
+            Guidance weight (γ).  γ=1.0 → vanilla sampling.
+        temperature : float
+            Sampling temperature.
+        top_k : int
+            Top‑k filtering.  Set to 0 to disable.
+        top_p : float
+            Nucleus filtering.  Set to 0.0 to disable.
+        seed : int | None
+            Random seed for reproducibility.
+
+        Returns
+        -------
+        str
+            Generated text (prompt + continuation).
+        """
+        if seed is not None:
+            torch.manual_seed(seed)
+
+        # Tokenise the prompts
+        prompt_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.device)
+
+        if negative_prompt is not None:
+            neg_ids = self.tokenizer(negative_prompt, return_tensors="pt").input_ids.to(self.device)
+        else:
+            neg_ids = None
+
+        # Prepare the sequences that will be fed to the model
+        # `cond_ids` contains the prompt + generated tokens
+        cond_ids = prompt_ids.clone()
+        # `uncond_ids` contains the negative prompt or empty if none
+        uncond_ids = neg_ids.clone() if neg_ids is not None else torch.empty((1, 0), dtype=torch.long, device=self.device)
+
+        for _ in range(max_new_tokens):
+            with torch.no_grad():
+                # Conditional logits (prompt + generated so far)
+                cond_logits = self.model(cond_ids).logits[:, -1, :]
+
+                # Unconditional/negative logits
+                if uncond_ids.size(1) == 0:
+                    # If no negative prompt, use the model's prior (first token)
+                    uncond_logits = torch.zeros_like(cond_logits)
+                else:
+                    uncond_logits = self.model(uncond_ids).logits[:, -1, :]
+
+                # CFG re‑weighting
+                # new_logits = uncond_logits + γ * (cond_logits - uncond_logits)
+                new_logits = uncond_logits + gamma * (cond_logits - uncond_logits)
+                new_logits = new_logits / temperature
+                new_logits = self._apply_filtering(new_logits, top_k, top_p)
+
+                # Sampling
+                probs = F.softmax(new_logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+
+                # Update sequences
+                cond_ids = torch.cat((cond_ids, next_token), dim=1)
+                uncond_ids = torch.cat((uncond_ids, next_token), dim=1)
+
+        return self.tokenizer.decode(cond_ids[0], skip_special_tokens=True)
+
+    # ------------------------------------------------------------------
+    # Next‑token prediction (for evaluation)
+    # ------------------------------------------------------------------
+    def predict_next_token(
+        self,
+        context: str,
+        negative_prompt: str | None = None,
+        gamma: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 0.9,
+    ) -> int:
+        """
+        Return the most‑likely next token ID for the given context using CFG.
+        """
+        with torch.no_grad():
+            ctx_ids = self.tokenizer(context, return_tensors="pt").input_ids.to(self.device)
+
+            cond_logits = self.model(ctx_ids).logits[:, -1, :]
+
+            if negative_prompt is None:
+                uncond_logits = torch.zeros_like(cond_logits)
+            else:
+                neg_ids = self.tokenizer(negative_prompt, return_tensors="pt").input_ids.to(self.device)
+                uncond_logits = self.model(neg_ids).logits[:, -1, :]
+
+            new_logits = uncond_logits + gamma * (cond_logits - uncond_logits)
+            new_logits = self._apply_filtering(new_logits, top_k, top_p)
+
+            return torch.argmax(new_logits, dim=-1).item()
+```
+
+---
+
+**FILE: generate.py**  
+```python
+#!/usr/bin/env python3
+"""
+Demo script that shows CFG generation, negative prompting and a simple
+chain‑of‑thought style generation.
+"""
+
+import os
+import json
+from cfg import CFGGenerator
+
+# ------------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------------
+MODEL_NAME = "gpt2"  # change to "EleutherAI/gpt-neo-2.7B" or "meta-llama/Llama-2-7b-hf" if GPU is available
+OUTPUT_DIR = "outputs"
+GAMMA = 1.5
+TEMPERATURE = 0.9
+TOP_K = 0
+TOP_P = 0.95
+MAX_TOKENS = 60
+SEED = 42
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# ------------------------------------------------------------------
+# Prompts
+# ------------------------------------------------------------------
+PROMPTS = [
+    "Once upon a time, in a faraway land, there lived a",
+    "Translate the following to French: 'Good morning, how are you?'",
+    "Explain why the sky is blue in simple terms.",
+    # Chain‑of‑thought example
+    "What is 23 + 27? First show the addition steps, then the answer.",
+]
+
+# Negative prompt used for assistant‑style generation
+NEGATIVE_PROMPT = (
+    "The prompt below is a question to answer, a task to complete, or a conversation to respond to; "
+    "decide which and write an appropriate response."
+)
+
+# ------------------------------------------------------------------
+# Generation
+# ------------------------------------------------------------------
+def main():
+    gen = CFGGenerator(model_name=MODEL_NAME)
+
+    results = []
+
+    for idx, prompt in enumerate(PROMPTS, start=1):
+        # If the prompt looks like a chain‑of‑thought, we simply generate until an answer token
+        if "answer" in prompt.lower():
+            output = gen.generate(
+                prompt,
+                negative_prompt=NEGATIVE_PROMPT,
+                max_new_tokens=MAX_TOKENS,
+                gamma=GAMMA,
+                temperature=TEMPERATURE,
+                top_k=TOP_K,
+                top_p=TOP_P,
+                seed=SEED,
+            )
+        else:
+            output = gen.generate(
+                prompt,
+                negative_prompt=NEGATIVE_PROMPT,
+                max_new_tokens=MAX_TOKENS,
+                gamma=GAMMA,
+                temperature=TEMPERATURE,
+                top_k=TOP_K,
+                top_p=TOP_P,
+                seed=SEED,
+            )
+
+        results.append(
+            {
+                "prompt_id": idx,
+                "prompt": prompt,
+                "generated": output,
+            }
+        )
+        print(f"--- Prompt {idx} ---")
+        print(output)
+        print("\n")
+
+    # Save to JSON
+    out_path = os.path.join(OUTPUT_DIR, "generated_examples.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
+    print(f"Results saved to {out_path}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+**FILE: reproduce.sh**  
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# -------------------------------------------------------------
+# 1. Install requirements
+# -------------------------------------------------------------
+pip install -q -U pip
+pip install -q -r requirements.txt
+
+# -------------------------------------------------------------
+# 2. Run the demo generation script
+# -------------------------------------------------------------
+python generate.py
+```
+
+---
+
+**FILE: README.md**  
+```markdown
+# Reproduction of “Stay on topic with Classifier‑Free Guidance”
+
+This repository contains a minimal, self‑contained implementation of
+Classifier‑Free Guidance (CFG) for autoregressive language models
+(GPT‑2, Pythia, LLaMA) as described in the paper *“Stay on topic with
+Classifier‑Free Guidance”*.
+
+## Structure
+
+```
+├── cfg.py               # Core CFG implementation
+├── generate.py          # Demo script that shows CFG, negative prompting
+├── reproduce.sh         # Convenience script that installs deps and runs the demo
+├── requirements.txt     # Python dependencies
+└── README.md
+```
+
+## How to reproduce
+
+1. **Clone the repository** (or copy the files into a directory).
+
+2. **Run the reproduction script**:
+
+   ```bash
+   bash reproduce.sh
+   ```
+
+   This script will:
+   - Install the required Python packages.
+   - Load the default model (`gpt2`) from HuggingFace.
+   - Generate several examples using CFG with a guidance weight of 1.5
+     and a negative prompt that mimics an assistant‑style instruction.
+   - Store the generated examples in `outputs/generated_examples.json`.
+
+3. **Inspect the results**:
+
+   ```bash
+   cat outputs/generated_examples.json | jq .
+   ```
+
+   The JSON file contains the original prompt and the generated text.
+
+## Extending the Demo
+
+- **Change the model**: modify `MODEL_NAME` in `generate.py`.  
+  Options include `"EleutherAI/gpt-neo-2.7B"`, `"meta-llama/Llama-2-7b-hf"`,
+  or any model that supports causal language modelling.
+
+- **Adjust CFG parameters**: edit `GAMMA`, `TEMPERATURE`, `TOP_K`, `TOP_P`,
+  `MAX_TOKENS` in `generate.py`.
+
+- **Add more prompts**: append to the `PROMPTS` list.
+
+- **Negative prompting**: Replace `NEGATIVE_PROMPT` with your own instruction
+  or use `None` to disable it.
+
+## What is implemented
+
+- **CFG re‑weighting** in logit space:
+  ```
+  new_logits = unconditional_logits + γ * (conditional_logits - unconditional_logits)
+  ```
+- **Negative prompting** (CFG with a negative prompt `¬c`):
+  ```
+  new_logits = neg_logits + γ * (cond_logits - neg_logits)
+  ```
+- **Top‑k / nucleus filtering**.
+- **Simple chain‑of‑thought generation** (demo only).
+
+## Limitations
+
+- The script is a **demonstration**; it does not reproduce the full
+  experimental pipeline of the paper (benchmarks, metrics, human
+  evaluation, stacking with chain‑of‑thought or self‑consistency,
+  entropy analysis, etc.).
+
+- The models are loaded on demand; for large models you need a GPU with
+  sufficient VRAM.
+
+- Evaluation on the official benchmarks (LAMBADA, ARC, BoolQ, etc.) is
+  left as an exercise.  The `cfg.py` API can be used to build such
+  evaluation pipelines.
+
+## Acknowledgements
+
+The implementation follows the equations in the paper and uses the
+`transformers` library for model loading and tokenisation.
+```
+
+---
