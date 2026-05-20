@@ -140,8 +140,9 @@ def write_csv(
                 f"{continual_label}_prompt_tokens",
                 f"{continual_label}_completion_tokens",
                 f"{continual_label}_total_tokens",
-                "continual_minus_scratch_total_tokens",
-                "continual_div_scratch_total_tokens",
+                # Sign convention: more = better (positive = continual saves vs from-scratch).
+                "scratch_minus_continual_total_tokens",
+                "scratch_div_continual_total_tokens",
             ],
         )
         w.writeheader()
@@ -154,9 +155,10 @@ def write_csv(
 
             diff = None
             ratio = None
-            if s_total is not None and c_total is not None and s_total != 0:
-                diff = c_total - s_total
-                ratio = c_total / s_total
+            # Positive diff and ratio > 1 both mean "continual used fewer tokens than from-scratch".
+            if s_total is not None and c_total is not None and c_total != 0:
+                diff = s_total - c_total
+                ratio = s_total / c_total
 
             w.writerow(
                 {
@@ -168,8 +170,8 @@ def write_csv(
                     f"{continual_label}_prompt_tokens": (c.prompt_tokens if c else ""),
                     f"{continual_label}_completion_tokens": (c.completion_tokens if c else ""),
                     f"{continual_label}_total_tokens": (c_total if c_total is not None else ""),
-                    "continual_minus_scratch_total_tokens": (diff if diff is not None else ""),
-                    "continual_div_scratch_total_tokens": (f"{ratio:.4f}" if ratio is not None else ""),
+                    "scratch_minus_continual_total_tokens": (diff if diff is not None else ""),
+                    "scratch_div_continual_total_tokens": (f"{ratio:.4f}" if ratio is not None else ""),
                 }
             )
 
