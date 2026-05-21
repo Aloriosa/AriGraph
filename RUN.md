@@ -60,6 +60,8 @@ Note: `--generate-code` is declared `type=bool`, so `--generate-code false` does
 
 Embedding cache (default ON): triplet, entity-label, and observation embeddings are cached to a `<json>_emb.npz` sidecar so reloading a paper/memory graph does **no** re-embedding on a warm hit. First load of an un-cached graph still embeds (and writes the sidecar); subsequent loads restore it. Old triplets-only sidecars are auto-upgraded to the full format on first load. Disable with `--emb-cache false`.
 
+LLM per-call timeout (default 300s): each extraction/generation call to vLLM is bounded by `--llm-timeout-s`. Without it a stalled (queued on the shared GPUs) or repetition-looping call never raises, so the chunk-extraction retry loop can't fire and a single call blocks for many minutes. On timeout the call raises `APITimeoutError`, the retry loop catches it and retries. Loosen with `--llm-timeout-s 600` for legitimately long calls.
+
 ---
 
 ## 3. Continual reproduction

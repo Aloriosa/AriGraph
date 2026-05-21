@@ -936,10 +936,11 @@ max_paper_queries=25, code_snippet_len=5000):
 def run_reproduction_test(log, args, paper_path, device="cpu", log_path="",
                         generate_code=True, use_repo=True,
                         repo_dir=None, code_gen_variant="full", experiment_name=None,
-                        emb_cache=True):
+                        emb_cache=True, llm_timeout_s=300.0):
     """Main function to run reproduction-focused paper test.
     code_gen_variant: 'full' = paper + full expert graph; 'retrieval' = paper + retrieved expert snippets.
     experiment_name: if set, creates log_path/experiment_name/ for submission, code_generation, and log.
+    llm_timeout_s: per-call wall-clock ceiling; on timeout the call raises so the chunk retry loop fires early.
     """
 
     # Experiment path: when set, submission, code_generation, and log go to log_path/experiment_name/
@@ -977,6 +978,14 @@ def run_reproduction_test(log, args, paper_path, device="cpu", log_path="",
                                 api_key, log, base_url, device, type='mem')
     paper_graph.emb_cache = emb_cache
     mem_graph.emb_cache = emb_cache
+
+    # Bound per-call wall-clock. Without this a stalled (queued on the shared GPUs)
+    # or repetition-looping generation never raises, so the chunk-extraction retry
+    # loop below can't fire and a single call blocks for many minutes. With a timeout
+    # the call raises promptly and the existing retry kicks in early.
+    paper_graph.client = paper_graph.client.with_options(timeout=llm_timeout_s)
+    mem_graph.client = mem_graph.client.with_options(timeout=llm_timeout_s)
+    log(f"LLM per-call timeout: {llm_timeout_s}s")
 
     if os.path.exists(
         os.path.join(output_base, "paper_graph_data.json")) and os.path.exists(
@@ -1218,6 +1227,8 @@ def main():
                         help='Experiment name inside output_dir: creates output_dir/experiment/ with submission, code_generation, and log (default: none)')
     parser.add_argument('--emb-cache', dest='emb_cache', type=str2bool, default=True,
                         help='Cache triplet embeddings to a _emb.npz sidecar to skip re-embedding on reload (default: true). Disable with --emb-cache false.')
+    parser.add_argument('--llm-timeout-s', dest='llm_timeout_s', type=float, default=300.0,
+                        help='Per-call LLM wall-clock ceiling in seconds (default: 300). On timeout the call raises so the chunk-extraction retry loop fires early instead of blocking. Loosen with --llm-timeout-s 600.')
 
     args = parser.parse_args()
     paperbench_data_path = '/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/'
@@ -1247,6 +1258,7 @@ def main():
             code_gen_variant=args.code_gen_variant,
             experiment_name=args.experiment,
             emb_cache=args.emb_cache,
+            llm_timeout_s=args.llm_timeout_s,
         )
 
     except Exception as e:
