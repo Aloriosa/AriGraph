@@ -74,7 +74,9 @@ class PaperBench(PythonCodingEval):
  'bbox',
  'lbcs',
  'bam',
- 'ftrl'] = chz.field(
+ 'ftrl',
+ 'continual'
+ ] = chz.field(
         default="all",
         doc="Paper split to use. One of 'testing' (lca-on-the-line only), 'debug' (rice only), 'dev' (two papers), 'human' (papers used in human baseline), 'all' (full set)",
         # should match what is in experiments/splits/
