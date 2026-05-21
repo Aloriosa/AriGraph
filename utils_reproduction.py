@@ -507,8 +507,13 @@ def build_code_index(repo_dir, code_files, log=None):
 
 def _symbol_index_python(content: str, _rel_path: str) -> dict:
     """Build class/method hierarchy with line numbers for one Python file."""
-    tree = ast.parse(content)
-    
+    # A single malformed repo file must not abort the whole linking pass; the
+    # build_symbol_index_text consumer already handles this 'parse_error' kind.
+    try:
+        tree = ast.parse(content)
+    except (SyntaxError, ValueError):
+        return {"kind": "parse_error"}
+
     classes: dict = {}
     module_functions: list = []
 
@@ -673,7 +678,8 @@ def _symbol_role_tags(path, symbol):
     return tags or ["implementation"]
 
 
-_CODE_LOC_RE = re.compile(r"^(.+):(\d+)\s*$")
+# Accept 'path:NN' and 'path:NN-MM' (range); the start line is used.
+_CODE_LOC_RE = re.compile(r"^(.+):(\d+)(?:-\d+)?\s*$")
 
 
 def estimate_tokens(text: str, model: str = "o200k_harmony") -> int:
@@ -743,7 +749,17 @@ def snippet_from_file_line(repo_root, code_location: str, window: int = 48) -> d
     root = Path(repo_root)
     file_path = root / rel
     if not file_path.is_file():
-        return {"error": f"file not found: {rel}", "code": "", "path": rel, "line_start": 0, "line_end": 0}
+        # Path-prefix drift: the model often drops/alters the dir prefix (e.g. omits
+        # home/submission/). Fall back to a unique on-disk file whose path ends with rel,
+        # else a unique basename match. Only resolve when the match is unambiguous.
+        cands = [p for p in root.rglob(Path(rel).name) if str(p).endswith(rel)]
+        if not cands:
+            cands = [p for p in root.rglob(Path(rel).name) if p.is_file()]
+        if len(cands) == 1:
+            file_path = cands[0]
+            rel = str(file_path.relative_to(root))
+        else:
+            return {"error": f"file not found: {rel}", "code": "", "path": rel, "line_start": 0, "line_end": 0}
     content = read_file_safe(file_path)
     lines = content.splitlines()
     n = len(lines)

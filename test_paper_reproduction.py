@@ -303,14 +303,28 @@ def run_linking_pass_hypernodes(graph, code_files, log,
                 model=os.getenv("OPENAI_MODEL"))))
             #log(f"Chars left: {chars_left}")
             end = sym_start + chars_left
-            
+
             sym_chunk = symbol_index_full[sym_start:end]
             prompt = prmt.prompt_code_linking_symbol_index.format(
                 observation=observation,
                 numbered_triplets=numbered_triplets,
                 symbol_index=sym_chunk,
             )
-            log(f"Prompt tokens: {reprutil.estimate_tokens(prompt, model=os.getenv('OPENAI_MODEL'))}")
+            # The 3.8 chars/token guess underestimates code-dense text (~2 chars/token),
+            # so the char-sliced chunk can still exceed the model context. Shrink against the
+            # real token count (budget = max_seq_len, the served context) before sending;
+            # rescale by the measured ratio with a safety margin, never grow.
+            prompt_tokens = reprutil.estimate_tokens(prompt, model=os.getenv('OPENAI_MODEL'))
+            while prompt_tokens > max_seq_len and len(sym_chunk) > 0:
+                end = sym_start + int(len(sym_chunk) * (max_seq_len / prompt_tokens) * 0.95)
+                sym_chunk = symbol_index_full[sym_start:end]
+                prompt = prmt.prompt_code_linking_symbol_index.format(
+                    observation=observation,
+                    numbered_triplets=numbered_triplets,
+                    symbol_index=sym_chunk,
+                )
+                prompt_tokens = reprutil.estimate_tokens(prompt, model=os.getenv('OPENAI_MODEL'))
+            log(f"Prompt tokens: {prompt_tokens}")
 
             
             log(
@@ -477,11 +491,11 @@ def _parse_code_generator_output(response_text, repo_root):
         raw_path = file_match.group(1).strip()
         # Normalize: forward slashes, strip leading slashes
         raw_path = raw_path.replace("\\", "/").lstrip("/")
-        # Strip /home/submission/ prefix (common in **/path** format)
-        #if raw_path.startswith("home/submission/"):
-        #    raw_path = raw_path[len("home/submission/"):]
-        #elif raw_path.startswith("/home/submission/"):
-        #    raw_path = raw_path[len("/home/submission/"):]
+        # repo_root already IS the submission dir, but the model writes paths against the
+        # eval container's /home/submission/ root. Strip that prefix so files land directly
+        # under submission/ instead of double-nesting into submission/home/submission/.
+        if raw_path.startswith("home/submission/"):
+            raw_path = raw_path[len("home/submission/"):]
         if not raw_path:
             continue
         # Sanitize: avoid path traversal
