@@ -73,7 +73,7 @@ def _save_mem_graph(mem_graph, output_path: str, paper_slug: str, log) -> None:
 
     # T4: persist embedding cache so resume / next-paper load skips re-embedding.
     try:
-        tpr.save_triplet_embeddings(output_path, mem_graph.triplets_emb, log)
+        tpr.save_graph_embeddings(output_path, mem_graph, log)
     except Exception as e:
         log(f"T4: failed to save embedding cache (non-fatal): {e}")
 

@@ -58,7 +58,7 @@ python test_paper_reproduction.py --paper all-in-one --device cpu \
 
 Note: `--generate-code` is declared `type=bool`, so `--generate-code false` does **not** disable generation (`bool("false")` is `True`). Generation currently always runs. TODO: convert to an explicit `true/false` switch per the flag convention before relying on an off-switch.
 
-Embedding cache (default ON): triplet embeddings are cached to a `<json>_emb.npz` sidecar so reloading a paper/memory graph skips re-embedding. First load of an un-cached graph still embeds (and writes the sidecar); subsequent loads restore it. Disable with `--emb-cache false`. (Currently caches triplet embeddings only; entity-label and observation embeddings still recompute — see TODO.)
+Embedding cache (default ON): triplet, entity-label, and observation embeddings are cached to a `<json>_emb.npz` sidecar so reloading a paper/memory graph does **no** re-embedding on a warm hit. First load of an un-cached graph still embeds (and writes the sidecar); subsequent loads restore it. Old triplets-only sidecars are auto-upgraded to the full format on first load. Disable with `--emb-cache false`.
 
 ---
 

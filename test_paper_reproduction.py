@@ -49,52 +49,79 @@ def _emb_sidecar_path(json_path: str) -> str:
     return json_path + "_emb.npz"
 
 
-def _load_triplet_embeddings(json_path: str, log) -> dict:
-    """Load a `{triplet_str: np.ndarray}` cache produced by save_triplet_embeddings.
-
-    Returns {} if the sidecar is missing or unreadable. We never raise — a missing or
-    corrupt cache just means we fall back to re-embedding.
-    """
-    side = _emb_sidecar_path(json_path)
-    if not os.path.isfile(side):
-        return {}
-    try:
-        npz = np.load(side, allow_pickle=True)
-        keys = npz["keys"]
-        embs = npz["embs"]
-        if len(keys) != len(embs):
-            return {}
-        cache = {str(k): embs[i] for i, k in enumerate(keys)}
-        log(f"T4: restored {len(cache)} cached triplet embeddings from {side}")
-        return cache
-    except Exception as e:
-        log(f"T4: failed to read embedding cache at {side}: {e}; will re-embed.")
-        return {}
-
-
-def save_triplet_embeddings(json_path: str, triplets_emb: dict, log) -> None:
-    """Atomically persist the embedding cache next to the cumulative JSON."""
-    if not triplets_emb:
-        return
-    side = _emb_sidecar_path(json_path)
-    keys = list(triplets_emb.keys())
+def _emb_map_to_array(emb_map):
+    """Stack a {key: vector} map into (keys_array, embs_array); (None, None) if shapes differ."""
+    keys = list(emb_map.keys())
     arrs = []
     for k in keys:
-        v = triplets_emb[k]
+        v = emb_map[k]
         if hasattr(v, "cpu"):
             v = v.cpu().detach().numpy()
         arrs.append(np.asarray(v))
     try:
         embs = np.stack(arrs)
-    except ValueError as e:
-        log(f"T4: heterogeneous embedding shapes, skipping save: {e}")
+    except ValueError:
+        return None, None
+    return np.array(keys, dtype=object), embs
+
+
+def _load_graph_embeddings(json_path: str, log) -> dict:
+    """Load triplet/item/observation embedding caches from one sidecar.
+
+    Returns {'triplets':{}, 'items':{}, 'obs':{}}. Back-compatible with the old
+    triplets-only format (keys/embs). Missing or corrupt sidecar -> empty maps;
+    we never raise — a miss just means re-embedding.
+    """
+    out = {"triplets": {}, "items": {}, "obs": {}}
+    side = _emb_sidecar_path(json_path)
+    if not os.path.isfile(side):
+        return out
+    try:
+        npz = np.load(side, allow_pickle=True)
+
+        def grp(kk, ek):
+            if kk in npz.files and ek in npz.files and len(npz[kk]) == len(npz[ek]):
+                return {str(k): npz[ek][i] for i, k in enumerate(npz[kk])}
+            return {}
+
+        out["triplets"] = grp("trip_keys", "trip_embs") or grp("keys", "embs")  # old format
+        out["items"] = grp("item_keys", "item_embs")
+        out["obs"] = grp("obs_keys", "obs_embs")
+        log(f"T4: restored embeddings from {side} "
+            f"(triplets={len(out['triplets'])}, items={len(out['items'])}, obs={len(out['obs'])})")
+    except Exception as e:
+        log(f"T4: failed to read embedding cache at {side}: {e}; will re-embed.")
+    return out
+
+
+def save_graph_embeddings(json_path: str, graph, log) -> None:
+    """Atomically persist triplet, entity-label, and observation-key embeddings.
+
+    obs embeddings are the second element of each obs_episodic value ([text, embedding]).
+    """
+    trip = getattr(graph, "triplets_emb", {})
+    items = getattr(graph, "items_emb", {})
+    obs = {k: v[1] for k, v in getattr(graph, "obs_episodic", {}).items()
+           if isinstance(v, (list, tuple)) and len(v) > 1}
+    payload = {}
+    for name, m in (("trip", trip), ("item", items), ("obs", obs)):
+        if not m:
+            continue
+        keys, embs = _emb_map_to_array(m)
+        if keys is None:
+            log(f"T4: heterogeneous {name} embedding shapes, skipping {name} group.")
+            continue
+        payload[f"{name}_keys"] = keys
+        payload[f"{name}_embs"] = embs
+    if not payload:
         return
+    side = _emb_sidecar_path(json_path)
     tmp = side + ".tmp"
-    # Use a file-object so numpy doesn't auto-append ".npz" to our ".tmp" suffix.
+    # File-object so numpy doesn't auto-append ".npz" to our ".tmp" suffix.
     with open(tmp, "wb") as f:
-        np.savez_compressed(f, embs=embs, keys=np.array(keys, dtype=object))
+        np.savez_compressed(f, **payload)
     os.replace(tmp, side)
-    log(f"T4: saved {len(keys)} triplet embeddings to {side}")
+    log(f"T4: saved embeddings to {side} (triplets={len(trip)}, items={len(items)}, obs={len(obs)})")
 
 
 class ReproductionGraph(ContrieverGraph):
@@ -124,14 +151,14 @@ class ReproductionGraph(ContrieverGraph):
         self.emb_cache = True  # write/read triplet-embedding sidecars; toggled via --emb-cache
 
     
-    def _add_triplets_with_cached_embeddings(self, triplets, cached_emb):
-        """Like `add_triplets` but uses pre-computed triplet embeddings when available.
+    def _add_triplets_with_cached_embeddings(self, triplets, cached_emb, cached_items=None):
+        """Like `add_triplets` but reuses pre-computed triplet AND entity-label embeddings.
 
-        Items (subject/object label embeddings) are still recomputed because they are
-        keyed on entity labels, not full triplet strings, and the count is bounded by
-        unique entities (small relative to triplet count).
+        cached_items: {entity_label: embedding}; entities absent from it are re-embedded.
         """
-        re_embed_count = 0
+        cached_items = cached_items or {}
+        re_embed_trip = 0
+        re_embed_item = 0
         for triplet in triplets:
             if not isinstance(triplet, (list, tuple)) or len(triplet) < 3:
                 continue
@@ -146,13 +173,17 @@ class ReproductionGraph(ContrieverGraph):
                 self.triplets_emb[key] = cached_emb[key]
             else:
                 self.triplets_emb[key] = self.get_embedding_local(key)
-                re_embed_count += 1
-            if t[0] not in self.items_emb:
-                self.items_emb[t[0]] = self.get_embedding_local(t[0])
-            if t[1] not in self.items_emb:
-                self.items_emb[t[1]] = self.get_embedding_local(t[1])
-        if re_embed_count:
-            self._log(f"T4: {re_embed_count} triplets were not in cache; re-embedded those only.")
+                re_embed_trip += 1
+            for ent in (t[0], t[1]):
+                if ent in self.items_emb:
+                    continue
+                if ent in cached_items:
+                    self.items_emb[ent] = cached_items[ent]
+                else:
+                    self.items_emb[ent] = self.get_embedding_local(ent)
+                    re_embed_item += 1
+        if re_embed_trip or re_embed_item:
+            self._log(f"T4: re-embedded {re_embed_trip} triplets, {re_embed_item} items not in cache.")
     
     def add_triplets(self, triplets, ontology_validation=False):
         """Override to enforce ontology validation before adding."""
@@ -224,20 +255,27 @@ class ReproductionGraph(ContrieverGraph):
                 self.clear()
             
             # T4: if a sidecar embedding cache exists, hydrate directly (skip re-embed).
-            cached_emb = _load_triplet_embeddings(path, self._log)
-            if cached_emb:
-                self._add_triplets_with_cached_embeddings(triplets, cached_emb)
+            cache = _load_graph_embeddings(path, self._log)
+            if cache["triplets"]:
+                self._add_triplets_with_cached_embeddings(triplets, cache["triplets"], cache["items"])
             else:
                 self.add_triplets(triplets)
-                # Backfill the sidecar so the next load of this JSON skips re-embedding.
-                if getattr(self, "emb_cache", True):
-                    save_triplet_embeddings(path, self.triplets_emb, self._log)
             n = len(self.triplets)
-            obs_episodic = data.get("obs_episodic", [])               
+            obs_episodic = data.get("obs_episodic", [])
             if not obs_episodic:
                 self._log(f"No triplets found in {path}")
             else:
-                self.obs_episodic = {k: [v, self.retriever.embed(k)] for k, v in obs_episodic.items()}
+                # Reuse cached observation-key embeddings; embed only the misses.
+                cobs = cache["obs"]
+                self.obs_episodic = {
+                    k: [v, cobs[k] if k in cobs else self.retriever.embed(k)]
+                    for k, v in obs_episodic.items()
+                }
+            # Backfill / upgrade the sidecar when anything was missing (old format or first load).
+            if getattr(self, "emb_cache", True) and (
+                not cache["triplets"] or not cache["items"] or not cache["obs"]
+            ):
+                save_graph_embeddings(path, self, self._log)
             if path.endswith("mem_graph_data_with_code.json"):
                 triplet2code = data.get("triplet2code", {})
                 if not triplet2code:
@@ -1053,8 +1091,8 @@ def run_reproduction_test(log, args, paper_path, device="cpu", log_path="",
         # Persist embedding sidecars next to the freshly extracted graphs so the next
         # load (resume here, or continual reusing this paper graph) skips re-embedding.
         if emb_cache:
-            save_triplet_embeddings(os.path.join(output_base, "paper_graph_data.json"), paper_graph.triplets_emb, log)
-            save_triplet_embeddings(os.path.join(output_base, "mem_graph_data_with_code.json"), mem_graph.triplets_emb, log)
+            save_graph_embeddings(os.path.join(output_base, "paper_graph_data.json"), paper_graph, log)
+            save_graph_embeddings(os.path.join(output_base, "mem_graph_data_with_code.json"), mem_graph, log)
 
     #'''
     # =============================================================================
