@@ -84,6 +84,7 @@ Notes:
 - `--resume` auto-detects the last completed paper and continues from there.
 - Bootstrap paper choice is currently ad-hoc; see *Open design questions* in `CLAUDE.md`.
 - Triplet-embedding cache is ON by default (reuses `<json>_emb.npz` sidecars across papers/resumes); disable with `--emb-cache false`.
+- LLM per-call timeout (default 300s): bounds extraction (Phase B1) and linking (Phase B2) calls via `--llm-timeout-s`. On timeout the failing chunk is skipped and the run proceeds (no retry, no crash). Codegen (Phase A) is **not** bounded by this — it runs on a separate client. Loosen with `--llm-timeout-s 600`.
 
 ---
 

@@ -16,7 +16,7 @@ from graphs.contriever_graph import ContrieverGraph
 from utils.retriever_search_drafts import graph_retr_search
 from utils.utils import Logger, clear_triplet
 
-from openai import OpenAI
+from openai import OpenAI, APITimeoutError
 from dotenv import load_dotenv # you'll need to pip install python-dotenv
 
 load_dotenv()
@@ -384,7 +384,13 @@ def run_linking_pass_hypernodes(graph, code_files, log,
             )
 
             
-            response, _ = graph.generate(prompt, jsn=True, t=0.001)
+            # On timeout, skip this chunk's linking call and advance to the next chunk.
+            try:
+                response, _ = graph.generate(prompt, jsn=True, t=0.001)
+            except APITimeoutError:
+                log(f"  Linking call timed out at chars [{sym_start}:{end}]; skipping this chunk.")
+                sym_start = end
+                continue
             if response:
                 links = reprutil.parse_linking_json_response(response)
                 for link in links:

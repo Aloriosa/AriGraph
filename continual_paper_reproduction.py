@@ -38,6 +38,7 @@ from pathlib import Path
 from time import time
 
 from dotenv import load_dotenv
+from openai import APITimeoutError
 
 load_dotenv()
 
@@ -148,7 +149,13 @@ def append_theory_triplets_from_generated_code_strict(
                     observation=observation,
                     example=example_str,
                 )
-                response, tokens = mem_graph.generate(prompt, t=0.001)
+                # On timeout, skip this chunk and move on (no retry, no crash).
+                try:
+                    response, tokens = mem_graph.generate(prompt, t=0.001)
+                except APITimeoutError:
+                    log(f"  Code→triplets chunk {chunks_processed + 1}: timed out, skipping (file {rel_path})")
+                    chunks_processed += 1
+                    continue
                 mem_graph.completion_tokens += tokens["completion_tokens"]
                 mem_graph.prompt_tokens += tokens["prompt_tokens"]
 
@@ -308,7 +315,7 @@ def _log_retrieval_origins(mem_graph, paper_out: str, current_slug: str, log) ->
         )
 
 
-def _load_paper_graph(slug: str, paper_graph_json: str, model: str, api_key: str, base_url: str, log, device: str, emb_cache: bool = True):
+def _load_paper_graph(slug: str, paper_graph_json: str, model: str, api_key: str, base_url: str, log, device: str, emb_cache: bool = True, llm_timeout_s: float = 300.0):
     """Build an empty paper-type graph and load triplets from disk."""
     paper_graph = tpr.ReproductionGraph(
         model,
@@ -320,6 +327,7 @@ def _load_paper_graph(slug: str, paper_graph_json: str, model: str, api_key: str
         type="paper",
     )
     paper_graph.emb_cache = emb_cache
+    paper_graph.client = paper_graph.client.with_options(timeout=llm_timeout_s)
     if not os.path.isfile(paper_graph_json):
         raise FileNotFoundError(f"Missing paper graph for {slug}: {paper_graph_json}")
     paper_graph.load_triplets_from_json(paper_graph_json, clear_first=True)
@@ -342,6 +350,7 @@ def run_continual(
     resume: bool,
     log: Logger,
     emb_cache: bool = True,
+    llm_timeout_s: float = 300.0,
 ) -> None:
     if len(paper_slugs) < 1:
         raise ValueError("Need at least one paper slug (the bootstrap / first paper).")
@@ -362,6 +371,9 @@ def run_continual(
         type="mem",
     )
     mem_graph.emb_cache = emb_cache
+    # Bound per-call wall-clock so a stalled/looping LLM call raises instead of blocking for many minutes.
+    mem_graph.client = mem_graph.client.with_options(timeout=llm_timeout_s)
+    log(f"LLM per-call timeout: {llm_timeout_s}s (on timeout the failing unit is skipped)")
     # mem_graph.load_triplets_from_json(os.path.abspath(bootstrap_mem_json), clear_first=True)
     # log(f"Bootstrap theory graph from {bootstrap_mem_json} ({len(mem_graph.triplets)} triplets, {len(mem_graph.triplet2code)} code links)")
 
@@ -428,7 +440,7 @@ def run_continual(
         paper_out = os.path.join(output_root, slug)
         os.makedirs(paper_out, exist_ok=True)
 
-        paper_graph = _load_paper_graph(slug, paper_graph_path, model, api_key, base_url, log, device, emb_cache=emb_cache)
+        paper_graph = _load_paper_graph(slug, paper_graph_path, model, api_key, base_url, log, device, emb_cache=emb_cache, llm_timeout_s=llm_timeout_s)
  
         log("Phase A: retrieval + code generation")
         tpr.generate_code_from_graph_with_retrieval(
@@ -576,6 +588,14 @@ def main():
         default=True,
         help="Cache triplet embeddings to _emb.npz sidecars to skip re-embedding on load (default: true). Disable with --emb-cache false.",
     )
+    parser.add_argument(
+        "--llm-timeout-s",
+        dest="llm_timeout_s",
+        type=float,
+        default=300.0,
+        help="Per-call LLM wall-clock ceiling in seconds (default: 300). On timeout the failing unit is skipped "
+        "(B1 extraction chunk / B2 linking chunk) and the run proceeds. Loosen with --llm-timeout-s 600.",
+    )
     args = parser.parse_args()
 
     out = os.path.abspath(args.output_root)
@@ -597,6 +617,7 @@ def main():
             resume=args.resume,
             log=log,
             emb_cache=args.emb_cache,
+            llm_timeout_s=args.llm_timeout_s,
         )
     except Exception as e:
         log(f"Continual run failed: {e}")
