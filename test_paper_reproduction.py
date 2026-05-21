@@ -32,6 +32,16 @@ from topology_pipeline.retrieval import RetrievalConfig, retrieve_memory_cards
 from topology_pipeline.symbol_assets import build_symbol_assets_from_triplet_links
 
 
+def str2bool(v):
+    """Explicit two-way bool for CLI flags: --foo true / --foo false."""
+    s = str(v).strip().lower()
+    if s in ("true", "1", "yes", "y", "on"):
+        return True
+    if s in ("false", "0", "no", "n", "off"):
+        return False
+    raise argparse.ArgumentTypeError(f"expected true/false, got {v!r}")
+
+
 def _emb_sidecar_path(json_path: str) -> str:
     """Return the on-disk path for a JSON file's triplet-embedding cache sidecar."""
     if json_path.endswith(".json"):
@@ -111,6 +121,7 @@ class ReproductionGraph(ContrieverGraph):
         self.completion_tokens  = 0
         self.prompt_tokens  = 0
         self.triplet2code = {}
+        self.emb_cache = True  # write/read triplet-embedding sidecars; toggled via --emb-cache
 
     
     def _add_triplets_with_cached_embeddings(self, triplets, cached_emb):
@@ -218,6 +229,9 @@ class ReproductionGraph(ContrieverGraph):
                 self._add_triplets_with_cached_embeddings(triplets, cached_emb)
             else:
                 self.add_triplets(triplets)
+                # Backfill the sidecar so the next load of this JSON skips re-embedding.
+                if getattr(self, "emb_cache", True):
+                    save_triplet_embeddings(path, self.triplets_emb, self._log)
             n = len(self.triplets)
             obs_episodic = data.get("obs_episodic", [])               
             if not obs_episodic:
@@ -881,9 +895,10 @@ max_paper_queries=25, code_snippet_len=5000):
     }
 
 
-def run_reproduction_test(log, args, paper_path, device="cpu", log_path="", 
+def run_reproduction_test(log, args, paper_path, device="cpu", log_path="",
                         generate_code=True, use_repo=True,
-                        repo_dir=None, code_gen_variant="full", experiment_name=None):
+                        repo_dir=None, code_gen_variant="full", experiment_name=None,
+                        emb_cache=True):
     """Main function to run reproduction-focused paper test.
     code_gen_variant: 'full' = paper + full expert graph; 'retrieval' = paper + retrieved expert snippets.
     experiment_name: if set, creates log_path/experiment_name/ for submission, code_generation, and log.
@@ -919,10 +934,12 @@ def run_reproduction_test(log, args, paper_path, device="cpu", log_path="",
     paper_graph = ReproductionGraph(model, 
     "You are a helpful assistant specializing in research reproduction",
                             api_key, log, base_url, device, type='paper')
-    mem_graph = ReproductionGraph(model, 
+    mem_graph = ReproductionGraph(model,
     "You are a helpful assistant specializing in research replication",
                                 api_key, log, base_url, device, type='mem')
-    
+    paper_graph.emb_cache = emb_cache
+    mem_graph.emb_cache = emb_cache
+
     if os.path.exists(
         os.path.join(output_base, "paper_graph_data.json")) and os.path.exists(
             os.path.join(output_base, "mem_graph_data_with_code.json")):
@@ -1032,6 +1049,12 @@ def run_reproduction_test(log, args, paper_path, device="cpu", log_path="",
                 'triplets_paper': [[t[0], t[1], t[2]] for t in section_triplets_paper],
                 'triplets_mem': [[t[0], t[1], t[2]] for t in section_triplets_mem],
             })
+
+        # Persist embedding sidecars next to the freshly extracted graphs so the next
+        # load (resume here, or continual reusing this paper graph) skips re-embedding.
+        if emb_cache:
+            save_triplet_embeddings(os.path.join(output_base, "paper_graph_data.json"), paper_graph.triplets_emb, log)
+            save_triplet_embeddings(os.path.join(output_base, "mem_graph_data_with_code.json"), mem_graph.triplets_emb, log)
 
     #'''
     # =============================================================================
@@ -1155,6 +1178,8 @@ def main():
                         help='Code generation variant: full=paper+full expert graph, retrieval=paper+retrieved expert snippets (default: full)')
     parser.add_argument('--experiment', type=str, default=None,
                         help='Experiment name inside output_dir: creates output_dir/experiment/ with submission, code_generation, and log (default: none)')
+    parser.add_argument('--emb-cache', dest='emb_cache', type=str2bool, default=True,
+                        help='Cache triplet embeddings to a _emb.npz sidecar to skip re-embedding on reload (default: true). Disable with --emb-cache false.')
 
     args = parser.parse_args()
     paperbench_data_path = '/home/asagirova/arigraph/frontier-evals/project/paperbench/data/papers/'
@@ -1183,6 +1208,7 @@ def main():
             repo_dir=args.repo_dir,
             code_gen_variant=args.code_gen_variant,
             experiment_name=args.experiment,
+            emb_cache=args.emb_cache,
         )
 
     except Exception as e:

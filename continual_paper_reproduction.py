@@ -60,6 +60,7 @@ def _save_mem_graph(mem_graph, output_path: str, paper_slug: str, log) -> None:
         "triplets": [[t[0], t[1], t[2]] for t in mem_graph.triplets],
         "obs_episodic": {k: v[0] for k, v in mem_graph.obs_episodic.items()},
         "triplet2code": mem_graph.triplet2code,
+        "triplet_origin": getattr(mem_graph, "triplet_origin", {}),
         "stats": {
             "total_triplets": len(mem_graph.triplets),
             "prompt_tokens": mem_graph.prompt_tokens,
@@ -96,6 +97,7 @@ def append_theory_triplets_from_generated_code_strict(
     repo_root: str,
     log,
     *,
+    current_slug: str,
     max_chunk_chars: int = 10_000,
     max_chunks_total: int = 120,
 ) -> set[str]:
@@ -173,6 +175,10 @@ def append_theory_triplets_from_generated_code_strict(
                     continue
 
                 mem_graph.add_triplets(actually_new)
+                if not hasattr(mem_graph, "triplet_origin"):
+                    mem_graph.triplet_origin = {}
+                for t in actually_new:
+                    mem_graph.triplet_origin.setdefault(mem_graph.str(t), current_slug)
                 new_lines = [mem_graph.str(t) for t in actually_new]
                 obs_embedding = mem_graph.retriever.embed(observation)
                 mem_graph.obs_episodic[observation] = [new_lines, obs_embedding]
@@ -191,7 +197,118 @@ def append_theory_triplets_from_generated_code_strict(
     return new_observation_keys
 
 
-def _load_paper_graph(slug: str, paper_graph_json: str, model: str, api_key: str, base_url: str, log, device: str):
+def _log_retrieval_origins(mem_graph, paper_out: str, current_slug: str, log) -> None:
+    """Log originating paper for each retrieved mem card and persist enrichment.
+
+    Reads retrieval_selection.json + mem_graph_typed.json that
+    generate_code_from_graph_with_retrieval just wrote into paper_out.
+    Resolves each selected memory card's member triplets back to the raw
+    mem_graph triplet (by `triplet_{i:05d}` index), then to the origin slug
+    via `mem_graph.triplet_origin`. Rewrites retrieval_selection.json with
+    an `origin_papers` field per row.
+    """
+    sel_path = os.path.join(paper_out, "retrieval_selection.json")
+    typed_path = os.path.join(paper_out, "mem_graph_typed.json")
+    cards_path = os.path.join(paper_out, "mem_cards.json")
+    if not (os.path.isfile(sel_path) and os.path.isfile(typed_path) and os.path.isfile(cards_path)):
+        log("Retrieval origins: artifact(s) missing, skipping origin annotation.")
+        return
+
+    try:
+        with open(sel_path, "r", encoding="utf-8") as f:
+            sel_data = json.load(f)
+        with open(cards_path, "r", encoding="utf-8") as f:
+            cards_data = json.load(f)
+    except Exception as e:
+        log(f"Retrieval origins: failed to read artifacts ({e})")
+        return
+
+    origin_map = getattr(mem_graph, "triplet_origin", {}) or {}
+    triplet2code = getattr(mem_graph, "triplet2code", {}) or {}
+    mem_card_by_id = {c["id"]: c for c in cards_data.get("cards", [])}
+
+    def _idx_from_typed_id(tid: str) -> int | None:
+        try:
+            return int(tid.rsplit("_", 1)[-1])
+        except Exception:
+            return None
+
+    selection = sel_data.get("selection", [])
+    per_paper_counts: dict[str, int] = {}
+    retrieved_rows: list[dict] = []
+    seen_keys: set[str] = set()
+    n_with_code = 0
+    for row in selection:
+        mem_id = row.get("memory_card_id")
+        card = mem_card_by_id.get(mem_id, {})
+        origins: list[str] = []
+        for tid in card.get("member_triplet_ids", []):
+            i = _idx_from_typed_id(tid)
+            if i is None or i < 0 or i >= len(mem_graph.triplets):
+                continue
+            t = mem_graph.triplets[i]
+            key = mem_graph.str(t)
+            origin = origin_map.get(key)
+            if origin and origin not in origins:
+                origins.append(origin)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            link = triplet2code.get(key)
+            if link:
+                n_with_code += 1
+            retrieved_rows.append({
+                "memory_card_id": mem_id,
+                "paper_card_id": row.get("paper_card_id"),
+                "score": row.get("score"),
+                "triplet": [t[0], t[1], t[2]],
+                "triplet_str": key,
+                "origin_paper": origin,
+                "linked_code": link,
+            })
+        row["origin_papers"] = origins
+        for o in origins:
+            per_paper_counts[o] = per_paper_counts.get(o, 0) + 1
+
+    dump_path = os.path.join(paper_out, "retrieved_triplets_with_origin_and_code.json")
+    try:
+        with open(dump_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "current_paper": current_slug,
+                "total_retrieved_triplets": len(retrieved_rows),
+                "retrieved_triplets_with_code": n_with_code,
+                "rows": retrieved_rows,
+            }, f, indent=2)
+        log(
+            f"Saved retrieved triplets+origin+code dump to {dump_path} "
+            f"({len(retrieved_rows)} triplets, {n_with_code} with linked code)"
+        )
+    except Exception as e:
+        log(f"Retrieval origins: failed to write {dump_path} ({e})")
+
+    try:
+        with open(sel_path, "w", encoding="utf-8") as f:
+            json.dump(sel_data, f, indent=2)
+    except Exception as e:
+        log(f"Retrieval origins: failed to write annotated {sel_path} ({e})")
+
+    if not selection:
+        log(f"Retrieval origins for {current_slug!r}: 0 selected memory cards")
+        return
+
+    breakdown = ", ".join(f"{p}={n}" for p, n in sorted(per_paper_counts.items(), key=lambda x: -x[1]))
+    log(
+        f"Retrieval origins for {current_slug!r}: {len(selection)} selected mem cards; "
+        f"origin paper counts: {breakdown or '(none resolved)'}"
+    )
+    for row in selection[:20]:
+        log(
+            f"  mem_card={row.get('memory_card_id')} <- paper_card={row.get('paper_card_id')} "
+            f"score={row.get('score'):.3f} from={row.get('origin_papers') or ['?']}"
+        )
+
+
+def _load_paper_graph(slug: str, paper_graph_json: str, model: str, api_key: str, base_url: str, log, device: str, emb_cache: bool = True):
     """Build an empty paper-type graph and load triplets from disk."""
     paper_graph = tpr.ReproductionGraph(
         model,
@@ -202,6 +319,7 @@ def _load_paper_graph(slug: str, paper_graph_json: str, model: str, api_key: str
         device,
         type="paper",
     )
+    paper_graph.emb_cache = emb_cache
     if not os.path.isfile(paper_graph_json):
         raise FileNotFoundError(f"Missing paper graph for {slug}: {paper_graph_json}")
     paper_graph.load_triplets_from_json(paper_graph_json, clear_first=True)
@@ -223,6 +341,7 @@ def run_continual(
     max_chunks_total: int,
     resume: bool,
     log: Logger,
+    emb_cache: bool = True,
 ) -> None:
     if len(paper_slugs) < 1:
         raise ValueError("Need at least one paper slug (the bootstrap / first paper).")
@@ -242,6 +361,7 @@ def run_continual(
         device,
         type="mem",
     )
+    mem_graph.emb_cache = emb_cache
     # mem_graph.load_triplets_from_json(os.path.abspath(bootstrap_mem_json), clear_first=True)
     # log(f"Bootstrap theory graph from {bootstrap_mem_json} ({len(mem_graph.triplets)} triplets, {len(mem_graph.triplet2code)} code links)")
 
@@ -258,6 +378,24 @@ def run_continual(
     mem_graph.load_triplets_from_json(seed_path, clear_first=True)
     src_label = "resume seed" if resume_seed else "bootstrap"
     log(f"{src_label} theory graph from {seed_path} ({len(mem_graph.triplets)} triplets, {len(mem_graph.triplet2code)} code links)")
+
+    # Provenance map: triplet str-key -> originating paper slug.
+    mem_graph.triplet_origin = {}
+    try:
+        with open(seed_path, "r", encoding="utf-8") as f:
+            _seed_data = json.load(f)
+        saved_origin = _seed_data.get("triplet_origin") or {}
+    except Exception as e:
+        log(f"triplet_origin: failed to read sidecar from seed JSON ({e}); will tag all seed triplets with bootstrap slug")
+        saved_origin = {}
+    bootstrap_slug = paper_slugs[0]
+    for t in mem_graph.triplets:
+        key = mem_graph.str(t)
+        mem_graph.triplet_origin[key] = saved_origin.get(key, bootstrap_slug)
+    log(
+        f"triplet_origin: {len(mem_graph.triplet_origin)} entries "
+        f"({sum(1 for v in mem_graph.triplet_origin.values() if v == bootstrap_slug)} tagged as bootstrap {bootstrap_slug!r})"
+    )
     if completed_slugs:
         log(f"Resume: skipping {len(completed_slugs)} already-completed paper(s): {sorted(completed_slugs)}")
 
@@ -290,7 +428,7 @@ def run_continual(
         paper_out = os.path.join(output_root, slug)
         os.makedirs(paper_out, exist_ok=True)
 
-        paper_graph = _load_paper_graph(slug, paper_graph_path, model, api_key, base_url, log, device)
+        paper_graph = _load_paper_graph(slug, paper_graph_path, model, api_key, base_url, log, device, emb_cache=emb_cache)
  
         log("Phase A: retrieval + code generation")
         tpr.generate_code_from_graph_with_retrieval(
@@ -298,9 +436,10 @@ def run_continual(
             paper_graph=paper_graph,
             log=log,
             output_dir=paper_out,
-            graph_base_dir=paper_out, 
+            graph_base_dir=paper_out,
             retrieval_topk=3,
         )
+        _log_retrieval_origins(mem_graph, paper_out, slug, log)
 
         repo_root = os.path.join(paper_out, "submission")
         new_code_obs_keys: set[str] | None = None
@@ -318,6 +457,7 @@ def run_continual(
                         mem_graph,
                         repo_root,
                         log,
+                        current_slug=slug,
                         max_chunk_chars=max_chunk_chars,
                         max_chunks_total=max_chunks_total,
                     )
@@ -429,6 +569,13 @@ def main():
         help="Resume: load mem_graph_latest.json from --output-root (if present) instead of --bootstrap-mem-json, "
         "and skip any slug whose mem_graph_after_{slug}.json already exists.",
     )
+    parser.add_argument(
+        "--emb-cache",
+        dest="emb_cache",
+        type=tpr.str2bool,
+        default=True,
+        help="Cache triplet embeddings to _emb.npz sidecars to skip re-embedding on load (default: true). Disable with --emb-cache false.",
+    )
     args = parser.parse_args()
 
     out = os.path.abspath(args.output_root)
@@ -449,6 +596,7 @@ def main():
             max_chunks_total=args.max_code_chunks_total,
             resume=args.resume,
             log=log,
+            emb_cache=args.emb_cache,
         )
     except Exception as e:
         log(f"Continual run failed: {e}")

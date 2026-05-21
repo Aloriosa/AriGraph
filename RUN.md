@@ -29,7 +29,11 @@ Notes:
 
 ## 2. From-scratch reproduction
 
-Run single-paper reproduction (from-scratch baseline) over a list of papers. Outputs land under `runs_from_scratch-wen36/<paper>/`.
+Run single-paper reproduction (from-scratch baseline) over a list of papers. Three phases run in order: triplet extraction → code→triplet linking → code generation. Outputs (graphs, `submission/`, log) land under `<log-path>/<paper>/`.
+
+Resume behaviour (no extra flags): if `<log-path>/<paper>/paper_graph_data.json` and `mem_graph_data_with_code.json` already exist, extraction is **skipped** and the loaded graphs are reused; linking runs only when `triplet2code` is still empty; generation always runs. So re-running the same command resumes at linking → generation.
+
+`--repo-dir` points at the **original authors' repo** (from-scratch links triplets to that repo). `--use-repo` is the alternative that clones the URL from the paper's `blacklist.txt`; don't pass both.
 
 ```bash
 for pp in adaptive-pruning pinn fre mechanistic-understanding bridging-data-gaps \
@@ -39,18 +43,22 @@ for pp in adaptive-pruning pinn fre mechanistic-understanding bridging-data-gaps
           robust-clip what-will-my-model-forget lbcs bam ftrl \
           self-expansion semantic-self-consistency; do
   python test_paper_reproduction.py --paper "$pp" --device cpu \
-    --log-path runs_from_scratch-wen36 --use-repo \
-    --paperbench-root frontier-evals/project/paperbench/data/papers
+    --log-path rewritten-retrieval_generation-obs-by-codebase-qwen3-next-80b-ff8 \
+    --repo-dir /home/asagirova/arigraph/cookbook_per_section_short_triplets_general_prompt_with_code/"$pp"/repo
 done
 ```
 
-Single paper:
+Single paper (e.g. resume all-in-one at linking → generation after its graphs are already on disk):
 
 ```bash
-python test_paper_reproduction.py --paper adaptive-pruning --device cpu \
-  --log-path runs_from_scratch-wen36 --use-repo \
-  --paperbench-root frontier-evals/project/paperbench/data/papers
+python test_paper_reproduction.py --paper all-in-one --device cpu \
+  --log-path rewritten-retrieval_generation-obs-by-codebase-qwen3-next-80b-ff8 \
+  --repo-dir /home/asagirova/arigraph/cookbook_per_section_short_triplets_general_prompt_with_code/all-in-one/repo
 ```
+
+Note: `--generate-code` is declared `type=bool`, so `--generate-code false` does **not** disable generation (`bool("false")` is `True`). Generation currently always runs. TODO: convert to an explicit `true/false` switch per the flag convention before relying on an off-switch.
+
+Embedding cache (default ON): triplet embeddings are cached to a `<json>_emb.npz` sidecar so reloading a paper/memory graph skips re-embedding. First load of an un-cached graph still embeds (and writes the sidecar); subsequent loads restore it. Disable with `--emb-cache false`. (Currently caches triplet embeddings only; entity-label and observation embeddings still recompute — see TODO.)
 
 ---
 
@@ -73,6 +81,7 @@ python continual_paper_reproduction.py --resume \
 Notes:
 - `--resume` auto-detects the last completed paper and continues from there.
 - Bootstrap paper choice is currently ad-hoc; see *Open design questions* in `CLAUDE.md`.
+- Triplet-embedding cache is ON by default (reuses `<json>_emb.npz` sidecars across papers/resumes); disable with `--emb-cache false`.
 
 ---
 
@@ -132,4 +141,5 @@ python /home/asagirova/arigraph/compare_codegen_token_budgets.py \
 
 - **Graph visualization** — `graphvis.ipynb`: TODO document the canonical cells to run.
 - **PaperBench score extractor** — TODO: add a script that reads `frontier-evals/project/paperbench/runs/*.json` and appends one row per (paper, run) into the experiment CSV (see *Token budget accounting* in `CLAUDE.md`).
+- **Push CSVs to Google Sheets** — TODO next session: generic `push_csv_to_gsheet.py {csv_path} {sheet_id} {tab_name}` that upserts by `paper` column. First user: token budget CSV from §5. Decide auth method (service account vs OAuth) before implementing.
 - **Other ad-hoc analyses** — add commands here as they appear.
