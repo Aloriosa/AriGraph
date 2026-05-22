@@ -63,6 +63,22 @@ Continual reproduction runs can span many papers and many hours; crashes mid-run
 - LaTeX for the paper draft.
 - No package — everything runs as scripts from the repo root.
 
+### Conda env — CRUCIAL
+
+**Always run code/tests from a bash terminal with the `arigraph` conda env active.** The base/default `python` lacks the project deps (`openai`, torch, vLLM client, etc.) — running without the env will fail with `ModuleNotFoundError`. Activate first, every time:
+
+```bash
+conda activate arigraph
+```
+
+Since shell state does not persist between separate command invocations, run a single combined command when activation is needed in a fresh shell:
+
+```bash
+source "$(conda info --base)/etc/profile.d/conda.sh" && conda activate arigraph && python <script>.py ...
+```
+
+Never verify a script "works" with the default interpreter — it gives a false negative.
+
 ## Hardware notes
 
 - User uses **GPUs 6/7** for vLLM, NV12 NVLink between them.
