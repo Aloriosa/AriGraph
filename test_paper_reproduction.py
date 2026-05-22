@@ -16,7 +16,7 @@ from graphs.contriever_graph import ContrieverGraph
 from utils.retriever_search_drafts import graph_retr_search
 from utils.utils import Logger, clear_triplet
 
-from openai import OpenAI, APITimeoutError
+from openai import OpenAI, APITimeoutError, DefaultHttpxClient
 from dotenv import load_dotenv # you'll need to pip install python-dotenv
 
 load_dotenv()
@@ -985,12 +985,14 @@ def run_reproduction_test(log, args, paper_path, device="cpu", log_path="",
     paper_graph.emb_cache = emb_cache
     mem_graph.emb_cache = emb_cache
 
-    # Bound per-call wall-clock. Without this a stalled (queued on the shared GPUs)
-    # or repetition-looping generation never raises, so the chunk-extraction retry
-    # loop below can't fire and a single call blocks for many minutes. With a timeout
-    # the call raises promptly and the existing retry kicks in early.
-    paper_graph.client = paper_graph.client.with_options(timeout=llm_timeout_s)
-    mem_graph.client = mem_graph.client.with_options(timeout=llm_timeout_s)
+    # Bound per-call wall-clock so a stalled/looping generation raises instead of
+    # blocking for many minutes; the chunk-extraction retry loop then fires early.
+    # The timeout MUST be baked into the httpx client: a custom http_client overrides
+    # the SDK-level timeout, so client.with_options(timeout=) is silently ignored.
+    paper_graph.client = OpenAI(base_url=base_url, api_key=api_key,
+                                http_client=DefaultHttpxClient(verify=False, timeout=llm_timeout_s))
+    mem_graph.client = OpenAI(base_url=base_url, api_key=api_key,
+                              http_client=DefaultHttpxClient(verify=False, timeout=llm_timeout_s))
     log(f"LLM per-call timeout: {llm_timeout_s}s")
 
     if os.path.exists(
@@ -1028,14 +1030,12 @@ def run_reproduction_test(log, args, paper_path, device="cpu", log_path="",
                 log(f"Chunk preview: {chunk[:100]}...")
 
                 
-                retries = 3
-                while retries > 0:
+                # One retry on timeout; if it times out again, skip the chunk and proceed (no crash).
+                # Non-timeout errors propagate (let it crash).
+                for attempt in (1, 2):
                     try:
-                        log(f"Try {4-retries}/{retries}")
                         new_triplets_paper, _ = paper_graph.update_without_retrieve(chunk, [], log, source_type="paper")
                         section_triplets_paper.extend(new_triplets_paper)
-                        new_triplets_mem = None
-                        
                         new_triplets_mem, _ = mem_graph.update_without_retrieve(chunk, [], log, source_type="paper")
                         section_triplets_mem.extend(new_triplets_mem)
                         log(f"{datetime.datetime.now()} Chunk {j+1}/{len(chunks)} done")
@@ -1044,21 +1044,19 @@ def run_reproduction_test(log, args, paper_path, device="cpu", log_path="",
                             for triplet in new_triplets_paper[:3]:
                                 subj, obj, rel = triplet
                                 log(f"  - ({subj}) --[{rel.get('label', 'N/A')}]--> ({obj})")
-                        
                         if new_triplets_mem:
                             log("Sample triplets mem:")
                             for triplet in new_triplets_mem[:3]:
                                 subj, obj, rel = triplet
                                 log(f"  - ({subj}) --[{rel.get('label', 'N/A')}]--> ({obj})")
                         break
-                    except Exception as e:
-                        log(f"Error processing chunk: {str(e)}")
-                        retries -= 1
-                        if retries > 0:
-                            log(f"Retrying ({retries} left)...")
+                    except APITimeoutError:
+                        if attempt == 1:
+                            log(f"Chunk {j+1}/{len(chunks)} timed out; retrying once...")
                             sleep(5)
-                        else:
-                            raise e
+                            continue
+                        log(f"Chunk {j+1}/{len(chunks)} timed out again; skipping chunk and proceeding.")
+                        break
 
             section_time = time() - section_start_time
 

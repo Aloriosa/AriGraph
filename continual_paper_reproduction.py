@@ -38,7 +38,7 @@ from pathlib import Path
 from time import time
 
 from dotenv import load_dotenv
-from openai import APITimeoutError
+from openai import OpenAI, APITimeoutError, DefaultHttpxClient
 
 load_dotenv()
 
@@ -327,7 +327,10 @@ def _load_paper_graph(slug: str, paper_graph_json: str, model: str, api_key: str
         type="paper",
     )
     paper_graph.emb_cache = emb_cache
-    paper_graph.client = paper_graph.client.with_options(timeout=llm_timeout_s)
+    # Timeout must be baked into the httpx client; a custom http_client overrides the
+    # SDK-level timeout, so with_options(timeout=) is silently ignored.
+    paper_graph.client = OpenAI(base_url=base_url, api_key=api_key,
+                                http_client=DefaultHttpxClient(verify=False, timeout=llm_timeout_s))
     if not os.path.isfile(paper_graph_json):
         raise FileNotFoundError(f"Missing paper graph for {slug}: {paper_graph_json}")
     paper_graph.load_triplets_from_json(paper_graph_json, clear_first=True)
@@ -371,8 +374,11 @@ def run_continual(
         type="mem",
     )
     mem_graph.emb_cache = emb_cache
-    # Bound per-call wall-clock so a stalled/looping LLM call raises instead of blocking for many minutes.
-    mem_graph.client = mem_graph.client.with_options(timeout=llm_timeout_s)
+    # Bound per-call wall-clock so a stalled/looping LLM call raises instead of blocking.
+    # Timeout must be baked into the httpx client (a custom http_client overrides the
+    # SDK-level timeout, so with_options(timeout=) is silently ignored).
+    mem_graph.client = OpenAI(base_url=base_url, api_key=api_key,
+                              http_client=DefaultHttpxClient(verify=False, timeout=llm_timeout_s))
     log(f"LLM per-call timeout: {llm_timeout_s}s (on timeout the failing unit is skipped)")
     # mem_graph.load_triplets_from_json(os.path.abspath(bootstrap_mem_json), clear_first=True)
     # log(f"Bootstrap theory graph from {bootstrap_mem_json} ({len(mem_graph.triplets)} triplets, {len(mem_graph.triplet2code)} code links)")
